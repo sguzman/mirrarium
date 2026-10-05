@@ -678,7 +678,7 @@ impl CaptureStore {
         anyhow::ensure!(
             matches!(
                 resource_type.to_ascii_lowercase().as_str(),
-                "script" | "stylesheet" | "image"
+                "script" | "stylesheet" | "image" | "font"
             ),
             "refusing replay telemetry for unsupported resource type"
         );

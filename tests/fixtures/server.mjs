@@ -13,6 +13,7 @@ const certPath = join(certificateDirectory, "cert.pem");
 let staticCssHits = 0;
 let staticJsHits = 0;
 let staticImageHits = 0;
+let staticFontHits = 0;
 
 execFileSync("openssl", [
   "req",
@@ -132,7 +133,19 @@ const fixtureServer = https.createServer(
         "content-type": "text/css",
         "cache-control": "public, max-age=31536000, immutable",
       });
-      response.end("body { font-family: sans-serif; }");
+      response.end(
+        '@font-face { font-family: "MirrariumFixture"; src: url("/_next/static/fixture.woff2") format("woff2"); } body { font-family: "MirrariumFixture", sans-serif; }',
+      );
+      return;
+    }
+
+    if (request.url === "/_next/static/fixture.woff2") {
+      staticFontHits += 1;
+      response.writeHead(200, {
+        "content-type": "font/woff2",
+        "cache-control": "public, max-age=31536000, immutable",
+      });
+      response.end(Buffer.from("fixture-woff2-placeholder"));
       return;
     }
 
@@ -388,6 +401,7 @@ const healthServer = http.createServer((request, response) => {
       css: staticCssHits,
       js: staticJsHits,
       image: staticImageHits,
+      font: staticFontHits,
     }));
     return;
   }
