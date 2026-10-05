@@ -23,6 +23,37 @@ pub struct CorpusStats {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AttachmentObservationView {
+    pub capture_id: String,
+    pub sequence: u64,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub attachment_id: Option<String>,
+    pub file_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub sanitized_url: Option<String>,
+    pub source_url: String,
+    pub json_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AttachmentDownloadView {
+    pub download_capture_id: String,
+    pub source_url: String,
+    pub mime_type: String,
+    pub privacy_class: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AttachmentView {
+    pub observation: AttachmentObservationView,
+    pub downloads: Vec<AttachmentDownloadView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ConversationSummary {
     pub conversation_id: String,
     pub title: Option<String>,
@@ -469,6 +500,97 @@ pub fn conversation(
         messages,
         streams,
     }))
+}
+
+
+pub fn attachments(
+    raw_root: impl AsRef<Path>,
+    conversation_id: Option<&str>,
+    limit: u64,
+) -> Result<Vec<AttachmentView>> {
+    anyhow::ensure!(limit > 0, "attachment limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id,
+            sequence,
+            conversation_id,
+            message_id,
+            attachment_id,
+            file_name,
+            mime_type,
+            size_bytes,
+            sanitized_url,
+            source_url,
+            json_path
+        FROM attachment_observations
+        WHERE (?1 IS NULL OR conversation_id = ?1)
+        ORDER BY rowid
+        LIMIT ?2
+        "#,
+    )?;
+    let observations = statement
+        .query_map(params![conversation_id, limit as i64], |row| {
+            Ok(AttachmentObservationView {
+                capture_id: row.get(0)?,
+                sequence: row.get::<_, i64>(1)? as u64,
+                conversation_id: row.get(2)?,
+                message_id: row.get(3)?,
+                attachment_id: row.get(4)?,
+                file_name: row.get(5)?,
+                mime_type: row.get(6)?,
+                size_bytes: row
+                    .get::<_, Option<i64>>(7)?
+                    .and_then(|value| value.try_into().ok()),
+                sanitized_url: row.get(8)?,
+                source_url: row.get(9)?,
+                json_path: row.get(10)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    observations
+        .into_iter()
+        .map(|observation| {
+            let mut download_statement = connection.prepare(
+                r#"
+                SELECT
+                    download_capture_id,
+                    source_url,
+                    mime_type,
+                    privacy_class,
+                    body_hash,
+                    body_bytes
+                FROM attachment_downloads
+                WHERE attachment_capture_id = ?1
+                  AND attachment_sequence = ?2
+                ORDER BY rowid
+                "#,
+            )?;
+            let downloads = download_statement
+                .query_map(
+                    params![observation.capture_id, observation.sequence as i64],
+                    |row| {
+                        Ok(AttachmentDownloadView {
+                            download_capture_id: row.get(0)?,
+                            source_url: row.get(1)?,
+                            mime_type: row.get(2)?,
+                            privacy_class: row.get(3)?,
+                            body_hash: row.get(4)?,
+                            body_bytes: row.get::<_, i64>(5)? as u64,
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            Ok(AttachmentView {
+                observation,
+                downloads,
+            })
+        })
+        .collect()
 }
 
 pub fn canonical(
