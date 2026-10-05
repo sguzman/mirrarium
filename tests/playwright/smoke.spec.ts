@@ -59,25 +59,31 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   }
 
   try {
-    const nativeManifestPath = join(
-      browserHome,
+    const nativeManifest = JSON.stringify({
+      name: nativeHostName,
+      description: "Mirrarium test native host",
+      path: daemonPath,
+      type: "stdio",
+      allowed_origins: [`chrome-extension://${expectedExtensionId}/`],
+    });
+    const nativeManifestDirectories = [
+      ".config/google-chrome-for-testing/NativeMessagingHosts",
       ".config/chromium/NativeMessagingHosts",
-      `${nativeHostName}.json`,
-    );
-    await mkdir(dirname(nativeManifestPath), { recursive: true });
+      ".config/google-chrome/NativeMessagingHosts",
+    ];
+
+    for (const directory of nativeManifestDirectories) {
+      const nativeManifestPath = join(
+        browserHome,
+        directory,
+        `${nativeHostName}.json`,
+      );
+      await mkdir(dirname(nativeManifestPath), { recursive: true });
+      await writeFile(nativeManifestPath, nativeManifest);
+    }
+
     await mkdir(userDataDir, { recursive: true });
     await mkdir(dataDir, { recursive: true });
-
-    await writeFile(
-      nativeManifestPath,
-      JSON.stringify({
-        name: nativeHostName,
-        description: "Mirrarium test native host",
-        path: daemonPath,
-        type: "stdio",
-        allowed_origins: [`chrome-extension://${expectedExtensionId}/`],
-      }),
-    );
 
     const context = await chromium.launchPersistentContext(userDataDir, {
       channel: "chromium",
