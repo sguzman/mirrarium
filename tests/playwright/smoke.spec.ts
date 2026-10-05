@@ -67,17 +67,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       allowed_origins: [`chrome-extension://${expectedExtensionId}/`],
     });
     const nativeManifestDirectories = [
-      ".config/google-chrome-for-testing/NativeMessagingHosts",
-      ".config/chromium/NativeMessagingHosts",
-      ".config/google-chrome/NativeMessagingHosts",
+      join(userDataDir, "NativeMessagingHosts"),
+      join(browserHome, ".config/google-chrome-for-testing/NativeMessagingHosts"),
+      join(browserHome, ".config/chromium/NativeMessagingHosts"),
+      join(browserHome, ".config/google-chrome/NativeMessagingHosts"),
     ];
 
     for (const directory of nativeManifestDirectories) {
-      const nativeManifestPath = join(
-        browserHome,
-        directory,
-        `${nativeHostName}.json`,
-      );
+      const nativeManifestPath = join(directory, `${nativeHostName}.json`);
       await mkdir(dirname(nativeManifestPath), { recursive: true });
       await writeFile(nativeManifestPath, nativeManifest);
     }
@@ -109,6 +106,33 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(worker.url()).toBe(
         `chrome-extension://${expectedExtensionId}/background.js`,
       );
+
+      const nativePing = await worker.evaluate(async (hostName) => {
+        const chromeApi = (globalThis as typeof globalThis & {
+          chrome: {
+            runtime: {
+              lastError?: { message?: string };
+              sendNativeMessage(
+                name: string,
+                message: unknown,
+                callback: (response: unknown) => void,
+              ): void;
+            };
+          };
+        }).chrome;
+
+        return await new Promise<unknown>((resolve, reject) => {
+          chromeApi.runtime.sendNativeMessage(hostName, { type: "ping" }, (response) => {
+            const error = chromeApi.runtime.lastError;
+            if (error) {
+              reject(new Error(error.message ?? "native messaging failed"));
+              return;
+            }
+            resolve(response);
+          });
+        });
+      }, nativeHostName);
+      expect(nativePing).toEqual({ type: "pong" });
 
       const page = await context.newPage();
 
