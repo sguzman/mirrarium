@@ -1,8 +1,16 @@
-use std::{env, process::ExitCode};
+use std::{
+    env,
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use anyhow::{Context, Result};
 use mirrarium_corpus as corpus;
 use mirrarium_store::{default_data_root, CaptureStore};
+
+const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
+const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 
 fn main() -> ExitCode {
     match run() {
@@ -16,6 +24,11 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let arguments: Vec<String> = env::args().skip(1).collect();
+
+    if arguments.first().map(String::as_str) == Some("native-host") {
+        return handle_native_host(&arguments[1..]);
+    }
+
     let root = default_data_root()?;
     let store = CaptureStore::open(&root)?;
 
@@ -107,6 +120,180 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+
+fn handle_native_host(arguments: &[String]) -> Result<()> {
+    match arguments.first().map(String::as_str) {
+        Some("install") => {
+            let browser = arguments.get(1).map(String::as_str).unwrap_or("edge");
+            let host_path = resolve_native_host_binary(arguments.get(2).map(String::as_str))?;
+            let manifest_path = install_native_host(browser, &host_path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "browser": browser,
+                    "manifest_path": manifest_path,
+                    "host_path": host_path,
+                    "extension_id": EXTENSION_ID,
+                }))?
+            );
+        }
+        Some("status") => {
+            let browser = arguments.get(1).map(String::as_str).unwrap_or("edge");
+            let manifest_path = native_host_manifest_path(browser)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "browser": browser,
+                    "manifest_path": manifest_path,
+                    "installed": manifest_path.is_file(),
+                }))?
+            );
+        }
+        Some("uninstall") => {
+            let browser = arguments.get(1).map(String::as_str).unwrap_or("edge");
+            let manifest_path = native_host_manifest_path(browser)?;
+            let removed = if manifest_path.is_file() {
+                fs::remove_file(&manifest_path)
+                    .with_context(|| format!("removing {}", manifest_path.display()))?;
+                true
+            } else {
+                false
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "browser": browser,
+                    "manifest_path": manifest_path,
+                    "removed": removed,
+                }))?
+            );
+        }
+        Some(command) => anyhow::bail!(
+            "unknown native-host command {command:?}; use install, status, or uninstall"
+        ),
+        None => anyhow::bail!(
+            "missing native-host command; use 'mirrarium native-host install'"
+        ),
+    }
+
+    Ok(())
+}
+
+fn install_native_host(browser: &str, host_path: &Path) -> Result<PathBuf> {
+    let manifest_path = native_host_manifest_path(browser)?;
+    let parent = manifest_path
+        .parent()
+        .context("native-host manifest path has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating {}", parent.display()))?;
+
+    let manifest = serde_json::json!({
+        "name": NATIVE_HOST_NAME,
+        "description": "Mirrarium native messaging host",
+        "path": host_path.to_string_lossy(),
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest)?;
+    let temp_path = parent.join(format!(".{NATIVE_HOST_NAME}.{}.tmp", std::process::id()));
+
+    fs::write(&temp_path, bytes)
+        .with_context(|| format!("writing {}", temp_path.display()))?;
+    harden_manifest_file(&temp_path)?;
+    fs::rename(&temp_path, &manifest_path).with_context(|| {
+        format!(
+            "moving {} to {}",
+            temp_path.display(),
+            manifest_path.display()
+        )
+    })?;
+    harden_manifest_file(&manifest_path)?;
+
+    Ok(manifest_path)
+}
+
+fn native_host_manifest_path(browser: &str) -> Result<PathBuf> {
+    let user_data_dir = if let Some(path) = env::var_os("MIRRARIUM_BROWSER_USER_DATA_DIR") {
+        PathBuf::from(path)
+    } else {
+        let config_root = if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
+            PathBuf::from(path)
+        } else {
+            let home = env::var_os("HOME")
+                .context("set HOME, XDG_CONFIG_HOME, or MIRRARIUM_BROWSER_USER_DATA_DIR")?;
+            PathBuf::from(home).join(".config")
+        };
+        browser_user_data_dir(browser, &config_root)?
+    };
+
+    Ok(user_data_dir
+        .join("NativeMessagingHosts")
+        .join(format!("{NATIVE_HOST_NAME}.json")))
+}
+
+fn browser_user_data_dir(browser: &str, config_root: &Path) -> Result<PathBuf> {
+    let directory = match browser {
+        "edge" => "microsoft-edge",
+        "chromium" => "chromium",
+        "chrome" => "google-chrome",
+        "chrome-for-testing" => "google-chrome-for-testing",
+        other => anyhow::bail!(
+            "unsupported browser {other:?}; use edge, chromium, chrome, or chrome-for-testing"
+        ),
+    };
+    Ok(config_root.join(directory))
+}
+
+fn resolve_native_host_binary(explicit: Option<&str>) -> Result<PathBuf> {
+    let candidate = explicit
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("MIRRARIUMD_PATH").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            env::current_exe()
+                .map(|path| path.with_file_name("mirrariumd"))
+                .unwrap_or_else(|_| PathBuf::from("mirrariumd"))
+        });
+
+    anyhow::ensure!(
+        candidate.is_file(),
+        "native host binary does not exist: {}",
+        candidate.display()
+    );
+    let canonical = fs::canonicalize(&candidate)
+        .with_context(|| format!("resolving {}", candidate.display()))?;
+    ensure_executable(&canonical)?;
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn ensure_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)?.permissions().mode();
+    anyhow::ensure!(
+        mode & 0o111 != 0,
+        "native host is not executable: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_manifest_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("hardening {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn harden_manifest_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "Mirrarium local corpus/cache inspector
@@ -120,9 +307,36 @@ USAGE:
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>
+  mirrarium native-host install [BROWSER] [MIRRARIUMD_PATH]
+  mirrarium native-host status [BROWSER]
+  mirrarium native-host uninstall [BROWSER]
+
+NATIVE HOST:
+  BROWSER defaults to edge.
+  MIRRARIUM_BROWSER_USER_DATA_DIR overrides the browser user-data root.
 
 DATA ROOT:
   MIRRARIUM_DATA_DIR, then XDG_DATA_HOME/mirrarium,
   then ~/.local/share/mirrarium"
     );
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_manifest_paths_match_linux_user_data_layouts() {
+        let root = Path::new("/tmp/config");
+        assert_eq!(
+            browser_user_data_dir("edge", root).unwrap(),
+            root.join("microsoft-edge")
+        );
+        assert_eq!(
+            browser_user_data_dir("chrome-for-testing", root).unwrap(),
+            root.join("google-chrome-for-testing")
+        );
+        assert!(browser_user_data_dir("unknown", root).is_err());
+    }
 }
