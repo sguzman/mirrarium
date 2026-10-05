@@ -69,6 +69,7 @@ mirrarium corpus stats
 mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
+mirrarium corpus attachments [conversation-id] [limit]
 mirrarium native-host install
 mirrarium native-host status
 ```
@@ -76,6 +77,8 @@ mirrarium native-host status
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
 
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
+
+`corpus attachments` lists attachment observations extracted from structured JSON and any captured download bodies correlated to them. Correlation requires the same sanitized URL identity; signed query credentials are redacted before persistence and are never treated as durable attachment identity.
 
 ## Linux native-host install
 

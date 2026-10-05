@@ -108,12 +108,12 @@ Implemented:
 - reconstructed stream text from conversation-tagged SSE deltas;
 - read-only conversation discovery and evidence inspection through the CLI;
 - branch-aware canonical conversation views computed from immutable snapshot evidence;
+- structured attachment observations and captured-download correlation by sanitized URL identity;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
-- attachment/download correlation without treating signed URLs as durable credentials;
-- deeper redirect/body semantics where Chromium exposes safe evidence;
 - stream-to-message linkage and revision-aware canonical tail merging;
+- deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.
