@@ -64,6 +64,8 @@ The Rust CLI reads the same local store as the native host:
 mirrarium stats
 mirrarium captures 20
 mirrarium verify
+mirrarium cache stats
+mirrarium cache candidates [limit]
 mirrarium corpus rebuild
 mirrarium corpus stats
 mirrarium corpus conversations 50
@@ -76,6 +78,10 @@ mirrarium native-host status
 ```
 
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
+
+`cache stats` and `cache candidates` audit the public replay surface. A candidate must be a successful public GET with a stored body, a static resource type, explicit `Cache-Control: immutable`, and exactly one observed body hash for its URL. Replay is stricter still: v1 only fulfills exact query-free ChatGPT `/_next/static/` script and stylesheet URLs, caps bodies at 16 MiB, re-verifies the public CAS path, byte count, and SHA-256 before serving, and fails open to the network on any miss, timeout, corruption, ambiguity, or native-host error.
+
+Verified hits are streamed from the native host in sub-1-MiB messages and fulfilled through CDP Fetch. The Chromium integration test disables the browser's ordinary cache and verifies Mirrarium's replay marker while proving the origin receives no additional JS/CSS requests.
 
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
 

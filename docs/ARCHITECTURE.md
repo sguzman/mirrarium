@@ -113,11 +113,16 @@ Implemented:
 - temporal gating that prevents stream evidence older than the canonical snapshot from rewriting it;
 - explicit derived-corpus schema versioning with rebuild-required failure semantics;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
+- immutable public-resource replay candidate inventory and policy auditing;
+- verified public-CAS replay lookup with URL/type restrictions, 16 MiB ceiling, path/length/SHA-256 validation;
+- chunked native-host replay transport kept below Chrome's per-message host-to-extension limit;
+- fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts and stylesheets;
+- Chromium end-to-end proof that replay still works with browser cache disabled and avoids origin requests;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
-- immutable public-resource replay candidate inventory and policy auditing;
+- replay hit/miss/byte observability before expanding the replay surface;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.
