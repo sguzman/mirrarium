@@ -436,10 +436,10 @@ fn insert_message_observation(
             capture_id,
             source_kind,
             sequence as i64,
-            message.conversation_id,
-            message.message_id,
-            message.role,
-            message.content_text,
+            message.conversation_id.as_deref(),
+            message.message_id.as_deref(),
+            message.role.as_deref(),
+            message.content_text.as_deref(),
             source_url,
         ],
     )?;
@@ -447,8 +447,9 @@ fn insert_message_observation(
 }
 
 fn extract_conversation(value: &Value, source_url: &str) -> Option<ConversationExtraction> {
-    let conversation_id =
-        conversation_id_from_value(value).or_else(|| conversation_id_from_url(source_url))?;
+    let conversation_id = conversation_id_from_value(value)
+        .or_else(|| value.get("id").and_then(Value::as_str).map(str::to_owned))
+        .or_else(|| conversation_id_from_url(source_url))?;
     let title = value
         .get("title")
         .and_then(Value::as_str)
@@ -725,6 +726,22 @@ mod tests {
             extracted.messages[1].content_text.as_deref(),
             Some("hi there")
         );
+    }
+
+    #[test]
+    fn prefers_root_conversation_id_over_url_fallback() {
+        let value = serde_json::json!({
+            "id": "root-conversation",
+            "title": "Root ID",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        let extracted = extract_conversation(
+            &value,
+            "https://chatgpt.com/backend-api/conversation/url-fallback",
+        )
+        .unwrap();
+        assert_eq!(extracted.conversation_id, "root-conversation");
     }
 
     #[test]
