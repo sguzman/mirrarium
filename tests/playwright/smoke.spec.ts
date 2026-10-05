@@ -261,6 +261,41 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       ).then((response) => response.json())) as { css: number; js: number };
       expect(replayCountsAfter).toEqual(replayCountsBefore);
 
+      type ReplayStats = {
+        attempts: number;
+        hits: number;
+        misses: number;
+        lookup_errors: number;
+        timeouts: number;
+        fulfill_errors: number;
+        replayed_bytes: number;
+      };
+      const readReplayStats = async (): Promise<ReplayStats> => {
+        const { stdout } = await execFileAsync(
+          cliPath,
+          ["cache", "replay-stats"],
+          {
+            env: {
+              ...process.env,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+        return JSON.parse(stdout) as ReplayStats;
+      };
+
+      await expect
+        .poll(async () => (await readReplayStats()).hits, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(2);
+      const replayStats = await readReplayStats();
+      expect(replayStats.attempts).toBeGreaterThanOrEqual(4);
+      expect(replayStats.hits).toBeGreaterThanOrEqual(2);
+      expect(replayStats.misses).toBeGreaterThanOrEqual(2);
+      expect(replayStats.replayed_bytes).toBeGreaterThan(0);
+      expect(replayStats.lookup_errors).toBe(0);
+      expect(replayStats.timeouts).toBe(0);
+      expect(replayStats.fulfill_errors).toBe(0);
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "20"],
