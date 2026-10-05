@@ -116,7 +116,7 @@ Implemented:
 - immutable public-resource replay candidate inventory and policy auditing;
 - verified public-CAS replay lookup with URL/type restrictions, 16 MiB ceiling, path/length/SHA-256 validation;
 - chunked native-host replay transport kept below Chrome's per-message host-to-extension limit;
-- fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts and stylesheets;
+- fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts, stylesheets, and images;
 - Chromium end-to-end proof that replay still works with browser cache disabled and avoids origin requests;
 - privacy-bounded durable replay outcome telemetry with hit/miss/error/timeout/fulfillment buckets and replayed-byte totals;
 - Chromium cold-to-warm lifecycle proof covering initial misses, warm hits, saved bytes, and zero healthy-path replay errors;
@@ -124,7 +124,7 @@ Implemented:
 
 Next:
 
-- cautiously expand verified immutable replay to additional static resource classes, starting with images;
+- cautiously expand verified immutable replay to same-origin static fonts before considering additional hosts;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.
