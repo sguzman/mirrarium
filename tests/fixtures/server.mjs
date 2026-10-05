@@ -63,8 +63,17 @@ Promise.all([
     }),
   }).then((response) => response.json()),
   fetch("/backend-api/conversation/stream").then((response) => response.text()),
-  fetch("/backend-api/conversation/stream-tail").then((response) => response.json()),
-  fetch("/backend-api/conversation/stream-tail/events").then((response) => response.text()),
+  fetch("/backend-api/conversation/stream-tail")
+    .then((response) => response.json())
+    .then(
+      () =>
+        new Promise((resolve) => setTimeout(resolve, 50)),
+    )
+    .then(() =>
+      fetch("/backend-api/conversation/stream-tail/events").then((response) =>
+        response.text(),
+      ),
+    ),
   fetch("/backend-api/redirect-start").then((response) => response.text()),
   fetch("/backend-api/upload-fixture", {
     method: "POST",
