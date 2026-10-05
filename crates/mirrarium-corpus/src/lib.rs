@@ -76,6 +76,18 @@ pub struct MessageObservationView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct StreamMessageRevisionView {
+    pub capture_id: String,
+    pub sequence: u64,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub parent_id: Option<String>,
+    pub role: Option<String>,
+    pub content_text: Option<String>,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StreamReconstructionView {
     pub capture_id: String,
     pub conversation_id: String,
@@ -538,6 +550,52 @@ pub fn conversation(
     }))
 }
 
+
+pub fn stream_message_revisions(
+    raw_root: impl AsRef<Path>,
+    conversation_id: &str,
+    limit: u64,
+) -> Result<Vec<StreamMessageRevisionView>> {
+    anyhow::ensure!(
+        !conversation_id.trim().is_empty(),
+        "conversation id must not be empty"
+    );
+    anyhow::ensure!(limit > 0, "stream revision limit must be greater than zero");
+
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id,
+            sequence,
+            conversation_id,
+            message_id,
+            parent_id,
+            role,
+            content_text,
+            source_url
+        FROM stream_message_revisions
+        WHERE conversation_id = ?1
+        ORDER BY rowid
+        LIMIT ?2
+        "#,
+    )?;
+
+    Ok(statement
+        .query_map(params![conversation_id, limit as i64], |row| {
+            Ok(StreamMessageRevisionView {
+                capture_id: row.get(0)?,
+                sequence: row.get::<_, i64>(1)? as u64,
+                conversation_id: row.get(2)?,
+                message_id: row.get(3)?,
+                parent_id: row.get(4)?,
+                role: row.get(5)?,
+                content_text: row.get(6)?,
+                source_url: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
 
 pub fn attachments(
     raw_root: impl AsRef<Path>,
