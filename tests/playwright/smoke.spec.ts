@@ -62,7 +62,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
     );
 
     const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
+      channel: "chromium",
+      headless: true,
       ignoreHTTPSErrors: true,
       env: {
         ...process.env,

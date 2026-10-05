@@ -2,9 +2,11 @@
 
 ## Canonical browser
 
-Automated QA uses **Playwright's Chromium**.
+Automated QA uses **Playwright's bundled Chromium**, explicitly selected with the `chromium` channel.
 
-Microsoft Edge is not an automated test browser for this repository.
+Microsoft Edge and branded Google Chrome are not automated test browsers for this repository.
+
+Playwright's Chromium channel supports extension testing in the real new-headless browser, so the canonical suite does not require Xvfb or a desktop session.
 
 ## Personal Edge prohibition
 
@@ -49,7 +51,7 @@ That proves both classification and privacy-scoped deduplication.
 
 The standard suite does not require OpenAI credentials or a real ChatGPT account.
 
-Any future live-site suite must be separately named, opt-in, and still use an isolated Chromium profile.
+Any future live-site suite must be separately named, opt-in, and still use an isolated Playwright Chromium profile.
 
 ## Codex contract
 
