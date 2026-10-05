@@ -199,10 +199,16 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         stream_captures: number;
         stream_events: number;
         json_stream_events: number;
+        conversation_snapshots: number;
+        message_observations: number;
+        stream_reconstructions: number;
       };
       expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
       expect(corpusStats.json_stream_events).toBeGreaterThanOrEqual(2);
+      expect(corpusStats.conversation_snapshots).toBeGreaterThanOrEqual(1);
+      expect(corpusStats.message_observations).toBeGreaterThanOrEqual(1);
+      expect(corpusStats.stream_reconstructions).toBeGreaterThanOrEqual(1);
     } finally {
       await context.close();
     }

@@ -34,7 +34,9 @@ Raw observations are evidence and are content-addressed.
 
 Derived records are interpretations and must remain rebuildable from raw evidence.
 
-The first derived adapter is protocol-agnostic SSE reconstruction. Any captured `text/event-stream` response is reparsed from its immutable CAS object into `derived/corpus.sqlite3`, preserving capture provenance, event order, event names, and event data. JSON validity is indexed without discarding non-JSON frames such as `[DONE]`.
+The first derived adapters are protocol-agnostic SSE reconstruction plus conservative ChatGPT-shaped conversation extraction. Captured `text/event-stream` responses are reparsed from immutable CAS objects into `derived/corpus.sqlite3`, preserving capture provenance, event order, event names, and event data. JSON validity is indexed without discarding non-JSON frames such as `[DONE]`.
+
+Conversation derivation deliberately stores observations rather than pretending there is already one canonical transcript. JSON conversation snapshots, message observations, and stream-delta reconstructions retain their source capture IDs and URLs. Canonical conversation views can be built later from this evidence without destroying revisions, branches, or protocol drift.
 
 ## Public/private boundary
 
@@ -99,12 +101,14 @@ Implemented:
 - CLI-readable JSON store statistics;
 - local ChatGPT-shaped fixture traffic;
 - Playwright/Chromium end-to-end capture test;
-- rebuildable SSE event derivation into a separate corpus database.
+- rebuildable SSE event derivation into a separate corpus database;
+- conversation snapshots and message observations from ChatGPT-shaped JSON;
+- reconstructed stream text from conversation-tagged SSE deltas.
 
 Next:
 
 - redirect-chain preservation and explicit request lifecycle identities;
 - multipart/upload provenance without unsafe raw-body archival;
-- ChatGPT-specific conversation/message reconstruction from raw JSON + derived stream events;
+- canonical conversation views across snapshots, branches, and stream revisions;
 - native-host installation tooling for normal Edge deployment;
 - encryption/key management for private storage.

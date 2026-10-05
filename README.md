@@ -52,7 +52,7 @@ Mirrarium keeps three distinct conceptual stores:
 - `private/`: account- or conversation-derived material such as conversation responses, messages, streams, metadata, and attachments.
 - `derived/`: rebuildable structured representations and indexes derived from immutable raw evidence.
 
-Raw evidence is preserved. Derived representations may be deleted and rebuilt as parsers improve.
+Raw evidence is preserved. Derived representations may be deleted and rebuilt as parsers improve. The current derived corpus retains conversation snapshots, message observations, SSE events, and reconstructed stream text with source-capture provenance rather than destructively collapsing them into one transcript.
 
 Reusable authentication secrets are not archival data and must not be persisted. Credential-bearing auth/session bodies are suppressed, credential-like query parameters are redacted before URLs are written to the ledger, request bodies are sanitized before persistence, and sensitive request/response headers are redacted before transport provenance is stored.
 
