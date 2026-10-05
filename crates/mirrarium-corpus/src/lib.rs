@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -55,6 +55,28 @@ pub struct ConversationView {
     pub summary: ConversationSummary,
     pub messages: Vec<MessageObservationView>,
     pub streams: Vec<StreamReconstructionView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CanonicalMessageView {
+    pub message_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub role: Option<String>,
+    pub content_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CanonicalConversationView {
+    pub conversation_id: String,
+    pub title: Option<String>,
+    pub basis_capture_id: String,
+    pub basis_source_url: String,
+    pub basis_source_body_hash: String,
+    pub basis_kind: String,
+    pub current_node: Option<String>,
+    pub messages: Vec<CanonicalMessageView>,
+    pub unlinked_streams: Vec<StreamReconstructionView>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +380,103 @@ pub fn conversation(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    let streams = stream_views_for_conversation(&connection, conversation_id)?;
+
+    Ok(Some(ConversationView {
+        summary,
+        messages,
+        streams,
+    }))
+}
+
+pub fn canonical(
+    raw_root: impl AsRef<Path>,
+    conversation_id: &str,
+) -> Result<Option<CanonicalConversationView>> {
+    anyhow::ensure!(
+        !conversation_id.trim().is_empty(),
+        "conversation id must not be empty"
+    );
+
+    let raw_root = raw_root.as_ref();
+    let connection = open_corpus_read_only(raw_root)?;
+    let snapshot = connection
+        .query_row(
+            r#"
+            SELECT
+                capture_id,
+                title,
+                source_url,
+                privacy_class,
+                source_body_hash
+            FROM conversation_snapshots
+            WHERE conversation_id = ?1
+            ORDER BY rowid DESC
+            LIMIT 1
+            "#,
+            [conversation_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((capture_id, title, source_url, privacy_class, source_body_hash)) = snapshot else {
+        return Ok(None);
+    };
+
+    let source_path = object_path(raw_root, &privacy_class, &source_body_hash)?;
+    let bytes = fs::read(&source_path)
+        .with_context(|| format!("reading canonical snapshot {}", source_path.display()))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("canonical snapshot is not JSON: {}", source_path.display()))?;
+
+    let (basis_kind, current_node, messages, mut warnings) =
+        canonical_messages_from_snapshot(&value);
+
+    if let Some(snapshot_id) = conversation_id_from_value(&value)
+        .or_else(|| value.get("id").and_then(Value::as_str).map(str::to_owned))
+        .or_else(|| conversation_id_from_url(&source_url))
+    {
+        if snapshot_id != conversation_id {
+            warnings.push(format!(
+                "snapshot conversation id {snapshot_id:?} does not match requested id {conversation_id:?}"
+            ));
+        }
+    }
+
+    let unlinked_streams = stream_views_for_conversation(&connection, conversation_id)?;
+    if !unlinked_streams.is_empty() {
+        warnings.push(
+            "stream reconstructions are preserved separately because no safe message linkage is known"
+                .to_owned(),
+        );
+    }
+
+    Ok(Some(CanonicalConversationView {
+        conversation_id: conversation_id.to_owned(),
+        title,
+        basis_capture_id: capture_id,
+        basis_source_url: source_url,
+        basis_source_body_hash: source_body_hash,
+        basis_kind,
+        current_node,
+        messages,
+        unlinked_streams,
+        warnings,
+    }))
+}
+
+fn stream_views_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<StreamReconstructionView>> {
     let mut stream_statement = connection.prepare(
         r#"
         SELECT
@@ -371,7 +490,7 @@ pub fn conversation(
         ORDER BY rowid
         "#,
     )?;
-    let streams = stream_statement
+    Ok(stream_statement
         .query_map([conversation_id], |row| {
             Ok(StreamReconstructionView {
                 capture_id: row.get(0)?,
@@ -381,13 +500,111 @@ pub fn conversation(
                 fragment_count: row.get::<_, i64>(4)? as u64,
             })
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
 
-    Ok(Some(ConversationView {
-        summary,
-        messages,
-        streams,
-    }))
+fn canonical_messages_from_snapshot(
+    value: &Value,
+) -> (
+    String,
+    Option<String>,
+    Vec<CanonicalMessageView>,
+    Vec<String>,
+) {
+    let mut warnings = Vec::new();
+
+    if let Some(mapping) = value.get("mapping").and_then(Value::as_object) {
+        let current_node = value
+            .get("current_node")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        let Some(mut cursor) = current_node.clone() else {
+            warnings.push(
+                "mapping snapshot has no current_node; refusing to guess a canonical branch"
+                    .to_owned(),
+            );
+            return (
+                "mapping_without_current_node".to_owned(),
+                None,
+                Vec::new(),
+                warnings,
+            );
+        };
+
+        let mut seen = BTreeSet::new();
+        let mut reversed = Vec::new();
+
+        loop {
+            if !seen.insert(cursor.clone()) {
+                warnings.push(format!(
+                    "mapping parent cycle detected at node {cursor:?}; branch truncated"
+                ));
+                break;
+            }
+
+            let Some(node) = mapping.get(&cursor) else {
+                warnings.push(format!(
+                    "current branch references missing node {cursor:?}; branch truncated"
+                ));
+                break;
+            };
+
+            let parent_id = node
+                .get("parent")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+
+            if let Some(message) = extract_message(node, Some(&cursor)) {
+                reversed.push(CanonicalMessageView {
+                    message_id: message.message_id,
+                    parent_id: parent_id.clone(),
+                    role: message.role,
+                    content_text: message.content_text,
+                });
+            }
+
+            let Some(parent_id) = parent_id else {
+                break;
+            };
+            cursor = parent_id;
+        }
+
+        reversed.reverse();
+        return (
+            "mapping_current_node".to_owned(),
+            current_node,
+            reversed,
+            warnings,
+        );
+    }
+
+    if let Some(items) = value.get("messages").and_then(Value::as_array) {
+        let messages = items
+            .iter()
+            .filter_map(|item| extract_message(item, None))
+            .map(|message| CanonicalMessageView {
+                message_id: message.message_id,
+                parent_id: None,
+                role: message.role,
+                content_text: message.content_text,
+            })
+            .collect();
+        return (
+            "messages_array".to_owned(),
+            None,
+            messages,
+            warnings,
+        );
+    }
+
+    warnings.push("snapshot has neither mapping nor messages array".to_owned());
+    (
+        "unsupported_snapshot_shape".to_owned(),
+        None,
+        Vec::new(),
+        warnings,
+    )
 }
 
 fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
@@ -982,6 +1199,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(extracted.conversation_id, "root-conversation");
+    }
+
+    #[test]
+    fn canonical_mapping_follows_current_node_and_preserves_branch_choice() {
+        let value = serde_json::json!({
+            "id": "branch-test",
+            "current_node": "assistant-b",
+            "mapping": {
+                "root": {
+                    "parent": null,
+                    "children": ["user-1"],
+                    "message": null
+                },
+                "user-1": {
+                    "parent": "root",
+                    "children": ["assistant-a", "assistant-b"],
+                    "message": {
+                        "id": "user-1",
+                        "author": {"role": "user"},
+                        "content": {"parts": ["question"]}
+                    }
+                },
+                "assistant-a": {
+                    "parent": "user-1",
+                    "children": [],
+                    "message": {
+                        "id": "assistant-a",
+                        "author": {"role": "assistant"},
+                        "content": {"parts": ["discarded"]}
+                    }
+                },
+                "assistant-b": {
+                    "parent": "user-1",
+                    "children": [],
+                    "message": {
+                        "id": "assistant-b",
+                        "author": {"role": "assistant"},
+                        "content": {"parts": ["chosen"]}
+                    }
+                }
+            }
+        });
+
+        let (basis, current_node, messages, warnings) =
+            canonical_messages_from_snapshot(&value);
+        assert_eq!(basis, "mapping_current_node");
+        assert_eq!(current_node.as_deref(), Some("assistant-b"));
+        assert!(warnings.is_empty());
+        assert_eq!(
+            messages,
+            vec![
+                CanonicalMessageView {
+                    message_id: Some("user-1".to_owned()),
+                    parent_id: Some("root".to_owned()),
+                    role: Some("user".to_owned()),
+                    content_text: Some("question".to_owned()),
+                },
+                CanonicalMessageView {
+                    message_id: Some("assistant-b".to_owned()),
+                    parent_id: Some("user-1".to_owned()),
+                    role: Some("assistant".to_owned()),
+                    content_text: Some("chosen".to_owned()),
+                },
+            ]
+        );
     }
 
     #[test]

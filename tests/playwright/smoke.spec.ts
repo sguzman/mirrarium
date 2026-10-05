@@ -355,6 +355,62 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ]),
       );
 
+      const { stdout: branchedEvidenceStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "conversation", "fixture-branched"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const branchedEvidence = JSON.parse(branchedEvidenceStdout) as {
+        messages: Array<{ content_text?: string }>;
+      };
+      expect(branchedEvidence.messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ content_text: "discarded branch" }),
+          expect.objectContaining({ content_text: "chosen branch" }),
+        ]),
+      );
+
+      const { stdout: canonicalStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "canonical", "fixture-branched"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const canonical = JSON.parse(canonicalStdout) as {
+        conversation_id: string;
+        basis_kind: string;
+        current_node?: string;
+        messages: Array<{
+          message_id?: string;
+          parent_id?: string;
+          role?: string;
+          content_text?: string;
+        }>;
+        warnings: string[];
+      };
+      expect(canonical).toMatchObject({
+        conversation_id: "fixture-branched",
+        basis_kind: "mapping_current_node",
+        current_node: "assistant-b",
+      });
+      expect(canonical.warnings).toEqual([]);
+      expect(canonical.messages.map((message) => message.content_text)).toEqual([
+        "question",
+        "chosen branch",
+      ]);
+      expect(canonical.messages.map((message) => message.content_text)).not.toContain(
+        "discarded branch",
+      );
+
       const { stdout: streamConversationStdout } = await execFileAsync(
         cliPath,
         ["corpus", "conversation", "fixture-stream"],

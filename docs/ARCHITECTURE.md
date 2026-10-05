@@ -36,7 +36,7 @@ Derived records are interpretations and must remain rebuildable from raw evidenc
 
 The first derived adapters are protocol-agnostic SSE reconstruction plus conservative ChatGPT-shaped conversation extraction. Captured `text/event-stream` responses are reparsed from immutable CAS objects into `derived/corpus.sqlite3`, preserving capture provenance, event order, event names, and event data. JSON validity is indexed without discarding non-JSON frames such as `[DONE]`.
 
-Conversation derivation deliberately stores observations rather than pretending there is already one canonical transcript. JSON conversation snapshots, message observations, and stream-delta reconstructions retain their source capture IDs and URLs. Canonical conversation views can be built later from this evidence without destroying revisions, branches, or protocol drift.
+Conversation derivation stores observations first. JSON conversation snapshots, message observations, and stream-delta reconstructions retain their source capture IDs and URLs. A read-only canonical view is then computed from the newest immutable JSON snapshot: when ChatGPT supplies a mapping plus `current_node`, Mirrarium walks that node's parent chain and returns only the selected branch. Other branch observations remain intact in the evidence corpus. Stream reconstructions stay separate unless a safe message linkage is known.
 
 ## Public/private boundary
 
@@ -106,12 +106,13 @@ Implemented:
 - rebuildable SSE event derivation into a separate corpus database;
 - conversation snapshots and message observations from ChatGPT-shaped JSON;
 - reconstructed stream text from conversation-tagged SSE deltas;
-- read-only conversation discovery and evidence inspection through the CLI.
+- read-only conversation discovery and evidence inspection through the CLI;
+- branch-aware canonical conversation views computed from immutable snapshot evidence.
 
 Next:
 
 - attachment/download correlation without treating signed URLs as durable credentials;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
-- canonical conversation views across snapshots, branches, and stream revisions;
+- stream-to-message linkage and revision-aware canonical tail merging;
 - native-host installation tooling for normal Edge deployment;
 - encryption/key management for private storage.

@@ -83,6 +83,18 @@ fn run() -> Result<()> {
                     .with_context(|| format!("conversation {conversation_id:?} not found"))?;
                 println!("{}", serde_json::to_string_pretty(&view)?);
             }
+            Some("canonical") => {
+                let conversation_id = arguments
+                    .get(2)
+                    .context("missing conversation id")?;
+                let view = corpus::canonical(&root, conversation_id)?
+                    .with_context(|| {
+                        format!(
+                            "conversation {conversation_id:?} has no JSON snapshot for canonicalization"
+                        )
+                    })?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            }
             Some(command) => anyhow::bail!(
                 "unknown corpus command {command:?}; run 'mirrarium help'"
             ),
@@ -107,6 +119,7 @@ USAGE:
   mirrarium corpus stats
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
+  mirrarium corpus canonical <ID>
 
 DATA ROOT:
   MIRRARIUM_DATA_DIR, then XDG_DATA_HOME/mirrarium,

@@ -40,6 +40,7 @@ const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
 Promise.all([
   fetch("/backend-api/conversation/test").then((response) => response.json()),
+  fetch("/backend-api/conversation/branch-fixture").then((response) => response.json()),
   fetch("/backend-api/repeat/a").then((response) => response.text()),
   fetch("/backend-api/repeat/b").then((response) => response.text()),
   fetch("/backend-api/conversation/post", {
@@ -113,6 +114,53 @@ const fixtureServer = https.createServer(
         id: "fixture-conversation",
         title: "Private fixture",
         messages: [{ role: "user", content: "private corpus material" }],
+      }));
+      return;
+    }
+
+    if (request.url === "/backend-api/conversation/branch-fixture") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        etag: "\"fixture-branched-v1\"",
+      });
+      response.end(JSON.stringify({
+        id: "fixture-branched",
+        title: "Branched fixture",
+        current_node: "assistant-b",
+        mapping: {
+          root: {
+            parent: null,
+            children: ["user-1"],
+            message: null,
+          },
+          "user-1": {
+            parent: "root",
+            children: ["assistant-a", "assistant-b"],
+            message: {
+              id: "user-1",
+              author: { role: "user" },
+              content: { parts: ["question"] },
+            },
+          },
+          "assistant-a": {
+            parent: "user-1",
+            children: [],
+            message: {
+              id: "assistant-a",
+              author: { role: "assistant" },
+              content: { parts: ["discarded branch"] },
+            },
+          },
+          "assistant-b": {
+            parent: "user-1",
+            children: [],
+            message: {
+              id: "assistant-b",
+              author: { role: "assistant" },
+              content: { parts: ["chosen branch"] },
+            },
+          },
+        },
       }));
       return;
     }
