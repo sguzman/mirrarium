@@ -152,6 +152,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         method: string;
         url: string;
         status: number;
+        request_body_kind?: string;
+        request_body_content_type?: string;
+        request_body_has_post_data?: boolean;
+        request_body_post_data_entry_count?: number;
+        request_body_declared_content_length?: number;
+        request_body_hash?: string;
+        request_body_bytes: number;
+        request_body_error?: string;
         provenance: {
           lifecycle_id?: string;
           redirect_hop?: number;
@@ -213,6 +221,19 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ),
       );
       expect(redirectHeaders.location).not.toContain("fixture-redirect-secret");
+
+      const uploadCapture = captures.find((capture) =>
+        capture.url.includes("/backend-api/upload-fixture"),
+      );
+      expect(uploadCapture).toBeTruthy();
+      expect(uploadCapture?.request_body_kind).toBe("multipart");
+      expect(uploadCapture?.request_body_has_post_data).toBe(true);
+      expect(uploadCapture?.request_body_content_type).toContain("multipart/form-data");
+      expect(uploadCapture?.request_body_hash).toBeFalsy();
+      expect(uploadCapture?.request_body_bytes).toBe(0);
+      expect(uploadCapture?.request_body_error).toContain(
+        "multipart_request_body_not_archived",
+      );
 
       const privateObjects = await readFilesRecursively(join(dataDir, "private", "objects"));
       const requestBodyObjects = privateObjects

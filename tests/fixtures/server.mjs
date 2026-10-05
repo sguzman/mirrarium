@@ -55,7 +55,20 @@ Promise.all([
     }),
   }).then((response) => response.json()),
   fetch("/backend-api/conversation/stream").then((response) => response.text()),
-  fetch("/backend-api/redirect-start").then((response) => response.text())
+  fetch("/backend-api/redirect-start").then((response) => response.text()),
+  fetch("/backend-api/upload-fixture", {
+    method: "POST",
+    body: (() => {
+      const form = new FormData();
+      form.append("note", "upload metadata only");
+      form.append(
+        "file",
+        new Blob(["fixture-file-bytes"], { type: "text/plain" }),
+        "fixture.txt",
+      );
+      return form;
+    })(),
+  }).then((response) => response.json())
 ]).then(() => {
   document.body.dataset.ready = "yes";
 });
@@ -101,6 +114,15 @@ const fixtureServer = https.createServer(
         title: "Private fixture",
         messages: [{ role: "user", content: "private corpus material" }],
       }));
+      return;
+    }
+
+    if (request.url === "/backend-api/upload-fixture" && request.method === "POST") {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true }));
+      });
       return;
     }
 

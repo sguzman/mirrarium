@@ -20,7 +20,7 @@ ChatGPT tab
 
 For an attached ChatGPT tab the extension records CDP request/response metadata and waits for `Network.loadingFinished`.
 
-Outbound JSON and URL-encoded request bodies are captured through CDP as private-only evidence. The extension redacts credential-like fields before transport; the Rust daemon re-parses and re-redacts the body in bounded memory before any request-body bytes are allowed onto disk. Opaque, multipart, oversized, auth/session, or otherwise unsupported request bodies are recorded as suppressed rather than archived unsafely.
+Outbound JSON and URL-encoded request bodies are captured through CDP as private-only evidence. The extension redacts credential-like fields before transport; the Rust daemon re-parses and re-redacts the body in bounded memory before any request-body bytes are allowed onto disk. Opaque, multipart, oversized, auth/session, or otherwise unsupported request bodies are recorded as suppressed rather than archived unsafely. Multipart/upload requests still retain safe structural provenance: content type, whether CDP reports post data, post-data entry count, and declared Content-Length when available. Raw multipart entries and file bytes are never copied into Mirrarium storage at this stage.
 
 For response bodies the extension calls `Network.getResponseBody`, converts the decoded body to raw bytes, and transports those bytes to `mirrariumd` as ordered base64 chunks. Chunks are deliberately far below Chromium's native-messaging message limit.
 
@@ -91,6 +91,7 @@ Implemented:
 - sanitized transport provenance: request/response headers, frame and loader identity, initiator, wall-clock timing, response protocol, and browser-cache/service-worker/prefetch signals;
 - redirect-chain preservation with stable lifecycle IDs, hop numbers, and sanitized previous-URL provenance;
 - outbound JSON/form request-body capture with extension + daemon secret filtering;
+- metadata-only multipart/upload provenance without raw form/file archival;
 - completed response-body extraction;
 - ordered chunk transport over a persistent Native Messaging port;
 - Rust native host framing and typed protocol;
@@ -108,7 +109,7 @@ Implemented:
 
 Next:
 
-- multipart/upload provenance without unsafe raw-body archival;
+- attachment/download correlation without treating signed URLs as durable credentials;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - canonical conversation views across snapshots, branches, and stream revisions;
 - native-host installation tooling for normal Edge deployment;

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use mirrarium_protocol::{CaptureMetadata, CaptureProvenance};
+use mirrarium_protocol::{CaptureMetadata, CaptureProvenance, RequestBodyMetadata};
 use rusqlite::{params, types::Type, Connection};
 use serde::Serialize;
 use serde_json::Value;
@@ -79,6 +79,11 @@ pub struct CaptureSummary {
     pub request_body_hash: Option<String>,
     pub request_body_bytes: u64,
     pub request_body_error: Option<String>,
+    pub request_body_kind: Option<String>,
+    pub request_body_content_type: Option<String>,
+    pub request_body_has_post_data: Option<bool>,
+    pub request_body_post_data_entry_count: Option<u32>,
+    pub request_body_declared_content_length: Option<u64>,
     pub provenance: CaptureProvenance,
 }
 
@@ -90,7 +95,7 @@ pub struct VerifyReport {
 }
 
 struct RequestBodyCapture {
-    content_type: Option<String>,
+    metadata: RequestBodyMetadata,
     bytes: Vec<u8>,
     next_sequence: u32,
     finished: bool,
@@ -180,15 +185,44 @@ impl CaptureStore {
                 content_type TEXT,
                 body_hash TEXT,
                 body_bytes INTEGER NOT NULL,
-                body_error TEXT
+                body_error TEXT,
+                body_kind TEXT NOT NULL DEFAULT 'unknown',
+                has_post_data INTEGER NOT NULL DEFAULT 0,
+                post_data_entry_count INTEGER,
+                declared_content_length INTEGER
             );
             "#,
         )?;
 
-        ensure_capture_column(
+        ensure_table_column(
             &connection,
+            "captures",
             "provenance_json",
             "TEXT NOT NULL DEFAULT '{}'",
+        )?;
+        ensure_table_column(
+            &connection,
+            "request_bodies",
+            "body_kind",
+            "TEXT NOT NULL DEFAULT 'unknown'",
+        )?;
+        ensure_table_column(
+            &connection,
+            "request_bodies",
+            "has_post_data",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_table_column(
+            &connection,
+            "request_bodies",
+            "post_data_entry_count",
+            "INTEGER",
+        )?;
+        ensure_table_column(
+            &connection,
+            "request_bodies",
+            "declared_content_length",
+            "INTEGER",
         )?;
 
         Ok(Self {
@@ -281,7 +315,7 @@ impl CaptureStore {
     pub fn begin_request_body(
         &mut self,
         capture_id: &str,
-        content_type: Option<String>,
+        metadata: RequestBodyMetadata,
     ) -> Result<()> {
         let capture = self
             .in_flight
@@ -299,7 +333,7 @@ impl CaptureStore {
             .map(|reason| format!("suppressed:{reason}"));
 
         capture.request_body = Some(RequestBodyCapture {
-            content_type,
+            metadata,
             bytes: Vec::new(),
             next_sequence: 0,
             finished: false,
@@ -380,7 +414,7 @@ impl CaptureStore {
             request_body.error = Some(error.to_owned());
         } else if request_body.error.is_none() {
             match sanitize_request_body(
-                request_body.content_type.as_deref(),
+                request_body.metadata.content_type.as_deref(),
                 &request_body.bytes,
             ) {
                 Ok(bytes) => request_body.bytes = bytes,
@@ -591,6 +625,11 @@ impl CaptureStore {
                 request_bodies.body_hash,
                 COALESCE(request_bodies.body_bytes, 0),
                 request_bodies.body_error,
+                request_bodies.body_kind,
+                request_bodies.content_type,
+                request_bodies.has_post_data,
+                request_bodies.post_data_entry_count,
+                request_bodies.declared_content_length,
                 captures.provenance_json
             FROM captures
             LEFT JOIN request_bodies USING (capture_id)
@@ -614,9 +653,20 @@ impl CaptureStore {
                 request_body_hash: row.get(10)?,
                 request_body_bytes: row.get::<_, i64>(11)? as u64,
                 request_body_error: row.get(12)?,
-                provenance: serde_json::from_str(&row.get::<_, String>(13)?).map_err(
+                request_body_kind: row.get(13)?,
+                request_body_content_type: row.get(14)?,
+                request_body_has_post_data: row
+                    .get::<_, Option<i64>>(15)?
+                    .map(|value| value != 0),
+                request_body_post_data_entry_count: row
+                    .get::<_, Option<i64>>(16)?
+                    .and_then(|value| u32::try_from(value).ok()),
+                request_body_declared_content_length: row
+                    .get::<_, Option<i64>>(17)?
+                    .and_then(|value| u64::try_from(value).ok()),
+                provenance: serde_json::from_str(&row.get::<_, String>(18)?).map_err(
                     |error| rusqlite::Error::FromSqlConversionFailure(
-                        13,
+                        18,
                         Type::Text,
                         Box::new(error),
                     ),
@@ -803,19 +853,36 @@ impl CaptureStore {
             body_hash = Some(hash);
         }
 
+        let body_kind = request_body_kind(request_body.metadata.content_type.as_deref());
         self.connection.execute(
             r#"
-            INSERT INTO request_bodies
-                (capture_id, content_type, body_hash, body_bytes, body_error)
+            INSERT INTO request_bodies (
+                capture_id,
+                content_type,
+                body_hash,
+                body_bytes,
+                body_error,
+                body_kind,
+                has_post_data,
+                post_data_entry_count,
+                declared_content_length
+            )
             VALUES
-                (?1, ?2, ?3, ?4, ?5)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
                 capture_id,
-                request_body.content_type,
+                request_body.metadata.content_type,
                 body_hash,
                 body_bytes as i64,
                 request_body.error,
+                body_kind,
+                if request_body.metadata.has_post_data { 1_i64 } else { 0_i64 },
+                request_body.metadata.post_data_entry_count.map(i64::from),
+                request_body
+                    .metadata
+                    .declared_content_length
+                    .and_then(|value| i64::try_from(value).ok()),
             ],
         )?;
 
@@ -883,12 +950,22 @@ impl CaptureStore {
     }
 }
 
-fn ensure_capture_column(
+fn ensure_table_column(
     connection: &Connection,
+    table_name: &str,
     column_name: &str,
     definition: &str,
 ) -> Result<()> {
-    let mut statement = connection.prepare("PRAGMA table_info(captures)")?;
+    for identifier in [table_name, column_name] {
+        anyhow::ensure!(
+            identifier
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "invalid SQLite identifier"
+        );
+    }
+
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table_name})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
 
     for column in columns {
@@ -897,14 +974,8 @@ fn ensure_capture_column(
         }
     }
 
-    anyhow::ensure!(
-        column_name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
-        "invalid capture column name"
-    );
     connection.execute(
-        &format!("ALTER TABLE captures ADD COLUMN {column_name} {definition}"),
+        &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"),
         [],
     )?;
     Ok(())
@@ -975,6 +1046,21 @@ pub fn default_data_root() -> Result<PathBuf> {
     }
 
     anyhow::bail!("set MIRRARIUM_DATA_DIR, XDG_DATA_HOME, or HOME")
+}
+
+fn request_body_kind(content_type: Option<&str>) -> &'static str {
+    let content_type = content_type.unwrap_or("").to_ascii_lowercase();
+    if content_type.contains("multipart/form-data") {
+        "multipart"
+    } else if content_type.contains("json") {
+        "json"
+    } else if content_type.contains("application/x-www-form-urlencoded") {
+        "form"
+    } else if content_type.is_empty() {
+        "unknown"
+    } else {
+        "opaque"
+    }
 }
 
 fn sanitize_request_body(
@@ -1388,7 +1474,15 @@ mod tests {
         meta.method = "POST".to_owned();
         store.begin(meta).unwrap();
         store
-            .begin_request_body("request-body", Some("application/json".to_owned()))
+            .begin_request_body(
+                "request-body",
+                RequestBodyMetadata {
+                    content_type: Some("application/json".to_owned()),
+                    has_post_data: true,
+                    post_data_entry_count: Some(1),
+                    declared_content_length: Some(150),
+                },
+            )
             .unwrap();
         store
             .append_request_body_chunk(
@@ -1410,6 +1504,14 @@ mod tests {
         assert_eq!(stats.suppressed_request_bodies, 0);
 
         let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        assert_eq!(capture.request_body_kind.as_deref(), Some("json"));
+        assert_eq!(
+            capture.request_body_content_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(capture.request_body_has_post_data, Some(true));
+        assert_eq!(capture.request_body_post_data_entry_count, Some(1));
+        assert_eq!(capture.request_body_declared_content_length, Some(150));
         let hash = capture.request_body_hash.unwrap();
         let path = directory
             .path()
@@ -1434,7 +1536,15 @@ mod tests {
             ))
             .unwrap();
         store
-            .begin_request_body("opaque-request", Some("application/octet-stream".to_owned()))
+            .begin_request_body(
+                "opaque-request",
+                RequestBodyMetadata {
+                    content_type: Some("application/octet-stream".to_owned()),
+                    has_post_data: true,
+                    post_data_entry_count: Some(2),
+                    declared_content_length: Some(4096),
+                },
+            )
             .unwrap();
         store
             .append_request_body_chunk(
@@ -1455,6 +1565,9 @@ mod tests {
         let capture = store.recent_captures(1).unwrap().pop().unwrap();
         assert!(capture.request_body_hash.is_none());
         assert_eq!(capture.request_body_bytes, 0);
+        assert_eq!(capture.request_body_kind.as_deref(), Some("opaque"));
+        assert_eq!(capture.request_body_post_data_entry_count, Some(2));
+        assert_eq!(capture.request_body_declared_content_length, Some(4096));
     }
 
     #[test]

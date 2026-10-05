@@ -23,6 +23,15 @@ pub struct CaptureProvenance {
     pub response_headers: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RequestBodyMetadata {
+    pub content_type: Option<String>,
+    pub has_post_data: bool,
+    pub post_data_entry_count: Option<u32>,
+    pub declared_content_length: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureMetadata {
     pub capture_id: String,
@@ -51,7 +60,7 @@ pub enum HostRequest {
     },
     RequestBodyStart {
         capture_id: String,
-        content_type: Option<String>,
+        metadata: RequestBodyMetadata,
     },
     RequestBodyChunk {
         capture_id: String,

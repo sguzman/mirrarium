@@ -9,6 +9,8 @@ type RequestMetadata = {
   postData?: string;
   hasPostData?: boolean;
   contentType?: string;
+  postDataEntryCount?: number;
+  declaredContentLength?: number;
   headers: Record<string, string>;
   frameId?: string;
   loaderId?: string;
@@ -245,6 +247,13 @@ function sanitizeHeaders(
   return sanitized;
 }
 
+function parseNonNegativeInteger(value: string | undefined): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value.trim())) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return undefined;
+  return parsed;
+}
+
 function secondsToMilliseconds(value: number | undefined): number | undefined {
   if (value === undefined || !Number.isFinite(value) || value < 0) return undefined;
   return Math.trunc(value * 1000);
@@ -389,7 +398,12 @@ async function captureRequestBody(
   postNative({
     type: "request_body_start",
     capture_id: captureId,
-    content_type: request.contentType,
+    metadata: {
+      content_type: request.contentType,
+      has_post_data: request.hasPostData ?? request.postData !== undefined,
+      post_data_entry_count: request.postDataEntryCount,
+      declared_content_length: request.declaredContentLength,
+    },
   });
 
   if (shouldSuppressResponseBody(request.url)) {
@@ -689,6 +703,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         url: string;
         postData?: string;
         hasPostData?: boolean;
+        postDataEntries?: Array<{ bytes?: string }>;
         headers?: Record<string, string | number>;
       };
     };
@@ -717,6 +732,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       postData: event.request.postData,
       hasPostData: event.request.hasPostData,
       contentType: header(event.request.headers, "content-type"),
+      postDataEntryCount: event.request.postDataEntries?.length,
+      declaredContentLength: parseNonNegativeInteger(
+        header(event.request.headers, "content-length"),
+      ),
       headers: sanitizeHeaders(event.request.headers),
       frameId: event.frameId,
       loaderId: event.loaderId,

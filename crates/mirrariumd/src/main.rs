@@ -61,8 +61,8 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         } => store.append_chunk(&capture_id, sequence, &data_base64),
         HostRequest::RequestBodyStart {
             capture_id,
-            content_type,
-        } => store.begin_request_body(&capture_id, content_type),
+            metadata,
+        } => store.begin_request_body(&capture_id, metadata),
         HostRequest::RequestBodyChunk {
             capture_id,
             sequence,
