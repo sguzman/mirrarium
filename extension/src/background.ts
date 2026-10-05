@@ -127,6 +127,32 @@ function header(
   return undefined;
 }
 
+function shouldSuppressResponseBody(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (
+      url.hostname !== "chatgpt.com" &&
+      url.hostname !== "chat.openai.com"
+    ) {
+      return false;
+    }
+
+    const path = url.pathname.toLowerCase();
+    return (
+      path === "/api/auth" ||
+      path.startsWith("/api/auth/") ||
+      path === "/auth" ||
+      path.startsWith("/auth/") ||
+      path.startsWith("/backend-api/auth/") ||
+      path.includes("/oauth/") ||
+      path.endsWith("/oauth") ||
+      path.includes("/login")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function postBase64Body(captureId: string, body: string): void {
   const chunkSize = BASE64_CHUNK_CHARS - (BASE64_CHUNK_CHARS % 4);
   let sequence = 0;
@@ -202,6 +228,19 @@ async function captureBody(
       cache_control: response?.cacheControl,
     },
   });
+
+  if (response && shouldSuppressResponseBody(response.url)) {
+    postNative({
+      type: "capture_finish",
+      capture_id: captureId,
+      encoded_data_length:
+        encodedDataLength === undefined
+          ? undefined
+          : Math.max(0, Math.trunc(encodedDataLength)),
+      body_error: "suppressed:credential_endpoint",
+    });
+    return;
+  }
 
   if (failure) {
     postNative({

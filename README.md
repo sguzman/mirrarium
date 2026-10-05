@@ -54,7 +54,7 @@ Mirrarium keeps three distinct conceptual stores:
 
 Raw evidence is preserved. Derived representations may be deleted and rebuilt as parsers improve.
 
-Reusable authentication secrets are not archival data and must not be persisted.
+Reusable authentication secrets are not archival data and must not be persisted. Credential-bearing auth/session bodies are suppressed, and credential-like query parameters are redacted before URLs are written to the ledger.
 
 ## Inspection CLI
 

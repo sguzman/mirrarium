@@ -54,6 +54,7 @@ pub struct StoreStats {
     pub unknown_objects: u64,
     pub captured_body_bytes: u64,
     pub body_errors: u64,
+    pub suppressed_bodies: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +85,7 @@ struct InFlightCapture {
     hasher: Sha256,
     bytes: u64,
     next_sequence: u32,
+    suppressed_reason: Option<String>,
 }
 
 pub struct CaptureStore {
@@ -160,12 +162,15 @@ impl CaptureStore {
         })
     }
 
-    pub fn begin(&mut self, metadata: CaptureMetadata) -> Result<()> {
+    pub fn begin(&mut self, mut metadata: CaptureMetadata) -> Result<()> {
         anyhow::ensure!(
             !self.in_flight.contains_key(&metadata.capture_id),
             "capture already in flight: {}",
             metadata.capture_id
         );
+
+        let suppressed_reason = credential_endpoint_reason(&metadata.url).map(str::to_owned);
+        metadata.url = sanitize_url_for_storage(&metadata.url);
 
         let temp_name = format!("{}.part", sha256_hex(metadata.capture_id.as_bytes()));
         let temp_path = self.root.join(".incoming").join(temp_name);
@@ -186,6 +191,7 @@ impl CaptureStore {
                 hasher: Sha256::new(),
                 bytes: 0,
                 next_sequence: 0,
+                suppressed_reason,
             },
         );
 
@@ -208,6 +214,14 @@ impl CaptureStore {
             "out-of-order chunk for {capture_id}: expected {}, got {sequence}",
             capture.next_sequence
         );
+
+        if capture.suppressed_reason.is_some() {
+            capture.next_sequence = capture
+                .next_sequence
+                .checked_add(1)
+                .context("capture sequence overflow")?;
+            return Ok(());
+        }
 
         let bytes = BASE64
             .decode(data_base64)
@@ -242,6 +256,21 @@ impl CaptureStore {
 
         let privacy = classify(&capture.metadata);
         let captured_at_ms = now_ms()?;
+
+        if let Some(reason) = capture.suppressed_reason.as_deref() {
+            let marker = format!("suppressed:{reason}");
+            let _ = fs::remove_file(&capture.temp_path);
+            self.insert_capture(
+                &capture.metadata,
+                privacy,
+                None,
+                0,
+                encoded_data_length,
+                Some(&marker),
+                captured_at_ms,
+            )?;
+            return Ok(());
+        }
 
         if let Some(error) = body_error {
             let _ = fs::remove_file(&capture.temp_path);
@@ -350,7 +379,11 @@ impl CaptureStore {
             )?,
             body_errors: scalar_u64(
                 &self.connection,
-                "SELECT COUNT(*) FROM captures WHERE body_error IS NOT NULL",
+                "SELECT COUNT(*) FROM captures WHERE body_error IS NOT NULL AND body_error NOT LIKE 'suppressed:%'",
+            )?,
+            suppressed_bodies: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE body_error LIKE 'suppressed:%'",
             )?,
         })
     }
@@ -566,6 +599,83 @@ pub fn default_data_root() -> Result<PathBuf> {
     anyhow::bail!("set MIRRARIUM_DATA_DIR, XDG_DATA_HOME, or HOME")
 }
 
+pub fn sanitize_url_for_storage(raw_url: &str) -> String {
+    let Ok(mut url) = Url::parse(raw_url) else {
+        return raw_url.to_owned();
+    };
+
+    let query_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+
+    url.set_fragment(None);
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+
+    if !query_pairs.is_empty() {
+        url.set_query(None);
+        let mut query = url.query_pairs_mut();
+        for (key, value) in query_pairs {
+            if is_sensitive_query_key(&key) {
+                query.append_pair(&key, "[REDACTED]");
+            } else {
+                query.append_pair(&key, &value);
+            }
+        }
+    }
+
+    url.to_string()
+}
+
+pub fn credential_endpoint_reason(raw_url: &str) -> Option<&'static str> {
+    let url = Url::parse(raw_url).ok()?;
+    if !is_chatgpt_host(&url.host_str().unwrap_or_default().to_ascii_lowercase()) {
+        return None;
+    }
+
+    let path = url.path().to_ascii_lowercase();
+    if path == "/api/auth"
+        || path.starts_with("/api/auth/")
+        || path == "/auth"
+        || path.starts_with("/auth/")
+        || path.starts_with("/backend-api/auth/")
+        || path.contains("/oauth/")
+        || path.ends_with("/oauth")
+        || path.contains("/login")
+    {
+        return Some("credential_endpoint");
+    }
+
+    None
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "token"
+            | "access_token"
+            | "id_token"
+            | "refresh_token"
+            | "session"
+            | "session_token"
+            | "jwt"
+            | "code"
+            | "state"
+            | "sig"
+            | "signature"
+            | "authorization"
+            | "key"
+            | "api_key"
+            | "apikey"
+            | "x-amz-signature"
+            | "x-amz-credential"
+            | "x-amz-security-token"
+            | "policy"
+            | "key-pair-id"
+    )
+}
+
 pub fn classify(metadata: &CaptureMetadata) -> PrivacyClass {
     let Ok(url) = Url::parse(&metadata.url) else {
         return PrivacyClass::Unknown;
@@ -741,6 +851,46 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 1);
         assert_eq!(report.corrupt_objects, 1);
+    }
+
+    #[test]
+    fn credential_endpoint_body_is_never_persisted() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        store
+            .begin(metadata(
+                "auth-session",
+                "https://chatgpt.com/api/auth/session?access_token=secret#fragment",
+                "Fetch",
+            ))
+            .unwrap();
+        store
+            .append_chunk("auth-session", 0, &BASE64.encode(b"reusable credential"))
+            .unwrap();
+        store.finish("auth-session", Some(19), None).unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.captures, 1);
+        assert_eq!(stats.objects, 0);
+        assert_eq!(stats.suppressed_bodies, 1);
+        assert_eq!(stats.body_errors, 0);
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        assert!(!capture.url.contains("secret"));
+        assert!(!capture.url.contains("#fragment"));
+        assert!(capture.url.contains("access_token=%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn signed_url_secrets_are_redacted_without_suppressing_normal_content() {
+        let sanitized = sanitize_url_for_storage(
+            "https://files.example.test/object?x=1&X-Amz-Signature=abc&token=def#secret",
+        );
+        assert!(sanitized.contains("x=1"));
+        assert!(!sanitized.contains("abc"));
+        assert!(!sanitized.contains("def"));
+        assert!(!sanitized.contains("#secret"));
+        assert!(sanitized.matches("%5BREDACTED%5D").count() >= 2);
     }
 
     #[test]
