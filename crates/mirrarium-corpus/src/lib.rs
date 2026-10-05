@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OpenFlags, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 use serde_json::Value;
 use url::Url;
@@ -18,6 +18,43 @@ pub struct CorpusStats {
     pub conversation_snapshots: u64,
     pub message_observations: u64,
     pub stream_reconstructions: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConversationSummary {
+    pub conversation_id: String,
+    pub title: Option<String>,
+    pub snapshot_count: u64,
+    pub message_observation_count: u64,
+    pub stream_reconstruction_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageObservationView {
+    pub capture_id: String,
+    pub source_kind: String,
+    pub sequence: u64,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub role: Option<String>,
+    pub content_text: Option<String>,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamReconstructionView {
+    pub capture_id: String,
+    pub conversation_id: String,
+    pub source_url: String,
+    pub text: String,
+    pub fragment_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConversationView {
+    pub summary: ConversationSummary,
+    pub messages: Vec<MessageObservationView>,
+    pub streams: Vec<StreamReconstructionView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +268,209 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             "SELECT COUNT(*) FROM stream_reconstructions",
         )?,
     })
+}
+
+pub fn conversations(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<ConversationSummary>> {
+    anyhow::ensure!(limit > 0, "conversation limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT conversation_id
+        FROM (
+            SELECT conversation_id
+            FROM conversation_snapshots
+            UNION
+            SELECT conversation_id
+            FROM message_observations
+            WHERE conversation_id IS NOT NULL
+            UNION
+            SELECT conversation_id
+            FROM stream_reconstructions
+        )
+        ORDER BY conversation_id
+        LIMIT ?1
+        "#,
+    )?;
+    let ids = statement
+        .query_map([limit as i64], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    ids.into_iter()
+        .map(|conversation_id| {
+            conversation_summary(&connection, &conversation_id)?
+                .context("conversation disappeared while reading corpus")
+        })
+        .collect()
+}
+
+pub fn conversation(
+    raw_root: impl AsRef<Path>,
+    conversation_id: &str,
+    message_limit: u64,
+) -> Result<Option<ConversationView>> {
+    anyhow::ensure!(
+        !conversation_id.trim().is_empty(),
+        "conversation id must not be empty"
+    );
+    anyhow::ensure!(
+        message_limit > 0,
+        "message observation limit must be greater than zero"
+    );
+
+    let connection = open_corpus_read_only(raw_root)?;
+    let Some(summary) = conversation_summary(&connection, conversation_id)? else {
+        return Ok(None);
+    };
+
+    let mut message_statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id,
+            source_kind,
+            sequence,
+            conversation_id,
+            message_id,
+            role,
+            content_text,
+            source_url
+        FROM message_observations
+        WHERE conversation_id = ?1
+        ORDER BY rowid
+        LIMIT ?2
+        "#,
+    )?;
+    let messages = message_statement
+        .query_map(params![conversation_id, message_limit as i64], |row| {
+            Ok(MessageObservationView {
+                capture_id: row.get(0)?,
+                source_kind: row.get(1)?,
+                sequence: row.get::<_, i64>(2)? as u64,
+                conversation_id: row.get(3)?,
+                message_id: row.get(4)?,
+                role: row.get(5)?,
+                content_text: row.get(6)?,
+                source_url: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut stream_statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id,
+            conversation_id,
+            source_url,
+            text,
+            fragment_count
+        FROM stream_reconstructions
+        WHERE conversation_id = ?1
+        ORDER BY rowid
+        "#,
+    )?;
+    let streams = stream_statement
+        .query_map([conversation_id], |row| {
+            Ok(StreamReconstructionView {
+                capture_id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                source_url: row.get(2)?,
+                text: row.get(3)?,
+                fragment_count: row.get::<_, i64>(4)? as u64,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(Some(ConversationView {
+        summary,
+        messages,
+        streams,
+    }))
+}
+
+fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
+    let database = raw_root.as_ref().join("derived/corpus.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "derived corpus does not exist; run 'mirrarium corpus rebuild'"
+    );
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening {}", database.display()))?;
+
+    for table in [
+        "stream_captures",
+        "stream_events",
+        "conversation_snapshots",
+        "message_observations",
+        "stream_reconstructions",
+    ] {
+        anyhow::ensure!(
+            table_exists(&connection, table)?,
+            "derived corpus schema is out of date; run 'mirrarium corpus rebuild'"
+        );
+    }
+
+    Ok(connection)
+}
+
+fn conversation_summary(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Option<ConversationSummary>> {
+    let snapshot_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM conversation_snapshots WHERE conversation_id = ?1",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
+    let message_observation_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM message_observations WHERE conversation_id = ?1",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
+    let stream_reconstruction_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM stream_reconstructions WHERE conversation_id = ?1",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
+
+    if snapshot_count == 0
+        && message_observation_count == 0
+        && stream_reconstruction_count == 0
+    {
+        return Ok(None);
+    }
+
+    let title = connection
+        .query_row(
+            r#"
+            SELECT title
+            FROM conversation_snapshots
+            WHERE conversation_id = ?1
+              AND title IS NOT NULL
+            ORDER BY rowid DESC
+            LIMIT 1
+            "#,
+            [conversation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(Some(ConversationSummary {
+        conversation_id: conversation_id.to_owned(),
+        title,
+        snapshot_count: snapshot_count.try_into().context("negative snapshot count")?,
+        message_observation_count: message_observation_count
+            .try_into()
+            .context("negative message observation count")?,
+        stream_reconstruction_count: stream_reconstruction_count
+            .try_into()
+            .context("negative stream reconstruction count")?,
+    }))
 }
 
 fn collect_sources(

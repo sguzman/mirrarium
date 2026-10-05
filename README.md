@@ -66,9 +66,13 @@ mirrarium captures 20
 mirrarium verify
 mirrarium corpus rebuild
 mirrarium corpus stats
+mirrarium corpus conversations 50
+mirrarium corpus conversation <conversation-id>
 ```
 
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
+
+`corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. It intentionally does not collapse revisions into a canonical transcript yet.
 
 The data root is resolved from `MIRRARIUM_DATA_DIR`, then `XDG_DATA_HOME/mirrarium`, then `~/.local/share/mirrarium`.
 

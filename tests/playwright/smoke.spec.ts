@@ -291,6 +291,91 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.conversation_snapshots).toBeGreaterThanOrEqual(1);
       expect(corpusStats.message_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_reconstructions).toBeGreaterThanOrEqual(1);
+
+      const { stdout: conversationsStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "conversations", "20"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const conversations = JSON.parse(conversationsStdout) as Array<{
+        conversation_id: string;
+        title?: string;
+        snapshot_count: number;
+        message_observation_count: number;
+        stream_reconstruction_count: number;
+      }>;
+      const fixtureConversation = conversations.find(
+        (conversation) =>
+          conversation.conversation_id === "fixture-conversation",
+      );
+      const fixtureStream = conversations.find(
+        (conversation) => conversation.conversation_id === "fixture-stream",
+      );
+      expect(fixtureConversation).toMatchObject({
+        title: "Private fixture",
+        snapshot_count: 1,
+        message_observation_count: 1,
+      });
+      expect(fixtureStream?.stream_reconstruction_count).toBeGreaterThanOrEqual(1);
+
+      const { stdout: conversationStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "conversation", "fixture-conversation"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const conversation = JSON.parse(conversationStdout) as {
+        summary: { conversation_id: string; title?: string };
+        messages: Array<{
+          role?: string;
+          content_text?: string;
+          source_kind: string;
+        }>;
+      };
+      expect(conversation.summary).toMatchObject({
+        conversation_id: "fixture-conversation",
+        title: "Private fixture",
+      });
+      expect(conversation.messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "user",
+            content_text: "private corpus material",
+            source_kind: "json_snapshot",
+          }),
+        ]),
+      );
+
+      const { stdout: streamConversationStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "conversation", "fixture-stream"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const streamConversation = JSON.parse(streamConversationStdout) as {
+        streams: Array<{ text: string; fragment_count: number }>;
+      };
+      expect(streamConversation.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: "hello world",
+            fragment_count: 2,
+          }),
+        ]),
+      );
     } finally {
       await context.close();
     }

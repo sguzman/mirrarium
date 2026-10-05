@@ -105,7 +105,8 @@ Implemented:
 - Playwright/Chromium end-to-end capture test;
 - rebuildable SSE event derivation into a separate corpus database;
 - conversation snapshots and message observations from ChatGPT-shaped JSON;
-- reconstructed stream text from conversation-tagged SSE deltas.
+- reconstructed stream text from conversation-tagged SSE deltas;
+- read-only conversation discovery and evidence inspection through the CLI.
 
 Next:
 
