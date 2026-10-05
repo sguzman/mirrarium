@@ -108,6 +108,22 @@ fn run() -> Result<()> {
                     })?;
                 println!("{}", serde_json::to_string_pretty(&view)?);
             }
+            Some("attachments") => {
+                let conversation_id = arguments.get(2).map(String::as_str);
+                let limit = arguments
+                    .get(3)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("attachment limit must be a positive integer")?
+                    .unwrap_or(200);
+                anyhow::ensure!(limit > 0, "attachment limit must be greater than zero");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::attachments(&root, conversation_id, limit)?
+                    )?
+                );
+            }
             Some(command) => anyhow::bail!(
                 "unknown corpus command {command:?}; run 'mirrarium help'"
             ),
@@ -307,6 +323,7 @@ USAGE:
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>
+  mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
   mirrarium native-host install [BROWSER] [MIRRARIUMD_PATH]
   mirrarium native-host status [BROWSER]
   mirrarium native-host uninstall [BROWSER]
