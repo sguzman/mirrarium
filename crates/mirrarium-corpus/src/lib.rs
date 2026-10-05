@@ -771,16 +771,52 @@ pub fn canonical(
         }
     }
 
-    let revisions =
+    let raw_connection = open_raw_ledger_read_only(raw_root)?;
+    let basis_order = capture_row_order(&raw_connection, &capture_id)?
+        .context("canonical basis capture is missing from the raw ledger")?;
+
+    let all_revisions =
         stream_message_revisions_for_connection(&connection, conversation_id, -1)?;
+    let mut revisions = Vec::new();
+    let mut excluded_revision_count = 0_u64;
+    for revision in all_revisions {
+        match capture_row_order(&raw_connection, &revision.capture_id)? {
+            Some(order) if order > basis_order => revisions.push(revision),
+            _ => excluded_revision_count += 1,
+        }
+    }
+    if excluded_revision_count > 0 {
+        warnings.push(format!(
+            "{excluded_revision_count} stream message revision(s) do not follow the canonical basis snapshot and were excluded from canonical merging"
+        ));
+    }
     warnings.extend(merge_stream_revisions_into_canonical(
         &mut messages,
         &revisions,
     ));
 
-    let streams = stream_views_for_conversation(&connection, conversation_id)?;
-    let (linked_streams, unlinked_streams, stream_warnings) =
-        merge_exact_id_streams(&mut messages, streams);
+    let all_streams = stream_views_for_conversation(&connection, conversation_id)?;
+    let mut eligible_streams = Vec::new();
+    let mut unlinked_streams = Vec::new();
+    let mut excluded_stream_count = 0_u64;
+    for stream in all_streams {
+        match capture_row_order(&raw_connection, &stream.capture_id)? {
+            Some(order) if order > basis_order => eligible_streams.push(stream),
+            _ => {
+                excluded_stream_count += 1;
+                unlinked_streams.push(stream);
+            }
+        }
+    }
+    if excluded_stream_count > 0 {
+        warnings.push(format!(
+            "{excluded_stream_count} stream reconstruction(s) do not follow the canonical basis snapshot and remain unlinked"
+        ));
+    }
+
+    let (linked_streams, newly_unlinked_streams, stream_warnings) =
+        merge_exact_id_streams(&mut messages, eligible_streams);
+    unlinked_streams.extend(newly_unlinked_streams);
     warnings.extend(stream_warnings);
     if !unlinked_streams.is_empty() {
         warnings.push(
@@ -1235,6 +1271,31 @@ fn canonical_messages_from_snapshot(
         Vec::new(),
         warnings,
     )
+}
+
+fn open_raw_ledger_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
+    let database = raw_root.as_ref().join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+    Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))
+}
+
+fn capture_row_order(connection: &Connection, capture_id: &str) -> Result<Option<i64>> {
+    connection
+        .query_row(
+            "SELECT rowid FROM captures WHERE capture_id = ?1",
+            [capture_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
