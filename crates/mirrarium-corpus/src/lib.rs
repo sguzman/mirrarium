@@ -10,6 +10,8 @@ use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 
+const CORPUS_SCHEMA_VERSION: i64 = 1;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
     pub stream_captures: u64,
@@ -327,6 +329,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         );
         "#,
     )?;
+    corpus.pragma_update(None, "user_version", CORPUS_SCHEMA_VERSION)?;
 
     let raw = Connection::open_with_flags(
         &raw_database,
@@ -399,6 +402,7 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening {}", database.display()))?;
+    validate_corpus_schema(&connection)?;
 
     for table in [
         "stream_captures",
@@ -986,6 +990,7 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening {}", database.display()))?;
+    validate_corpus_schema(&connection)?;
 
     for table in [
         "stream_captures",
@@ -1924,6 +1929,16 @@ fn object_path(root: &Path, privacy_class: &str, hash: &str) -> Result<PathBuf> 
         .join(hash))
 }
 
+fn validate_corpus_schema(connection: &Connection) -> Result<()> {
+    let version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    anyhow::ensure!(
+        version == CORPUS_SCHEMA_VERSION,
+        "derived corpus schema version {version} is out of date (expected {CORPUS_SCHEMA_VERSION}); run 'mirrarium corpus rebuild'"
+    );
+    Ok(())
+}
+
 fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
     let count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -1965,6 +1980,18 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_outdated_derived_corpus_schema() {
+        let connection = Connection::open_in_memory().unwrap();
+        let error = validate_corpus_schema(&connection).unwrap_err();
+        assert!(error.to_string().contains("run 'mirrarium corpus rebuild'"));
+
+        connection
+            .pragma_update(None, "user_version", CORPUS_SCHEMA_VERSION)
+            .unwrap();
+        validate_corpus_schema(&connection).unwrap();
+    }
 
     #[test]
     fn parses_sse_fields_multiline_data_and_done_marker() {
