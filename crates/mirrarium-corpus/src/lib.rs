@@ -581,7 +581,7 @@ pub fn stream_message_revisions(
         "#,
     )?;
 
-    Ok(statement
+    let revisions = statement
         .query_map(params![conversation_id, limit as i64], |row| {
             Ok(StreamMessageRevisionView {
                 capture_id: row.get(0)?,
@@ -594,7 +594,8 @@ pub fn stream_message_revisions(
                 source_url: row.get(7)?,
             })
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(revisions)
 }
 
 pub fn attachments(
