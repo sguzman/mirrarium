@@ -113,6 +113,12 @@ struct InFlightCapture {
     request_body: Option<RequestBodyCapture>,
 }
 
+enum ResponseBodyDisposition {
+    KeepRaw,
+    Replace(Vec<u8>),
+    Suppress(&'static str),
+}
+
 pub struct CaptureStore {
     root: PathBuf,
     connection: Connection,
@@ -485,7 +491,39 @@ impl CaptureStore {
             return Ok(());
         }
 
-        let body_hash = format!("{:x}", capture.hasher.finalize());
+        let body_hash = match sanitize_response_body(
+            privacy,
+            &capture.metadata.mime_type,
+            &capture.temp_path,
+        )? {
+            ResponseBodyDisposition::KeepRaw => format!("{:x}", capture.hasher.finalize()),
+            ResponseBodyDisposition::Replace(bytes) => {
+                fs::write(&capture.temp_path, &bytes)
+                    .with_context(|| format!("rewriting {}", capture.temp_path.display()))?;
+                harden_file(&capture.temp_path)?;
+                capture.bytes = bytes.len() as u64;
+                sha256_hex(&bytes)
+            }
+            ResponseBodyDisposition::Suppress(reason) => {
+                let marker = format!("suppressed:{reason}");
+                let _ = fs::remove_file(&capture.temp_path);
+                self.insert_capture(
+                    &capture.metadata,
+                    privacy,
+                    None,
+                    0,
+                    encoded_data_length,
+                    Some(&marker),
+                    captured_at_ms,
+                )?;
+                self.persist_request_body(
+                    &capture.metadata.capture_id,
+                    capture.request_body.take(),
+                    captured_at_ms,
+                )?;
+                return Ok(());
+            }
+        };
         let relative_path = object_relative_path(privacy, &body_hash);
         let final_path = self.root.join(&relative_path);
 
@@ -1063,6 +1101,174 @@ fn request_body_kind(content_type: Option<&str>) -> &'static str {
     }
 }
 
+fn sanitize_response_body(
+    privacy: PrivacyClass,
+    mime_type: &str,
+    path: &Path,
+) -> Result<ResponseBodyDisposition> {
+    if privacy == PrivacyClass::Public {
+        return Ok(ResponseBodyDisposition::KeepRaw);
+    }
+
+    let mime_type = mime_type.to_ascii_lowercase();
+    if !mime_type.contains("json") && !mime_type.contains("text/event-stream") {
+        return Ok(ResponseBodyDisposition::KeepRaw);
+    }
+
+    let bytes = fs::read(path)
+        .with_context(|| format!("reading structured response body {}", path.display()))?;
+
+    if mime_type.contains("json") {
+        let mut value = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(ResponseBodyDisposition::Suppress(
+                    "unparseable_json_response_body",
+                ))
+            }
+        };
+
+        if redact_json_secrets(&mut value) {
+            let sanitized = serde_json::to_vec(&value)
+                .context("serializing sanitized JSON response body")?;
+            return Ok(ResponseBodyDisposition::Replace(sanitized));
+        }
+
+        return Ok(ResponseBodyDisposition::KeepRaw);
+    }
+
+    sanitize_sse_response_body(&bytes)
+}
+
+fn sanitize_sse_response_body(bytes: &[u8]) -> Result<ResponseBodyDisposition> {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(ResponseBodyDisposition::Suppress(
+                "non_utf8_event_stream_response_body",
+            ))
+        }
+    };
+
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut changed = false;
+    let mut sanitized_blocks = Vec::new();
+
+    for block in normalized.split("\n\n") {
+        if block.is_empty() {
+            sanitized_blocks.push(String::new());
+            continue;
+        }
+
+        let lines: Vec<&str> = block.split('\n').collect();
+        let data_lines: Vec<&str> = lines
+            .iter()
+            .filter_map(|line| {
+                let (field, value) = line.split_once(':')?;
+                (field == "data").then_some(value.strip_prefix(' ').unwrap_or(value))
+            })
+            .collect();
+
+        if data_lines.is_empty() {
+            if contains_credential_marker(block) {
+                return Ok(ResponseBodyDisposition::Suppress(
+                    "credential_marker_in_event_stream",
+                ));
+            }
+            sanitized_blocks.push(block.to_owned());
+            continue;
+        }
+
+        let data = data_lines.join("\n");
+        if data.trim() == "[DONE]" {
+            sanitized_blocks.push(block.to_owned());
+            continue;
+        }
+
+        match serde_json::from_str::<Value>(&data) {
+            Ok(mut value) => {
+                if redact_json_secrets(&mut value) {
+                    changed = true;
+                    let sanitized_data = serde_json::to_string(&value)
+                        .context("serializing sanitized SSE JSON event")?;
+                    let mut block_lines = Vec::new();
+                    let mut inserted_data = false;
+
+                    for line in lines {
+                        let is_data = line
+                            .split_once(':')
+                            .is_some_and(|(field, _)| field == "data");
+                        if is_data {
+                            if !inserted_data {
+                                block_lines.push(format!("data: {sanitized_data}"));
+                                inserted_data = true;
+                            }
+                        } else {
+                            block_lines.push(line.to_owned());
+                        }
+                    }
+
+                    sanitized_blocks.push(block_lines.join("\n"));
+                } else {
+                    sanitized_blocks.push(block.to_owned());
+                }
+            }
+            Err(_) => {
+                if contains_credential_marker(&data) {
+                    return Ok(ResponseBodyDisposition::Suppress(
+                        "unparseable_credential_event_stream",
+                    ));
+                }
+                sanitized_blocks.push(block.to_owned());
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(ResponseBodyDisposition::KeepRaw);
+    }
+
+    let mut sanitized = sanitized_blocks.join("\n\n");
+    if text.ends_with("\n\n") && !sanitized.ends_with("\n\n") {
+        sanitized.push_str("\n\n");
+    }
+
+    Ok(ResponseBodyDisposition::Replace(sanitized.into_bytes()))
+}
+
+fn contains_credential_marker(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "access_token=",
+        "refresh_token=",
+        "id_token=",
+        "session_token=",
+        "authorization=",
+        "x-amz-signature=",
+        "x-amz-credential=",
+        "x-amz-security-token=",
+        "signature=",
+        "bearer ",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn sanitize_structured_string(value: &str) -> Option<String> {
+    let looks_url_like = value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("//")
+        || value.starts_with('/')
+        || value.starts_with('?');
+
+    if !looks_url_like {
+        return None;
+    }
+
+    let sanitized = sanitize_url_for_storage(value);
+    (sanitized != value).then_some(sanitized)
+}
+
 fn sanitize_request_body(
     content_type: Option<&str>,
     bytes: &[u8],
@@ -1140,7 +1346,15 @@ fn redact_json_secrets(value: &mut Value) -> bool {
                 changed |= redact_json_secrets(child);
             }
             changed
-        },
+        }
+        Value::String(text) => {
+            if let Some(sanitized) = sanitize_structured_string(text) {
+                *text = sanitized;
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -1499,6 +1713,118 @@ mod tests {
         assert!(!sanitized.contains("def"));
         assert!(!sanitized.contains("#secret"));
         assert!(sanitized.matches("%5BREDACTED%5D").count() >= 2);
+    }
+
+    #[test]
+    fn private_json_response_is_scrubbed_before_cas() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        store
+            .begin(metadata(
+                "json-response-secrets",
+                "https://chatgpt.com/backend-api/conversation/attachment",
+                "Fetch",
+            ))
+            .unwrap();
+
+        let body = br#"{"id":"conversation-a","access_token":"top-secret","attachment":{"download_url":"https://files.example.test/object?keep=yes&X-Amz-Signature=signed-secret&token=query-secret"}}"#;
+        store
+            .append_chunk("json-response-secrets", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish("json-response-secrets", Some(body.len() as u64), None)
+            .unwrap();
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        let hash = capture.body_hash.unwrap();
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        let stored = fs::read_to_string(path).unwrap();
+
+        assert!(!stored.contains("top-secret"));
+        assert!(!stored.contains("signed-secret"));
+        assert!(!stored.contains("query-secret"));
+        assert!(stored.contains("[REDACTED]"));
+        assert!(stored.contains("keep=yes"));
+    }
+
+    #[test]
+    fn private_sse_json_is_scrubbed_before_cas() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let mut item = metadata(
+            "sse-response-secrets",
+            "https://chatgpt.com/backend-api/conversation/stream",
+            "Fetch",
+        );
+        item.mime_type = "text/event-stream".to_owned();
+        store.begin(item).unwrap();
+
+        let body = concat!(
+            "event: message\n",
+            "data: {\"conversation_id\":\"c1\",\"delta\":\"hello\",",
+            "\"download_url\":\"https://files.example.test/o?X-Amz-Signature=sse-secret\"}\n\n",
+            "data: [DONE]\n\n"
+        );
+        store
+            .append_chunk("sse-response-secrets", 0, &BASE64.encode(body.as_bytes()))
+            .unwrap();
+        store
+            .finish(
+                "sse-response-secrets",
+                Some(body.len() as u64),
+                None,
+            )
+            .unwrap();
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        let hash = capture.body_hash.unwrap();
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        let stored = fs::read_to_string(path).unwrap();
+
+        assert!(!stored.contains("sse-secret"));
+        assert!(stored.contains("%5BREDACTED%5D"));
+        assert!(stored.contains("\"delta\":\"hello\""));
+        assert!(stored.contains("[DONE]"));
+    }
+
+    #[test]
+    fn malformed_private_json_response_is_suppressed() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        store
+            .begin(metadata(
+                "malformed-json-response",
+                "https://chatgpt.com/backend-api/conversation/broken",
+                "Fetch",
+            ))
+            .unwrap();
+
+        let body = br#"{"download_url":"https://files.example.test/o?token=secret""#;
+        store
+            .append_chunk("malformed-json-response", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish(
+                "malformed-json-response",
+                Some(body.len() as u64),
+                None,
+            )
+            .unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.objects, 0);
+        assert_eq!(stats.suppressed_bodies, 1);
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        assert!(capture.body_hash.is_none());
+        assert_eq!(
+            capture.body_error.as_deref(),
+            Some("suppressed:unparseable_json_response_body")
+        );
     }
 
     #[test]
