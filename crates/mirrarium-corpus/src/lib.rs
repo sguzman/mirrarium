@@ -137,7 +137,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
                     sequence as i64,
                     event.event_name,
                     event.data,
-                    i64::from(json_valid),
+                    if json_valid { 1_i64 } else { 0_i64 },
                 ],
             )?;
         }
