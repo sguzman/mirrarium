@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Mirrarium",
+  "version": "0.1.0",
+  "description": "Passive local recorder and corpus builder for ChatGPT.",
+  "permissions": [
+    "debugger",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}

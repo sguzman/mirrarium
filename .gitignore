@@ -1,0 +1,11 @@
+target/
+node_modules/
+extension/dist/
+playwright-report/
+test-results/
+.tmp/
+tmp/
+*.sqlite
+*.sqlite3
+mirrarium-data/
+.DS_Store

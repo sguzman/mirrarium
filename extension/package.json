@@ -1,0 +1,14 @@
+{
+  "name": "@mirrarium/extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-manifest.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.31",
+    "typescript": "^5.9.2"
+  }
+}

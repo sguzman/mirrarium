@@ -1,0 +1,15 @@
+{
+  "name": "mirrarium",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "build:extension": "pnpm --dir extension build",
+    "check:rust": "cargo test --workspace",
+    "check:extension": "pnpm --dir extension typecheck",
+    "test:e2e": "pnpm build:extension && playwright test -c tests/playwright/playwright.config.ts",
+    "test": "pnpm check:extension && pnpm check:rust && pnpm test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}
