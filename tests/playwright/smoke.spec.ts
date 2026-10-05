@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -20,7 +20,24 @@ type StoreStats = {
   private_objects: number;
   unknown_objects: number;
   body_errors: number;
+  request_bodies: number;
+  request_body_bytes: number;
+  request_body_errors: number;
+  suppressed_request_bodies: number;
 };
+
+async function readFilesRecursively(directory: string): Promise<Buffer[]> {
+  const files: Buffer[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await readFilesRecursively(path)));
+    } else if (entry.isFile()) {
+      files.push(await readFile(path));
+    }
+  }
+  return files;
+}
 
 test("captures ChatGPT-shaped traffic into isolated durable storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "mirrarium-e2e-"));
@@ -103,11 +120,24 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .poll(async () => (await readStats()).captures, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(5);
 
+      await expect
+        .poll(async () => (await readStats()).request_bodies, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(1);
+
       const stats = await readStats();
       expect(stats.public_objects).toBeGreaterThanOrEqual(2);
-      expect(stats.private_captures).toBeGreaterThanOrEqual(3);
-      expect(stats.private_objects).toBeGreaterThanOrEqual(2);
-      expect(stats.private_objects).toBeLessThan(stats.private_captures);
+      expect(stats.private_captures).toBeGreaterThanOrEqual(4);
+      expect(stats.private_objects).toBeGreaterThanOrEqual(3);
+      expect(stats.private_objects).toBeLessThan(stats.private_captures + stats.request_bodies);
+      expect(stats.request_body_errors).toBe(0);
+
+      const privateObjects = await readFilesRecursively(join(dataDir, "private", "objects"));
+      const requestBodyObjects = privateObjects
+        .map((body) => body.toString("utf8"))
+        .filter((body) => body.includes("hello from request body"));
+      expect(requestBodyObjects.length).toBeGreaterThanOrEqual(1);
+      expect(requestBodyObjects.some((body) => body.includes("[REDACTED]"))).toBe(true);
+      expect(requestBodyObjects.some((body) => body.includes("fixture-secret-token"))).toBe(false);
     } finally {
       await context.close();
     }

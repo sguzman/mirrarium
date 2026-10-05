@@ -44,6 +44,9 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
     let capture_id = match &request {
         HostRequest::CaptureStart { metadata } => Some(metadata.capture_id.clone()),
         HostRequest::CaptureChunk { capture_id, .. }
+        | HostRequest::RequestBodyStart { capture_id, .. }
+        | HostRequest::RequestBodyChunk { capture_id, .. }
+        | HostRequest::RequestBodyFinish { capture_id, .. }
         | HostRequest::CaptureFinish { capture_id, .. } => Some(capture_id.clone()),
         HostRequest::Ping => None,
     };
@@ -56,6 +59,19 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             sequence,
             data_base64,
         } => store.append_chunk(&capture_id, sequence, &data_base64),
+        HostRequest::RequestBodyStart {
+            capture_id,
+            content_type,
+        } => store.begin_request_body(&capture_id, content_type),
+        HostRequest::RequestBodyChunk {
+            capture_id,
+            sequence,
+            data_base64,
+        } => store.append_request_body_chunk(&capture_id, sequence, &data_base64),
+        HostRequest::RequestBodyFinish {
+            capture_id,
+            body_error,
+        } => store.finish_request_body(&capture_id, body_error.as_deref()),
         HostRequest::CaptureFinish {
             capture_id,
             encoded_data_length,

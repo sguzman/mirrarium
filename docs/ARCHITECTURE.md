@@ -20,7 +20,9 @@ ChatGPT tab
 
 For an attached ChatGPT tab the extension records CDP request/response metadata and waits for `Network.loadingFinished`.
 
-It then calls `Network.getResponseBody`, converts the decoded body to raw bytes, and transports those bytes to `mirrariumd` as ordered base64 chunks. Chunks are deliberately far below Chromium's native-messaging message limit.
+Outbound JSON and URL-encoded request bodies are captured through CDP as private-only evidence. The extension redacts credential-like fields before transport; the Rust daemon re-parses and re-redacts the body in bounded memory before any request-body bytes are allowed onto disk. Opaque, multipart, oversized, auth/session, or otherwise unsupported request bodies are recorded as suppressed rather than archived unsafely.
+
+For response bodies the extension calls `Network.getResponseBody`, converts the decoded body to raw bytes, and transports those bytes to `mirrariumd` as ordered base64 chunks. Chunks are deliberately far below Chromium's native-messaging message limit.
 
 The daemon writes each capture to a private temporary incoming area, verifies chunk ordering, hashes bytes incrementally with SHA-256, and atomically moves completed bodies into a content-addressed store.
 
@@ -82,6 +84,7 @@ Implemented:
 - MV3 extension loading and stable unpacked extension identity;
 - CDP attachment restricted to ChatGPT origins;
 - request/response metadata observation;
+- outbound JSON/form request-body capture with extension + daemon secret filtering;
 - completed response-body extraction;
 - ordered chunk transport over a persistent Native Messaging port;
 - Rust native host framing and typed protocol;
@@ -96,8 +99,8 @@ Implemented:
 
 Next:
 
-- request-body capture with secret filtering;
 - richer request/session provenance;
+- multipart/upload provenance without unsafe raw-body archival;
 - streaming-event semantics and conversation reconstruction;
 - native-host installation tooling for normal Edge deployment;
 - encryption/key management for private storage.

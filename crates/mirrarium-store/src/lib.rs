@@ -12,8 +12,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use mirrarium_protocol::CaptureMetadata;
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
+
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyClass {
@@ -55,6 +58,10 @@ pub struct StoreStats {
     pub captured_body_bytes: u64,
     pub body_errors: u64,
     pub suppressed_bodies: u64,
+    pub request_bodies: u64,
+    pub request_body_bytes: u64,
+    pub request_body_errors: u64,
+    pub suppressed_request_bodies: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +76,9 @@ pub struct CaptureSummary {
     pub body_hash: Option<String>,
     pub body_bytes: u64,
     pub body_error: Option<String>,
+    pub request_body_hash: Option<String>,
+    pub request_body_bytes: u64,
+    pub request_body_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +86,14 @@ pub struct VerifyReport {
     pub checked_objects: u64,
     pub corrupt_objects: u64,
     pub errors: Vec<String>,
+}
+
+struct RequestBodyCapture {
+    content_type: Option<String>,
+    bytes: Vec<u8>,
+    next_sequence: u32,
+    finished: bool,
+    error: Option<String>,
 }
 
 struct InFlightCapture {
@@ -86,6 +104,7 @@ struct InFlightCapture {
     bytes: u64,
     next_sequence: u32,
     suppressed_reason: Option<String>,
+    request_body: Option<RequestBodyCapture>,
 }
 
 pub struct CaptureStore {
@@ -152,6 +171,15 @@ impl CaptureStore {
                 ON captures(tab_id, request_id);
             CREATE INDEX IF NOT EXISTS captures_class_idx
                 ON captures(privacy_class);
+
+            CREATE TABLE IF NOT EXISTS request_bodies (
+                capture_id TEXT PRIMARY KEY
+                    REFERENCES captures(capture_id) ON DELETE CASCADE,
+                content_type TEXT,
+                body_hash TEXT,
+                body_bytes INTEGER NOT NULL,
+                body_error TEXT
+            );
             "#,
         )?;
 
@@ -192,6 +220,7 @@ impl CaptureStore {
                 bytes: 0,
                 next_sequence: 0,
                 suppressed_reason,
+                request_body: None,
             },
         );
 
@@ -240,6 +269,123 @@ impl CaptureStore {
         Ok(())
     }
 
+    pub fn begin_request_body(
+        &mut self,
+        capture_id: &str,
+        content_type: Option<String>,
+    ) -> Result<()> {
+        let capture = self
+            .in_flight
+            .get_mut(capture_id)
+            .with_context(|| format!("unknown capture: {capture_id}"))?;
+
+        anyhow::ensure!(
+            capture.request_body.is_none(),
+            "request body already started for {capture_id}"
+        );
+
+        let error = capture
+            .suppressed_reason
+            .as_ref()
+            .map(|reason| format!("suppressed:{reason}"));
+
+        capture.request_body = Some(RequestBodyCapture {
+            content_type,
+            bytes: Vec::new(),
+            next_sequence: 0,
+            finished: false,
+            error,
+        });
+        Ok(())
+    }
+
+    pub fn append_request_body_chunk(
+        &mut self,
+        capture_id: &str,
+        sequence: u32,
+        data_base64: &str,
+    ) -> Result<()> {
+        let capture = self
+            .in_flight
+            .get_mut(capture_id)
+            .with_context(|| format!("unknown capture: {capture_id}"))?;
+        let request_body = capture
+            .request_body
+            .as_mut()
+            .with_context(|| format!("request body not started for {capture_id}"))?;
+
+        anyhow::ensure!(
+            !request_body.finished,
+            "request body already finished for {capture_id}"
+        );
+        anyhow::ensure!(
+            sequence == request_body.next_sequence,
+            "out-of-order request-body chunk for {capture_id}: expected {}, got {sequence}",
+            request_body.next_sequence
+        );
+
+        request_body.next_sequence = request_body
+            .next_sequence
+            .checked_add(1)
+            .context("request-body sequence overflow")?;
+
+        if request_body.error.is_some() {
+            return Ok(());
+        }
+
+        let bytes = BASE64
+            .decode(data_base64)
+            .with_context(|| format!("decoding request-body chunk {sequence} for {capture_id}"))?;
+
+        if request_body.bytes.len().saturating_add(bytes.len()) > MAX_REQUEST_BODY_BYTES {
+            request_body.bytes.clear();
+            request_body.error = Some("suppressed:request_body_too_large".to_owned());
+            return Ok(());
+        }
+
+        request_body.bytes.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    pub fn finish_request_body(
+        &mut self,
+        capture_id: &str,
+        body_error: Option<&str>,
+    ) -> Result<()> {
+        let capture = self
+            .in_flight
+            .get_mut(capture_id)
+            .with_context(|| format!("unknown capture: {capture_id}"))?;
+        let request_body = capture
+            .request_body
+            .as_mut()
+            .with_context(|| format!("request body not started for {capture_id}"))?;
+
+        anyhow::ensure!(
+            !request_body.finished,
+            "request body already finished for {capture_id}"
+        );
+
+        if let Some(error) = body_error {
+            request_body.bytes.clear();
+            request_body.error = Some(error.to_owned());
+        } else if request_body.error.is_none() {
+            match sanitize_request_body(
+                request_body.content_type.as_deref(),
+                &request_body.bytes,
+            ) {
+                Ok(bytes) => request_body.bytes = bytes,
+                Err(reason) => {
+                    request_body.bytes.clear();
+                    request_body.error = Some(format!("suppressed:{reason}"));
+                }
+            }
+        }
+
+        request_body.finished = true;
+        Ok(())
+    }
+
     pub fn finish(
         &mut self,
         capture_id: &str,
@@ -269,6 +415,11 @@ impl CaptureStore {
                 Some(&marker),
                 captured_at_ms,
             )?;
+            self.persist_request_body(
+                &capture.metadata.capture_id,
+                capture.request_body.take(),
+                captured_at_ms,
+            )?;
             return Ok(());
         }
 
@@ -281,6 +432,11 @@ impl CaptureStore {
                 capture.bytes,
                 encoded_data_length,
                 Some(error),
+                captured_at_ms,
+            )?;
+            self.persist_request_body(
+                &capture.metadata.capture_id,
+                capture.request_body.take(),
                 captured_at_ms,
             )?;
             return Ok(());
@@ -337,6 +493,11 @@ impl CaptureStore {
             None,
             captured_at_ms,
         )?;
+        self.persist_request_body(
+            &capture.metadata.capture_id,
+            capture.request_body.take(),
+            captured_at_ms,
+        )?;
 
         Ok(())
     }
@@ -385,6 +546,22 @@ impl CaptureStore {
                 &self.connection,
                 "SELECT COUNT(*) FROM captures WHERE body_error LIKE 'suppressed:%'",
             )?,
+            request_bodies: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM request_bodies",
+            )?,
+            request_body_bytes: scalar_u64(
+                &self.connection,
+                "SELECT COALESCE(SUM(body_bytes), 0) FROM request_bodies",
+            )?,
+            request_body_errors: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM request_bodies WHERE body_error IS NOT NULL AND body_error NOT LIKE 'suppressed:%'",
+            )?,
+            suppressed_request_bodies: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM request_bodies WHERE body_error LIKE 'suppressed:%'",
+            )?,
         })
     }
 
@@ -399,10 +576,14 @@ impl CaptureStore {
                 mime_type,
                 resource_type,
                 privacy_class,
-                body_hash,
-                body_bytes,
-                body_error
+                captures.body_hash,
+                captures.body_bytes,
+                captures.body_error,
+                request_bodies.body_hash,
+                COALESCE(request_bodies.body_bytes, 0),
+                request_bodies.body_error
             FROM captures
+            LEFT JOIN request_bodies USING (capture_id)
             ORDER BY captured_at_ms DESC
             LIMIT ?1
             "#,
@@ -420,6 +601,9 @@ impl CaptureStore {
                 body_hash: row.get(7)?,
                 body_bytes: row.get::<_, i64>(8)? as u64,
                 body_error: row.get(9)?,
+                request_body_hash: row.get(10)?,
+                request_body_bytes: row.get::<_, i64>(11)? as u64,
+                request_body_error: row.get(12)?,
             })
         })?;
 
@@ -524,6 +708,83 @@ impl CaptureStore {
         Ok(report)
     }
 
+    fn persist_request_body(
+        &self,
+        capture_id: &str,
+        request_body: Option<RequestBodyCapture>,
+        captured_at_ms: u64,
+    ) -> Result<()> {
+        let Some(mut request_body) = request_body else {
+            return Ok(());
+        };
+
+        if !request_body.finished && request_body.error.is_none() {
+            request_body.bytes.clear();
+            request_body.error = Some("incomplete:request_body_not_finished".to_owned());
+        }
+
+        let mut body_hash: Option<String> = None;
+        let mut body_bytes = 0_u64;
+
+        if request_body.error.is_none() {
+            body_bytes = request_body.bytes.len() as u64;
+            let hash = sha256_hex(&request_body.bytes);
+            let relative_path = object_relative_path(PrivacyClass::Private, &hash);
+            let final_path = self.root.join(&relative_path);
+
+            if let Some(parent) = final_path.parent() {
+                fs::create_dir_all(parent)?;
+                harden_directory(parent)?;
+            }
+
+            if !final_path.exists() {
+                let mut file = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&final_path)
+                    .with_context(|| format!("creating {}", final_path.display()))?;
+                file.write_all(&request_body.bytes)?;
+                file.flush()?;
+                harden_file(&final_path)?;
+            }
+
+            self.connection.execute(
+                r#"
+                INSERT OR IGNORE INTO objects
+                    (storage_class, hash, bytes, relative_path, created_at_ms)
+                VALUES
+                    ('private', ?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    hash,
+                    body_bytes as i64,
+                    relative_path.to_string_lossy(),
+                    captured_at_ms as i64,
+                ],
+            )?;
+
+            body_hash = Some(hash);
+        }
+
+        self.connection.execute(
+            r#"
+            INSERT INTO request_bodies
+                (capture_id, content_type, body_hash, body_bytes, body_error)
+            VALUES
+                (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                capture_id,
+                request_body.content_type,
+                body_hash,
+                body_bytes as i64,
+                request_body.error,
+            ],
+        )?;
+
+        Ok(())
+    }
+
     fn insert_capture(
         &self,
         metadata: &CaptureMetadata,
@@ -597,6 +858,104 @@ pub fn default_data_root() -> Result<PathBuf> {
     }
 
     anyhow::bail!("set MIRRARIUM_DATA_DIR, XDG_DATA_HOME, or HOME")
+}
+
+fn sanitize_request_body(
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> std::result::Result<Vec<u8>, &'static str> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let content_type = content_type.unwrap_or("").to_ascii_lowercase();
+
+    if content_type.contains("multipart/form-data") {
+        return Err("multipart_request_body_not_archived");
+    }
+
+    let looks_json = content_type.contains("json")
+        || bytes
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|byte| byte == b'{' || byte == b'[');
+
+    if looks_json {
+        let mut value: Value =
+            serde_json::from_slice(bytes).map_err(|_| "unparseable_json_request_body")?;
+        if redact_json_secrets(&mut value) {
+            return serde_json::to_vec(&value).map_err(|_| "json_request_body_reserialize_failed");
+        }
+        return Ok(bytes.to_vec());
+    }
+
+    if content_type.contains("application/x-www-form-urlencoded") {
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(bytes)
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        let mut changed = false;
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+
+        for (key, value) in pairs {
+            if is_sensitive_body_key(&key) {
+                serializer.append_pair(&key, "[REDACTED]");
+                changed = true;
+            } else {
+                serializer.append_pair(&key, &value);
+            }
+        }
+
+        if changed {
+            return Ok(serializer.finish().into_bytes());
+        }
+        return Ok(bytes.to_vec());
+    }
+
+    Err("unsupported_request_body_content_type")
+}
+
+fn redact_json_secrets(value: &mut Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let mut changed = false;
+            for (key, child) in map {
+                if is_sensitive_body_key(key) {
+                    if child.as_str() != Some("[REDACTED]") {
+                        *child = Value::String("[REDACTED]".to_owned());
+                    }
+                    changed = true;
+                } else {
+                    changed |= redact_json_secrets(child);
+                }
+            }
+            changed
+        }
+        Value::Array(values) => values.iter_mut().any(redact_json_secrets),
+        _ => false,
+    }
+}
+
+fn is_sensitive_body_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "password"
+            | "passwd"
+            | "secret"
+            | "client_secret"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "session_token"
+            | "auth_token"
+            | "api_key"
+            | "apikey"
+            | "cookie"
+            | "csrf_token"
+    ) || normalized.ends_with("_token")
+        || normalized.contains("credential")
 }
 
 pub fn sanitize_url_for_storage(raw_url: &str) -> String {
@@ -891,6 +1250,85 @@ mod tests {
         assert!(!sanitized.contains("def"));
         assert!(!sanitized.contains("#secret"));
         assert!(sanitized.matches("%5BREDACTED%5D").count() >= 2);
+    }
+
+    #[test]
+    fn request_body_is_private_and_redacted_before_cas() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let mut meta = metadata(
+            "request-body",
+            "https://chatgpt.com/backend-api/conversation",
+            "Fetch",
+        );
+        meta.method = "POST".to_owned();
+        store.begin(meta).unwrap();
+        store
+            .begin_request_body("request-body", Some("application/json".to_owned()))
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                "request-body",
+                0,
+                &BASE64.encode(
+                    br#"{"message":"hello from request body","access_token":"fixture-secret-token"}"#,
+                ),
+            )
+            .unwrap();
+        store.finish_request_body("request-body", None).unwrap();
+        store
+            .finish("request-body", Some(2), Some("fixture response unavailable"))
+            .unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.request_bodies, 1);
+        assert_eq!(stats.request_body_errors, 0);
+        assert_eq!(stats.suppressed_request_bodies, 0);
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        let hash = capture.request_body_hash.unwrap();
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        let persisted = fs::read_to_string(path).unwrap();
+        assert!(persisted.contains("hello from request body"));
+        assert!(persisted.contains("[REDACTED]"));
+        assert!(!persisted.contains("fixture-secret-token"));
+    }
+
+    #[test]
+    fn unsupported_request_body_never_reaches_cas() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        store
+            .begin(metadata(
+                "opaque-request",
+                "https://chatgpt.com/backend-api/upload",
+                "Fetch",
+            ))
+            .unwrap();
+        store
+            .begin_request_body("opaque-request", Some("application/octet-stream".to_owned()))
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                "opaque-request",
+                0,
+                &BASE64.encode(b"opaque secret-bearing bytes"),
+            )
+            .unwrap();
+        store.finish_request_body("opaque-request", None).unwrap();
+        store
+            .finish("opaque-request", Some(2), Some("fixture response unavailable"))
+            .unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.request_bodies, 1);
+        assert_eq!(stats.suppressed_request_bodies, 1);
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        assert!(capture.request_body_hash.is_none());
+        assert_eq!(capture.request_body_bytes, 0);
     }
 
     #[test]

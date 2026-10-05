@@ -27,6 +27,19 @@ pub enum HostRequest {
         sequence: u32,
         data_base64: String,
     },
+    RequestBodyStart {
+        capture_id: String,
+        content_type: Option<String>,
+    },
+    RequestBodyChunk {
+        capture_id: String,
+        sequence: u32,
+        data_base64: String,
+    },
+    RequestBodyFinish {
+        capture_id: String,
+        body_error: Option<String>,
+    },
     CaptureFinish {
         capture_id: String,
         encoded_data_length: Option<u64>,

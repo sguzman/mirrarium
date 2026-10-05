@@ -6,6 +6,9 @@ const RAW_CHUNK_BYTES = 384 * 1024;
 type RequestMetadata = {
   method: string;
   url: string;
+  postData?: string;
+  hasPostData?: boolean;
+  contentType?: string;
 };
 
 type ResponseMetadata = {
@@ -153,6 +156,176 @@ function shouldSuppressResponseBody(rawUrl: string): boolean {
   }
 }
 
+function isSensitiveBodyKey(key: string): boolean {
+  const normalized = key.trim().toLowerCase().replaceAll("-", "_");
+  return (
+    [
+      "authorization",
+      "password",
+      "passwd",
+      "secret",
+      "client_secret",
+      "access_token",
+      "refresh_token",
+      "id_token",
+      "session_token",
+      "auth_token",
+      "api_key",
+      "apikey",
+      "cookie",
+      "csrf_token",
+    ].includes(normalized) ||
+    normalized.endsWith("_token") ||
+    normalized.includes("credential")
+  );
+}
+
+function redactJsonSecrets(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    let changed = false;
+    for (const child of value) changed = redactJsonSecrets(child) || changed;
+    return changed;
+  }
+
+  if (value === null || typeof value !== "object") return false;
+
+  let changed = false;
+  const record = value as Record<string, unknown>;
+  for (const [key, child] of Object.entries(record)) {
+    if (isSensitiveBodyKey(key)) {
+      record[key] = "[REDACTED]";
+      changed = true;
+    } else {
+      changed = redactJsonSecrets(child) || changed;
+    }
+  }
+  return changed;
+}
+
+function sanitizeRequestBody(
+  body: string,
+  contentType: string | undefined,
+): { body?: string; error?: string } {
+  const type = (contentType ?? "").toLowerCase();
+
+  if (type.includes("multipart/form-data")) {
+    return { error: "suppressed:multipart_request_body_not_archived" };
+  }
+
+  const trimmed = body.trimStart();
+  const looksJson =
+    type.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[");
+
+  if (looksJson) {
+    try {
+      const value: unknown = JSON.parse(body);
+      return {
+        body: redactJsonSecrets(value) ? JSON.stringify(value) : body,
+      };
+    } catch {
+      return { error: "suppressed:unparseable_json_request_body" };
+    }
+  }
+
+  if (type.includes("application/x-www-form-urlencoded")) {
+    const params = new URLSearchParams(body);
+    let changed = false;
+    for (const key of Array.from(params.keys())) {
+      if (isSensitiveBodyKey(key)) {
+        params.set(key, "[REDACTED]");
+        changed = true;
+      }
+    }
+    return { body: changed ? params.toString() : body };
+  }
+
+  return { error: "suppressed:unsupported_request_body_content_type" };
+}
+
+function postRequestUtf8Body(captureId: string, body: string): void {
+  const bytes = new TextEncoder().encode(body);
+  let sequence = 0;
+
+  for (let offset = 0; offset < bytes.length; offset += RAW_CHUNK_BYTES) {
+    postNative({
+      type: "request_body_chunk",
+      capture_id: captureId,
+      sequence,
+      data_base64: bytesToBase64(bytes.subarray(offset, offset + RAW_CHUNK_BYTES)),
+    });
+    sequence += 1;
+  }
+}
+
+async function captureRequestBody(
+  tabId: number,
+  requestId: string,
+  captureId: string,
+  request: RequestMetadata | undefined,
+): Promise<void> {
+  if (!request || (request.postData === undefined && !request.hasPostData)) return;
+
+  postNative({
+    type: "request_body_start",
+    capture_id: captureId,
+    content_type: request.contentType,
+  });
+
+  if (shouldSuppressResponseBody(request.url)) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "suppressed:credential_endpoint",
+    });
+    return;
+  }
+
+  let body = request.postData;
+  if (body === undefined && request.hasPostData) {
+    try {
+      const result = (await chrome.debugger.sendCommand(
+        { tabId },
+        "Network.getRequestPostData",
+        { requestId },
+      )) as { postData: string };
+      body = result.postData;
+    } catch (error) {
+      postNative({
+        type: "request_body_finish",
+        capture_id: captureId,
+        body_error: String(error),
+      });
+      return;
+    }
+  }
+
+  if (body === undefined) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "request body unavailable",
+    });
+    return;
+  }
+
+  const sanitized = sanitizeRequestBody(body, request.contentType);
+  if (sanitized.error || sanitized.body === undefined) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: sanitized.error ?? "request body sanitizer failed",
+    });
+    return;
+  }
+
+  postRequestUtf8Body(captureId, sanitized.body);
+  postNative({
+    type: "request_body_finish",
+    capture_id: captureId,
+    body_error: null,
+  });
+}
+
 function postBase64Body(captureId: string, body: string): void {
   const chunkSize = BASE64_CHUNK_CHARS - (BASE64_CHUNK_CHARS % 4);
   let sequence = 0;
@@ -229,6 +402,8 @@ async function captureBody(
     },
   });
 
+  await captureRequestBody(tabId, requestId, captureId, request);
+
   if (response && shouldSuppressResponseBody(response.url)) {
     postNative({
       type: "capture_finish",
@@ -302,11 +477,20 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === "Network.requestWillBeSent") {
     const event = params as {
       requestId: string;
-      request: { method: string; url: string };
+      request: {
+        method: string;
+        url: string;
+        postData?: string;
+        hasPostData?: boolean;
+        headers?: Record<string, string | number>;
+      };
     };
     requests.set(requestKey(tabId, event.requestId), {
       method: event.request.method,
       url: event.request.url,
+      postData: event.request.postData,
+      hasPostData: event.request.hasPostData,
+      contentType: header(event.request.headers, "content-type"),
     });
     return;
   }

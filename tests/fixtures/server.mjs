@@ -36,10 +36,20 @@ const page = `<!doctype html>
 <h1>fixture</h1>
 <script src="/_next/static/app.js"></script>
 <script>
+const requestMessage = ["hello", "from", "request", "body"].join(" ");
+const requestSecret = ["fixture", "secret", "token"].join("-");
 Promise.all([
   fetch("/backend-api/conversation/test").then((response) => response.json()),
   fetch("/backend-api/repeat/a").then((response) => response.text()),
-  fetch("/backend-api/repeat/b").then((response) => response.text())
+  fetch("/backend-api/repeat/b").then((response) => response.text()),
+  fetch("/backend-api/conversation/post", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: requestMessage,
+      access_token: requestSecret,
+    }),
+  }).then((response) => response.json())
 ]).then(() => {
   document.body.dataset.ready = "yes";
 });
@@ -85,6 +95,22 @@ const fixtureServer = https.createServer(
         title: "Private fixture",
         messages: [{ role: "user", content: "private corpus material" }],
       }));
+      return;
+    }
+
+    if (
+      request.url === "/backend-api/conversation/post" &&
+      request.method === "POST"
+    ) {
+      let incoming = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        incoming += chunk;
+      });
+      request.on("end", () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, received_bytes: incoming.length }));
+      });
       return;
     }
 
