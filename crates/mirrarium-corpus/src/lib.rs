@@ -172,6 +172,15 @@ struct DownloadSource {
     body_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+struct StreamRevisionCandidate {
+    message_id: String,
+    parent_id: Option<String>,
+    role: Option<String>,
+    content_text: Option<String>,
+    valid: bool,
+}
+
 #[derive(Debug, Default)]
 struct StreamAccumulator {
     text: String,
@@ -567,6 +576,14 @@ pub fn stream_message_revisions(
     anyhow::ensure!(limit > 0, "stream revision limit must be greater than zero");
 
     let connection = open_corpus_read_only(raw_root)?;
+    stream_message_revisions_for_connection(&connection, conversation_id, limit as i64)
+}
+
+fn stream_message_revisions_for_connection(
+    connection: &Connection,
+    conversation_id: &str,
+    limit: i64,
+) -> Result<Vec<StreamMessageRevisionView>> {
     let mut statement = connection.prepare(
         r#"
         SELECT
@@ -586,7 +603,7 @@ pub fn stream_message_revisions(
     )?;
 
     let revisions = statement
-        .query_map(params![conversation_id, limit as i64], |row| {
+        .query_map(params![conversation_id, limit], |row| {
             Ok(StreamMessageRevisionView {
                 capture_id: row.get(0)?,
                 sequence: row.get::<_, i64>(1)? as u64,
@@ -754,6 +771,13 @@ pub fn canonical(
         }
     }
 
+    let revisions =
+        stream_message_revisions_for_connection(&connection, conversation_id, -1)?;
+    warnings.extend(merge_stream_revisions_into_canonical(
+        &mut messages,
+        &revisions,
+    ));
+
     let streams = stream_views_for_conversation(&connection, conversation_id)?;
     let (linked_streams, unlinked_streams, stream_warnings) =
         merge_exact_id_streams(&mut messages, streams);
@@ -810,6 +834,225 @@ fn stream_views_for_conversation(
     })?;
     let streams = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(streams)
+}
+
+fn compatible_optional_text(
+    current: &mut Option<String>,
+    incoming: Option<&str>,
+) -> bool {
+    let Some(incoming) = incoming else {
+        return true;
+    };
+
+    match current.as_deref() {
+        None => {
+            *current = Some(incoming.to_owned());
+            true
+        }
+        Some(existing) if existing == incoming => true,
+        Some(existing) if incoming.starts_with(existing) => {
+            *current = Some(incoming.to_owned());
+            true
+        }
+        Some(existing) if existing.starts_with(incoming) => true,
+        Some(_) => false,
+    }
+}
+
+fn collapse_stream_revision_candidates(
+    revisions: &[StreamMessageRevisionView],
+) -> (BTreeMap<String, StreamRevisionCandidate>, Vec<String>) {
+    let mut candidates: BTreeMap<String, StreamRevisionCandidate> = BTreeMap::new();
+    let mut warnings = Vec::new();
+
+    for revision in revisions {
+        let candidate = candidates
+            .entry(revision.message_id.clone())
+            .or_insert_with(|| StreamRevisionCandidate {
+                message_id: revision.message_id.clone(),
+                parent_id: revision.parent_id.clone(),
+                role: revision.role.clone(),
+                content_text: revision.content_text.clone(),
+                valid: true,
+            });
+
+        if candidate.parent_id.is_none() {
+            candidate.parent_id = revision.parent_id.clone();
+        } else if let Some(parent_id) = revision.parent_id.as_deref() {
+            if candidate.parent_id.as_deref() != Some(parent_id) {
+                candidate.valid = false;
+                warnings.push(format!(
+                    "stream revisions for message {:?} disagree on parent id; refusing to canonicalize them",
+                    revision.message_id
+                ));
+            }
+        }
+
+        if candidate.role.is_none() {
+            candidate.role = revision.role.clone();
+        } else if let Some(role) = revision.role.as_deref() {
+            if candidate.role.as_deref() != Some(role) {
+                candidate.valid = false;
+                warnings.push(format!(
+                    "stream revisions for message {:?} disagree on role; refusing to canonicalize them",
+                    revision.message_id
+                ));
+            }
+        }
+
+        if !compatible_optional_text(
+            &mut candidate.content_text,
+            revision.content_text.as_deref(),
+        ) {
+            candidate.valid = false;
+            warnings.push(format!(
+                "stream revisions for message {:?} contain incompatible text revisions; refusing to canonicalize them",
+                revision.message_id
+            ));
+        }
+    }
+
+    (candidates, warnings)
+}
+
+fn merge_stream_revisions_into_canonical(
+    messages: &mut Vec<CanonicalMessageView>,
+    revisions: &[StreamMessageRevisionView],
+) -> Vec<String> {
+    let (candidates, mut warnings) = collapse_stream_revision_candidates(revisions);
+    let mut applied = BTreeSet::new();
+
+    for candidate in candidates.values().filter(|candidate| candidate.valid) {
+        let matches: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                (message.message_id.as_deref() == Some(candidate.message_id.as_str()))
+                    .then_some(index)
+            })
+            .collect();
+
+        if matches.len() != 1 {
+            continue;
+        }
+
+        let target = &mut messages[matches[0]];
+        if let (Some(snapshot_parent), Some(stream_parent)) = (
+            target.parent_id.as_deref(),
+            candidate.parent_id.as_deref(),
+        ) {
+            if snapshot_parent != stream_parent {
+                warnings.push(format!(
+                    "stream revisions for message {:?} disagree with canonical parent {:?}; refusing to merge",
+                    candidate.message_id, snapshot_parent
+                ));
+                continue;
+            }
+        }
+
+        if let (Some(snapshot_role), Some(stream_role)) =
+            (target.role.as_deref(), candidate.role.as_deref())
+        {
+            if snapshot_role != stream_role {
+                warnings.push(format!(
+                    "stream revisions for message {:?} disagree with canonical role {:?}; refusing to merge",
+                    candidate.message_id, snapshot_role
+                ));
+                continue;
+            }
+        }
+
+        if !compatible_optional_text(
+            &mut target.content_text,
+            candidate.content_text.as_deref(),
+        ) {
+            warnings.push(format!(
+                "stream revisions for message {:?} conflict with canonical snapshot content; refusing to merge",
+                candidate.message_id
+            ));
+            continue;
+        }
+
+        if target.parent_id.is_none() {
+            target.parent_id = candidate.parent_id.clone();
+        }
+        if target.role.is_none() {
+            target.role = candidate.role.clone();
+        }
+        applied.insert(candidate.message_id.clone());
+    }
+
+    let mut canonical_ids: BTreeSet<String> = messages
+        .iter()
+        .filter_map(|message| message.message_id.clone())
+        .collect();
+    let mut seen_tail_ids = canonical_ids.clone();
+
+    loop {
+        let Some(tail_id) = messages.last().and_then(|message| message.message_id.as_deref()) else {
+            if candidates.values().any(|candidate| {
+                candidate.valid && !applied.contains(&candidate.message_id)
+            }) {
+                warnings.push(
+                    "canonical tail has no message id; refusing to append streamed children"
+                        .to_owned(),
+                );
+            }
+            break;
+        };
+
+        let children: Vec<&StreamRevisionCandidate> = candidates
+            .values()
+            .filter(|candidate| {
+                candidate.valid
+                    && !applied.contains(&candidate.message_id)
+                    && !canonical_ids.contains(&candidate.message_id)
+                    && candidate.parent_id.as_deref() == Some(tail_id)
+                    && (candidate.role.is_some() || candidate.content_text.is_some())
+            })
+            .collect();
+
+        match children.as_slice() {
+            [] => break,
+            [child] => {
+                if !seen_tail_ids.insert(child.message_id.clone()) {
+                    warnings.push(format!(
+                        "stream tail cycle detected at message {:?}; refusing to continue",
+                        child.message_id
+                    ));
+                    break;
+                }
+
+                messages.push(CanonicalMessageView {
+                    message_id: Some(child.message_id.clone()),
+                    parent_id: child.parent_id.clone(),
+                    role: child.role.clone(),
+                    content_text: child.content_text.clone(),
+                });
+                canonical_ids.insert(child.message_id.clone());
+                applied.insert(child.message_id.clone());
+            }
+            _ => {
+                warnings.push(format!(
+                    "stream tail parent {tail_id:?} has {} distinct child messages; refusing to guess a branch",
+                    children.len()
+                ));
+                break;
+            }
+        }
+    }
+
+    let unapplied = candidates
+        .values()
+        .filter(|candidate| candidate.valid && !applied.contains(&candidate.message_id))
+        .count();
+    if unapplied > 0 {
+        warnings.push(format!(
+            "{unapplied} stream message candidate(s) remain outside the canonical branch"
+        ));
+    }
+
+    warnings
 }
 
 fn merge_exact_id_streams(
@@ -2080,6 +2323,81 @@ mod tests {
             parent_message_id_from_stream_value(&event, &event["message"]).as_deref(),
             Some("user-1")
         );
+    }
+
+    #[test]
+    fn stream_revisions_append_unambiguous_exact_parent_tail() {
+        let mut messages = vec![CanonicalMessageView {
+            message_id: Some("user-1".to_owned()),
+            parent_id: Some("root".to_owned()),
+            role: Some("user".to_owned()),
+            content_text: Some("question".to_owned()),
+        }];
+        let revisions = vec![
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 0,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-1".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("hello".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 1,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-1".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("hello world".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+        ];
+
+        let warnings = merge_stream_revisions_into_canonical(&mut messages, &revisions);
+        assert!(warnings.is_empty());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].message_id.as_deref(), Some("assistant-1"));
+        assert_eq!(messages[1].parent_id.as_deref(), Some("user-1"));
+        assert_eq!(messages[1].content_text.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn stream_revisions_refuse_ambiguous_tail_branch() {
+        let mut messages = vec![CanonicalMessageView {
+            message_id: Some("user-1".to_owned()),
+            parent_id: Some("root".to_owned()),
+            role: Some("user".to_owned()),
+            content_text: Some("question".to_owned()),
+        }];
+        let revisions = vec![
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 0,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-a".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("branch a".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 1,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-b".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("branch b".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+        ];
+
+        let warnings = merge_stream_revisions_into_canonical(&mut messages, &revisions);
+        assert_eq!(messages.len(), 1);
+        assert!(warnings.iter().any(|warning| warning.contains("refusing to guess a branch")));
     }
 
     #[test]
