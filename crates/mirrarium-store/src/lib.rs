@@ -34,6 +34,9 @@ impl PrivacyClass {
 #[derive(Debug, Clone, Serialize)]
 pub struct StoreStats {
     pub captures: u64,
+    pub public_captures: u64,
+    pub private_captures: u64,
+    pub unknown_captures: u64,
     pub objects: u64,
     pub object_bytes: u64,
     pub public_objects: u64,
@@ -281,6 +284,18 @@ impl CaptureStore {
     pub fn stats(&self) -> Result<StoreStats> {
         Ok(StoreStats {
             captures: scalar_u64(&self.connection, "SELECT COUNT(*) FROM captures")?,
+            public_captures: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE privacy_class = 'public'",
+            )?,
+            private_captures: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE privacy_class = 'private'",
+            )?,
+            unknown_captures: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE privacy_class = 'unknown'",
+            )?,
             objects: scalar_u64(&self.connection, "SELECT COUNT(*) FROM objects")?,
             object_bytes: scalar_u64(
                 &self.connection,
@@ -504,6 +519,8 @@ mod tests {
 
         let stats = store.stats().unwrap();
         assert_eq!(stats.captures, 3);
+        assert_eq!(stats.private_captures, 2);
+        assert_eq!(stats.public_captures, 1);
         assert_eq!(stats.private_objects, 1);
         assert_eq!(stats.public_objects, 1);
         assert_eq!(stats.objects, 2);

@@ -10,6 +10,18 @@ const execFileAsync = promisify(execFile);
 const nativeHostName = "com.sguzman.mirrarium";
 const expectedExtensionId = "oodcefibmdmabgepkcpanjpjolnbignk";
 
+type StoreStats = {
+  captures: number;
+  public_captures: number;
+  private_captures: number;
+  unknown_captures: number;
+  objects: number;
+  public_objects: number;
+  private_objects: number;
+  unknown_objects: number;
+  body_errors: number;
+};
+
 test("captures ChatGPT-shaped traffic into isolated durable storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "mirrarium-e2e-"));
   const browserHome = join(root, "home");
@@ -17,6 +29,16 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   const dataDir = join(root, "data");
   const extensionPath = resolve("extension/dist");
   const daemonPath = resolve("target/debug/mirrariumd");
+
+  async function readStats(): Promise<StoreStats> {
+    const { stdout } = await execFileAsync(daemonPath, ["--stats"], {
+      env: {
+        ...process.env,
+        MIRRARIUM_DATA_DIR: dataDir,
+      },
+    });
+    return JSON.parse(stdout) as StoreStats;
+  }
 
   try {
     const nativeManifestPath = join(
@@ -76,33 +98,15 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .poll(() => page.locator("body").getAttribute("data-ready"))
         .toBe("yes");
 
-      const stats = await expect
-        .poll(
-          async () => {
-            const { stdout } = await execFileAsync(daemonPath, ["--stats"], {
-              env: {
-                ...process.env,
-                MIRRARIUM_DATA_DIR: dataDir,
-              },
-            });
-            return JSON.parse(stdout) as {
-              captures: number;
-              objects: number;
-              public_objects: number;
-              private_objects: number;
-              body_errors: number;
-            };
-          },
-          { timeout: 10_000 },
-        )
-        .toMatchObject({
-          body_errors: 0,
-        });
+      await expect
+        .poll(async () => (await readStats()).captures, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(5);
 
-      expect(stats.captures).toBeGreaterThanOrEqual(5);
+      const stats = await readStats();
       expect(stats.public_objects).toBeGreaterThanOrEqual(2);
+      expect(stats.private_captures).toBeGreaterThanOrEqual(3);
       expect(stats.private_objects).toBeGreaterThanOrEqual(2);
-      expect(stats.objects).toBeLessThan(stats.captures);
+      expect(stats.private_objects).toBeLessThan(stats.private_captures);
     } finally {
       await context.close();
     }

@@ -18,6 +18,14 @@ Automation must never:
 
 This is a hard safety boundary, not a preference.
 
+## Origin boundary
+
+Mirrarium may attach only while the tab's top-level URL is a supported ChatGPT origin.
+
+If a monitored tab navigates away from ChatGPT, the extension must immediately detach its debugger session and discard that tab's pending capture state.
+
+ChatGPT subresources may originate from separate static/CDN hosts; they are observable only because the top-level tab remains an explicitly supported ChatGPT tab.
+
 ## Isolation
 
 Every browser automation run gets:

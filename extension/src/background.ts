@@ -9,6 +9,7 @@ type RequestMetadata = {
 };
 
 type ResponseMetadata = {
+  url: string;
   status: number;
   mimeType: string;
   resourceType: string;
@@ -37,6 +38,18 @@ function isSupportedChatGptUrl(rawUrl: string | undefined): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+function clearTabState(tabId: number): void {
+  const prefix = `${tabId}:`;
+
+  for (const key of requests.keys()) {
+    if (key.startsWith(prefix)) requests.delete(key);
+  }
+
+  for (const key of responses.keys()) {
+    if (key.startsWith(prefix)) responses.delete(key);
   }
 }
 
@@ -83,6 +96,20 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
     attachedTabs.add(tabId);
   } catch (error) {
     console.warn("Mirrarium could not attach to ChatGPT tab", tabId, error);
+  }
+}
+
+async function detach(tabId: number): Promise<void> {
+  clearTabState(tabId);
+
+  if (!attachedTabs.has(tabId)) return;
+
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    // The tab may already be gone or Chromium may already have detached us.
+  } finally {
+    attachedTabs.delete(tabId);
   }
 }
 
@@ -147,6 +174,8 @@ async function captureBody(
   encodedDataLength: number | undefined,
   failure?: string,
 ): Promise<void> {
+  if (!attachedTabs.has(tabId)) return;
+
   const key = requestKey(tabId, requestId);
   const request = requests.get(key);
   const response = responses.get(key);
@@ -164,7 +193,7 @@ async function captureBody(
       tab_id: tabId,
       request_id: requestId,
       method: request?.method ?? "GET",
-      url: response ? request?.url ?? "" : request?.url ?? "",
+      url: request?.url ?? response?.url ?? "",
       status: Math.trunc(response?.status ?? 0),
       mime_type: response?.mimeType ?? "",
       resource_type: response?.resourceType ?? "Unknown",
@@ -220,11 +249,14 @@ async function captureBody(
 }
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId !== undefined) attachedTabs.delete(source.tabId);
+  if (source.tabId !== undefined) {
+    attachedTabs.delete(source.tabId);
+    clearTabState(source.tabId);
+  }
 });
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  if (source.tabId === undefined) return;
+  if (source.tabId === undefined || !attachedTabs.has(source.tabId)) return;
 
   const tabId = source.tabId;
 
@@ -245,12 +277,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       requestId: string;
       type: string;
       response: {
+        url: string;
         status: number;
         mimeType: string;
         headers?: Record<string, string | number>;
       };
     };
     responses.set(requestKey(tabId, event.requestId), {
+      url: event.response.url,
       status: event.response.status,
       mimeType: event.response.mimeType,
       resourceType: event.type,
@@ -285,11 +319,37 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const url = changeInfo.url ?? tab.url;
+
+  if (changeInfo.url && !isSupportedChatGptUrl(changeInfo.url)) {
+    void detach(tabId);
+    return;
+  }
+
   if (changeInfo.url || changeInfo.status === "complete") {
-    void attach(tabId, changeInfo.url ?? tab.url);
+    void attach(tabId, url);
   }
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  void chrome.tabs.get(tabId).then((tab) => attach(tabId, tab.url));
+  void chrome.tabs.get(tabId).then((tab) => {
+    if (isSupportedChatGptUrl(tab.url)) {
+      void attach(tabId, tab.url);
+    } else {
+      void detach(tabId);
+    }
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  attachedTabs.delete(tabId);
+  clearTabState(tabId);
+});
+
+void chrome.tabs.query({}).then((tabs) => {
+  for (const tab of tabs) {
+    if (tab.id !== undefined && isSupportedChatGptUrl(tab.url)) {
+      void attach(tab.id, tab.url);
+    }
+  }
 });
