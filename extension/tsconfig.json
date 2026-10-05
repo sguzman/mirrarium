@@ -3,11 +3,19 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022", "DOM"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
     "strict": true,
     "rootDir": "src",
     "outDir": "dist",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": [
+      "chrome"
+    ]
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }
