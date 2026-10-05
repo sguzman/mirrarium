@@ -989,7 +989,10 @@ fn merge_stream_revisions_into_canonical(
     let mut seen_tail_ids = canonical_ids.clone();
 
     loop {
-        let Some(tail_id) = messages.last().and_then(|message| message.message_id.as_deref()) else {
+        let Some(tail_id) = messages
+            .last()
+            .and_then(|message| message.message_id.clone())
+        else {
             if candidates.values().any(|candidate| {
                 candidate.valid && !applied.contains(&candidate.message_id)
             }) {
@@ -1007,7 +1010,7 @@ fn merge_stream_revisions_into_canonical(
                 candidate.valid
                     && !applied.contains(&candidate.message_id)
                     && !canonical_ids.contains(&candidate.message_id)
-                    && candidate.parent_id.as_deref() == Some(tail_id)
+                    && candidate.parent_id.as_deref() == Some(tail_id.as_str())
                     && (candidate.role.is_some() || candidate.content_text.is_some())
             })
             .collect();
