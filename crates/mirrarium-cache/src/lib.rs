@@ -268,7 +268,7 @@ pub fn lookup(
 
 fn replayable_url(raw_url: &str) -> Option<Url> {
     let url = Url::parse(raw_url).ok()?;
-    if url.scheme() != "https:"
+    if url.scheme() != "https"
         || !matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com"))
         || !url.username().is_empty()
         || url.password().is_some()
@@ -559,6 +559,14 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "url_observed_with_multiple_body_hashes"));
+    }
+
+    #[test]
+    fn replayable_url_accepts_exact_chatgpt_https_without_query() {
+        assert!(replayable_url("https://chatgpt.com/_next/static/replay.js").is_some());
+        assert!(replayable_url("https://chat.openai.com/_next/static/replay.css").is_some());
+        assert!(replayable_url("http://chatgpt.com/_next/static/replay.js").is_none());
+        assert!(replayable_url("https://chatgpt.com/_next/static/replay.js?v=1").is_none());
     }
 
     #[test]
