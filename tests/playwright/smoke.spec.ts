@@ -162,10 +162,15 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .poll(async () => (await readStats()).request_bodies, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(1);
 
+      await expect
+        .poll(async () => (await readStats()).private_captures, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(4);
+      await expect
+        .poll(async () => (await readStats()).private_objects, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(3);
+
       const stats = await readStats();
       expect(stats.public_objects).toBeGreaterThanOrEqual(2);
-      expect(stats.private_captures).toBeGreaterThanOrEqual(4);
-      expect(stats.private_objects).toBeGreaterThanOrEqual(3);
       expect(stats.private_objects).toBeLessThan(stats.private_captures + stats.request_bodies);
       expect(stats.request_body_errors).toBe(0);
 
