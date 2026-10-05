@@ -490,17 +490,17 @@ fn stream_views_for_conversation(
         ORDER BY rowid
         "#,
     )?;
-    Ok(stream_statement
-        .query_map([conversation_id], |row| {
-            Ok(StreamReconstructionView {
-                capture_id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                source_url: row.get(2)?,
-                text: row.get(3)?,
-                fragment_count: row.get::<_, i64>(4)? as u64,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+    let rows = stream_statement.query_map([conversation_id], |row| {
+        Ok(StreamReconstructionView {
+            capture_id: row.get(0)?,
+            conversation_id: row.get(1)?,
+            source_url: row.get(2)?,
+            text: row.get(3)?,
+            fragment_count: row.get::<_, i64>(4)? as u64,
+        })
+    })?;
+    let streams = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(streams)
 }
 
 fn canonical_messages_from_snapshot(
