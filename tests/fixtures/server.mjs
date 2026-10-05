@@ -49,7 +49,8 @@ Promise.all([
       message: requestMessage,
       access_token: requestSecret,
     }),
-  }).then((response) => response.json())
+  }).then((response) => response.json()),
+  fetch("/backend-api/conversation/stream").then((response) => response.text())
 ]).then(() => {
   document.body.dataset.ready = "yes";
 });
@@ -95,6 +96,19 @@ const fixtureServer = https.createServer(
         title: "Private fixture",
         messages: [{ role: "user", content: "private corpus material" }],
       }));
+      return;
+    }
+
+    if (request.url === "/backend-api/conversation/stream") {
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      });
+      response.write("event: message\n");
+      response.write('data: {"conversation_id":"fixture-stream","delta":"hello"}\n\n');
+      response.write("event: message\n");
+      response.write('data: {"conversation_id":"fixture-stream","delta":" world"}\n\n');
+      response.end("data: [DONE]\n\n");
       return;
     }
 

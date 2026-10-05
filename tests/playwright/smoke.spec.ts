@@ -46,6 +46,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   const dataDir = join(root, "data");
   const extensionPath = resolve("extension/dist");
   const daemonPath = resolve("target/debug/mirrariumd");
+  const cliPath = resolve("target/debug/mirrarium");
 
   async function readStats(): Promise<StoreStats> {
     const { stdout } = await execFileAsync(daemonPath, ["--stats"], {
@@ -138,6 +139,25 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(requestBodyObjects.length).toBeGreaterThanOrEqual(1);
       expect(requestBodyObjects.some((body) => body.includes("[REDACTED]"))).toBe(true);
       expect(requestBodyObjects.some((body) => body.includes("fixture-secret-token"))).toBe(false);
+
+      const { stdout: corpusStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "rebuild"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusStats = JSON.parse(corpusStdout) as {
+        stream_captures: number;
+        stream_events: number;
+        json_stream_events: number;
+      };
+      expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
+      expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
+      expect(corpusStats.json_stream_events).toBeGreaterThanOrEqual(2);
     } finally {
       await context.close();
     }

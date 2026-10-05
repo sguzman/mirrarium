@@ -1,6 +1,7 @@
 use std::{env, process::ExitCode};
 
 use anyhow::{Context, Result};
+use mirrarium_corpus as corpus;
 use mirrarium_store::{default_data_root, CaptureStore};
 
 fn main() -> ExitCode {
@@ -16,7 +17,7 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let root = default_data_root()?;
-    let store = CaptureStore::open(root)?;
+    let store = CaptureStore::open(&root)?;
 
     match arguments.first().map(String::as_str) {
         Some("stats") => {
@@ -44,6 +45,20 @@ fn run() -> Result<()> {
                 report.corrupt_objects
             );
         }
+        Some("corpus") => match arguments.get(1).map(String::as_str) {
+            Some("rebuild") => {
+                println!("{}", serde_json::to_string_pretty(&corpus::rebuild(&root)?)?);
+            }
+            Some("stats") => {
+                println!("{}", serde_json::to_string_pretty(&corpus::stats(&root)?)?);
+            }
+            Some(command) => anyhow::bail!(
+                "unknown corpus command {command:?}; use 'mirrarium corpus rebuild' or 'mirrarium corpus stats'"
+            ),
+            None => anyhow::bail!(
+                "missing corpus command; use 'mirrarium corpus rebuild' or 'mirrarium corpus stats'"
+            ),
+        },
         Some("help" | "--help" | "-h") | None => print_help(),
         Some(command) => anyhow::bail!("unknown command {command:?}; run 'mirrarium help'"),
     }
@@ -59,6 +74,8 @@ USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
   mirrarium verify
+  mirrarium corpus rebuild
+  mirrarium corpus stats
 
 DATA ROOT:
   MIRRARIUM_DATA_DIR, then XDG_DATA_HOME/mirrarium,

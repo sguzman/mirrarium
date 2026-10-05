@@ -13,7 +13,7 @@ ChatGPT tab
   -> Native Messaging
   -> mirrariumd
   -> request ledger + content-addressed stores
-  -> derived corpus (next layer)
+  -> rebuildable derived corpus
 ```
 
 ## Capture path
@@ -33,6 +33,8 @@ A failed body read still creates a ledger record but does not create a complete 
 Raw observations are evidence and are content-addressed.
 
 Derived records are interpretations and must remain rebuildable from raw evidence.
+
+The first derived adapter is protocol-agnostic SSE reconstruction. Any captured `text/event-stream` response is reparsed from its immutable CAS object into `derived/corpus.sqlite3`, preserving capture provenance, event order, event names, and event data. JSON validity is indexed without discarding non-JSON frames such as `[DONE]`.
 
 ## Public/private boundary
 
@@ -95,12 +97,13 @@ Implemented:
 - Unix permission hardening;
 - CLI-readable JSON store statistics;
 - local ChatGPT-shaped fixture traffic;
-- Playwright/Chromium end-to-end capture test.
+- Playwright/Chromium end-to-end capture test;
+- rebuildable SSE event derivation into a separate corpus database.
 
 Next:
 
 - richer request/session provenance;
 - multipart/upload provenance without unsafe raw-body archival;
-- streaming-event semantics and conversation reconstruction;
+- ChatGPT-specific conversation/message reconstruction from raw JSON + derived stream events;
 - native-host installation tooling for normal Edge deployment;
 - encryption/key management for private storage.

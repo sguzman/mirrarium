@@ -1,5 +1,5 @@
 [package]
-name = "mirrarium"
+name = "mirrarium-corpus"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,6 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-mirrarium-corpus = { path = "../mirrarium-corpus" }
-mirrarium-store = { path = "../mirrarium-store" }
+rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true

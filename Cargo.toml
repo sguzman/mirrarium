@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/mirrarium",
+  "crates/mirrarium-corpus",
   "crates/mirrarium-protocol",
   "crates/mirrarium-store",
   "crates/mirrariumd",
