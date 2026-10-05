@@ -221,7 +221,21 @@ function sanitizeUrlForStorage(rawUrl: string): string {
     }
     return url.toString();
   } catch {
-    return rawUrl;
+    const fragmentIndex = rawUrl.indexOf("#");
+    const fragmentless =
+      fragmentIndex === -1 ? rawUrl : rawUrl.slice(0, fragmentIndex);
+    const queryIndex = fragmentless.indexOf("?");
+
+    if (queryIndex === -1) return fragmentless;
+
+    const prefix = fragmentless.slice(0, queryIndex);
+    const query = new URLSearchParams(fragmentless.slice(queryIndex + 1));
+    for (const key of Array.from(query.keys())) {
+      if (isSensitiveQueryKey(key)) query.set(key, "[REDACTED]");
+    }
+
+    const serialized = query.toString();
+    return serialized.length === 0 ? prefix : `${prefix}?${serialized}`;
   }
 }
 

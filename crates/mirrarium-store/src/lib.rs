@@ -1169,7 +1169,7 @@ fn is_sensitive_body_key(key: &str) -> bool {
 
 pub fn sanitize_url_for_storage(raw_url: &str) -> String {
     let Ok(mut url) = Url::parse(raw_url) else {
-        return raw_url.to_owned();
+        return sanitize_relative_url_for_storage(raw_url);
     };
 
     let query_pairs: Vec<(String, String)> = url
@@ -1194,6 +1194,32 @@ pub fn sanitize_url_for_storage(raw_url: &str) -> String {
     }
 
     url.to_string()
+}
+
+fn sanitize_relative_url_for_storage(raw_url: &str) -> String {
+    let fragmentless = raw_url.split_once('#').map_or(raw_url, |(head, _)| head);
+    let Some((prefix, raw_query)) = fragmentless.split_once('?') else {
+        return fragmentless.to_owned();
+    };
+
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(raw_query.as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+
+    if pairs.is_empty() {
+        return prefix.to_owned();
+    }
+
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in pairs {
+        if is_sensitive_query_key(&key) {
+            serializer.append_pair(&key, "[REDACTED]");
+        } else {
+            serializer.append_pair(&key, &value);
+        }
+    }
+
+    format!("{prefix}?{}", serializer.finish())
 }
 
 pub fn credential_endpoint_reason(raw_url: &str) -> Option<&'static str> {
@@ -1448,6 +1474,19 @@ mod tests {
         assert!(!capture.url.contains("secret"));
         assert!(!capture.url.contains("#fragment"));
         assert!(capture.url.contains("access_token=%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn relative_url_secrets_are_redacted() {
+        let sanitized = sanitize_url_for_storage(
+            "/backend-api/redirect-final?token=fixture-secret&keep=yes#fragment",
+        );
+
+        assert!(sanitized.starts_with("/backend-api/redirect-final?"));
+        assert!(!sanitized.contains("fixture-secret"));
+        assert!(!sanitized.contains("#fragment"));
+        assert!(sanitized.contains("keep=yes"));
+        assert!(sanitized.contains("token=%5BREDACTED%5D"));
     }
 
     #[test]
