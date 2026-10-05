@@ -70,6 +70,7 @@ mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
 mirrarium corpus attachments [conversation-id] [limit]
+mirrarium corpus stream-revisions <conversation-id> [limit]
 mirrarium native-host install
 mirrarium native-host status
 ```
@@ -79,6 +80,10 @@ mirrarium native-host status
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
 
 `corpus attachments` lists attachment observations extracted from structured JSON and any captured download bodies correlated to them. Correlation requires the same sanitized URL identity; signed query credentials are redacted before persistence and are never treated as durable attachment identity.
+
+`corpus stream-revisions` exposes per-event full-message stream evidence with explicit message and parent IDs. Canonicalization uses that evidence conservatively: exact message IDs may refine prefix-compatible snapshot text, and a streamed child may extend the canonical tail only when its explicit parent is the current tail and there is exactly one child candidate. Branches, conflicting revisions, older-than-snapshot streams, and otherwise ambiguous evidence are preserved but never guessed into the canonical transcript.
+
+The derived corpus is explicitly schema-versioned. When its rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors.
 
 ## Linux native-host install
 

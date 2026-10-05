@@ -108,12 +108,16 @@ Implemented:
 - reconstructed stream text from conversation-tagged SSE deltas;
 - read-only conversation discovery and evidence inspection through the CLI;
 - branch-aware canonical conversation views computed from immutable snapshot evidence;
+- per-event stream message revision history with explicit message/parent identity;
+- revision-aware canonical merging: exact-ID prefix refinement plus unambiguous exact-parent tail extension;
+- temporal gating that prevents stream evidence older than the canonical snapshot from rewriting it;
+- explicit derived-corpus schema versioning with rebuild-required failure semantics;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
-- stream-to-message linkage and revision-aware canonical tail merging;
+- immutable public-resource replay candidate inventory and policy auditing;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.
