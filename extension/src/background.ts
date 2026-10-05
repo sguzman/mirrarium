@@ -74,6 +74,7 @@ type CdpResponse = {
 };
 
 const attachedTabs = new Set<number>();
+const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
@@ -393,8 +394,8 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
   try {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
     debuggerAttached = true;
-    attachedTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Network.enable");
+    fetchSetupTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Fetch.enable", {
       patterns: [
         {
@@ -415,7 +416,10 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
         },
       ],
     });
+    fetchSetupTabs.delete(tabId);
+    attachedTabs.add(tabId);
   } catch (error) {
+    fetchSetupTabs.delete(tabId);
     attachedTabs.delete(tabId);
     if (debuggerAttached) {
       try {
@@ -994,17 +998,19 @@ async function captureBody(
 
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId !== undefined) {
+    fetchSetupTabs.delete(source.tabId);
     attachedTabs.delete(source.tabId);
     clearTabState(source.tabId);
   }
 });
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  if (source.tabId === undefined || !attachedTabs.has(source.tabId)) return;
+  if (source.tabId === undefined) return;
 
   const tabId = source.tabId;
 
   if (method === "Fetch.requestPaused") {
+    if (!attachedTabs.has(tabId) && !fetchSetupTabs.has(tabId)) return;
     const event = params as {
       requestId: string;
       resourceType?: string;
@@ -1016,6 +1022,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     void handlePausedRequest(tabId, event);
     return;
   }
+
+  if (!attachedTabs.has(tabId)) return;
 
   if (method === "Network.requestWillBeSent") {
     const event = params as {
@@ -1147,6 +1155,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  fetchSetupTabs.delete(tabId);
   attachedTabs.delete(tabId);
   clearTabState(tabId);
 });
