@@ -197,6 +197,18 @@ impl CaptureStore {
                 post_data_entry_count INTEGER,
                 declared_content_length INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS cache_replay_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at_ms INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                body_bytes INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS cache_replay_events_outcome_idx
+                ON cache_replay_events(outcome);
             "#,
         )?;
 
@@ -644,6 +656,63 @@ impl CaptureStore {
                 "SELECT COUNT(*) FROM request_bodies WHERE body_error LIKE 'suppressed:%'",
             )?,
         })
+    }
+
+    pub fn record_cache_replay_outcome(
+        &self,
+        raw_url: &str,
+        resource_type: &str,
+        outcome: &str,
+        body_bytes: u64,
+    ) -> Result<()> {
+        let url = Url::parse(raw_url).context("parsing replay telemetry URL")?;
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && (host == "chatgpt.com" || host == "chat.openai.com")
+                && url.path().starts_with("/_next/static/")
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "refusing replay telemetry for non-static ChatGPT URL"
+        );
+        anyhow::ensure!(
+            matches!(
+                resource_type.to_ascii_lowercase().as_str(),
+                "script" | "stylesheet"
+            ),
+            "refusing replay telemetry for unsupported resource type"
+        );
+        anyhow::ensure!(
+            matches!(
+                outcome,
+                "hit" | "miss" | "lookup_error" | "timeout" | "fulfill_error"
+            ),
+            "invalid replay telemetry outcome"
+        );
+        anyhow::ensure!(
+            outcome == "hit" || body_bytes == 0,
+            "non-hit replay telemetry must not report replayed bytes"
+        );
+
+        self.connection.execute(
+            r#"
+            INSERT INTO cache_replay_events (
+                observed_at_ms,
+                url,
+                resource_type,
+                outcome,
+                body_bytes
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                now_ms()? as i64,
+                sanitize_url_for_storage(raw_url),
+                resource_type,
+                outcome,
+                body_bytes as i64,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn recent_captures(&self, limit: u64) -> Result<Vec<CaptureSummary>> {
@@ -1589,6 +1658,65 @@ mod tests {
             cache_control: None,
             provenance: CaptureProvenance::default(),
         }
+    }
+
+    #[test]
+    fn replay_telemetry_accepts_only_static_public_scope() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+
+        store
+            .record_cache_replay_outcome(
+                "https://chatgpt.com/_next/static/app.js",
+                "Script",
+                "hit",
+                42,
+            )
+            .unwrap();
+        store
+            .record_cache_replay_outcome(
+                "https://chatgpt.com/_next/static/app.css",
+                "Stylesheet",
+                "miss",
+                0,
+            )
+            .unwrap();
+
+        assert!(store
+            .record_cache_replay_outcome(
+                "https://chatgpt.com/backend-api/conversation/x",
+                "Fetch",
+                "miss",
+                0,
+            )
+            .is_err());
+        assert!(store
+            .record_cache_replay_outcome(
+                "https://chatgpt.com/_next/static/app.js?token=secret",
+                "Script",
+                "miss",
+                0,
+            )
+            .is_err());
+        assert!(store
+            .record_cache_replay_outcome(
+                "https://chatgpt.com/_next/static/app.js",
+                "Script",
+                "miss",
+                1,
+            )
+            .is_err());
+
+        let (count, bytes): (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*), SUM(body_bytes) FROM cache_replay_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(bytes, 42);
     }
 
     #[test]

@@ -40,6 +40,17 @@ pub struct ReplayEntry {
     pub body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ReplayStats {
+    pub attempts: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub lookup_errors: u64,
+    pub timeouts: u64,
+    pub fulfill_errors: u64,
+    pub replayed_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CacheStats {
     pub observed_public_get_captures: u64,
@@ -71,6 +82,66 @@ pub fn candidates(raw_root: impl AsRef<Path>, limit: u64) -> Result<Vec<CacheCan
     });
     candidates.truncate(limit.try_into().unwrap_or(usize::MAX));
     Ok(candidates)
+}
+
+pub fn replay_stats(raw_root: impl AsRef<Path>) -> Result<ReplayStats> {
+    let database = raw_root.as_ref().join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    let table_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cache_replay_events'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_count == 0 {
+        return Ok(ReplayStats::default());
+    }
+
+    let mut stats = ReplayStats::default();
+    let mut statement = connection.prepare(
+        r#"
+        SELECT outcome, COUNT(*), COALESCE(SUM(body_bytes), 0)
+        FROM cache_replay_events
+        GROUP BY outcome
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (outcome, count, bytes) = row?;
+        let count: u64 = count.try_into().context("negative replay event count")?;
+        let bytes: u64 = bytes.try_into().context("negative replay byte count")?;
+        stats.attempts = stats
+            .attempts
+            .checked_add(count)
+            .context("replay attempt count overflow")?;
+        match outcome.as_str() {
+            "hit" => {
+                stats.hits = count;
+                stats.replayed_bytes = bytes;
+            }
+            "miss" => stats.misses = count,
+            "lookup_error" => stats.lookup_errors = count,
+            "timeout" => stats.timeouts = count,
+            "fulfill_error" => stats.fulfill_errors = count,
+            _ => {}
+        }
+    }
+    Ok(stats)
 }
 
 pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
@@ -448,6 +519,14 @@ mod tests {
                     created_at_ms INTEGER NOT NULL,
                     PRIMARY KEY (storage_class, hash)
                 );
+                CREATE TABLE cache_replay_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    observed_at_ms INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    body_bytes INTEGER NOT NULL
+                );
                 CREATE TABLE captures (
                     capture_id TEXT PRIMARY KEY,
                     captured_at_ms INTEGER NOT NULL,
@@ -502,6 +581,39 @@ mod tests {
                 params![id, timestamp, url, hash, cache_control],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn replay_stats_aggregate_outcomes_and_bytes() {
+        let (directory, connection) = open_fixture();
+        for (outcome, bytes) in [
+            ("hit", 120_i64),
+            ("hit", 80),
+            ("miss", 0),
+            ("timeout", 0),
+            ("lookup_error", 0),
+            ("fulfill_error", 0),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO cache_replay_events (observed_at_ms, url, resource_type, outcome, body_bytes) VALUES (1, 'https://chatgpt.com/_next/static/app.js', 'Script', ?1, ?2)",
+                    params![outcome, bytes],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            replay_stats(directory.path()).unwrap(),
+            ReplayStats {
+                attempts: 6,
+                hits: 2,
+                misses: 1,
+                lookup_errors: 1,
+                timeouts: 1,
+                fulfill_errors: 1,
+                replayed_bytes: 200,
+            }
+        );
     }
 
     #[test]

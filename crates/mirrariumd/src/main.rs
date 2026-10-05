@@ -129,7 +129,9 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         | HostRequest::RequestBodyChunk { capture_id, .. }
         | HostRequest::RequestBodyFinish { capture_id, .. }
         | HostRequest::CaptureFinish { capture_id, .. } => Some(capture_id.clone()),
-        HostRequest::Ping | HostRequest::CacheLookup { .. } => None,
+        HostRequest::Ping
+        | HostRequest::CacheLookup { .. }
+        | HostRequest::CacheReplayOutcome { .. } => None,
     };
 
     let result = match request {
@@ -140,6 +142,17 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
                 message: "cache lookup must be handled by the streaming response path".to_owned(),
             };
         }
+        HostRequest::CacheReplayOutcome {
+            url,
+            resource_type,
+            outcome,
+            body_bytes,
+        } => store.record_cache_replay_outcome(
+            &url,
+            &resource_type,
+            &outcome,
+            body_bytes,
+        ),
         HostRequest::CaptureStart { metadata } => store.begin(metadata),
         HostRequest::CaptureChunk {
             capture_id,

@@ -57,6 +57,12 @@ pub enum HostRequest {
         url: String,
         resource_type: String,
     },
+    CacheReplayOutcome {
+        url: String,
+        resource_type: String,
+        outcome: String,
+        body_bytes: u64,
+    },
     CaptureStart { metadata: CaptureMetadata },
     CaptureChunk {
         capture_id: String,

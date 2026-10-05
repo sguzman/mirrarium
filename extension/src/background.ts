@@ -55,6 +55,8 @@ type CacheReplayHit = {
 type PendingCacheLookup = {
   resolve: (hit: CacheReplayHit | null) => void;
   timeoutId: number;
+  url: string;
+  resourceType: string;
   metadata?: Omit<CacheReplayHit, "bodyBase64">;
   chunks: string[];
   nextSequence: number;
@@ -144,12 +146,14 @@ function handleNativeMessage(message: unknown): void {
   if (!pending) return;
 
   if (type === "cache_miss") {
+    recordReplayOutcome(pending.url, pending.resourceType, "miss");
     finishCacheLookup(lookupId, null);
     return;
   }
 
   if (type === "cache_lookup_error") {
     console.warn("Mirrarium cache lookup failed", record.message);
+    recordReplayOutcome(pending.url, pending.resourceType, "lookup_error");
     finishCacheLookup(lookupId, null);
     return;
   }
@@ -166,6 +170,7 @@ function handleNativeMessage(message: unknown): void {
         ? record.body_bytes
         : undefined;
     if (!mimeType || !bodyHash || bodyBytes === undefined) {
+      recordReplayOutcome(pending.url, pending.resourceType, "lookup_error");
       finishCacheLookup(lookupId, null);
       return;
     }
@@ -199,6 +204,7 @@ function handleNativeMessage(message: unknown): void {
       sequence !== pending.nextSequence ||
       dataBase64 === undefined
     ) {
+      recordReplayOutcome(pending.url, pending.resourceType, "lookup_error");
       finishCacheLookup(lookupId, null);
       return;
     }
@@ -209,6 +215,7 @@ function handleNativeMessage(message: unknown): void {
 
   if (type === "cache_hit_finish") {
     if (!pending.metadata) {
+      recordReplayOutcome(pending.url, pending.resourceType, "lookup_error");
       finishCacheLookup(lookupId, null);
       return;
     }
@@ -216,6 +223,7 @@ function handleNativeMessage(message: unknown): void {
     const expectedBase64Length = Math.ceil(pending.metadata.bodyBytes / 3) * 4;
     if (bodyBase64.length !== expectedBase64Length) {
       console.warn("Mirrarium replay chunk length mismatch", lookupId);
+      recordReplayOutcome(pending.url, pending.resourceType, "lookup_error");
       finishCacheLookup(lookupId, null);
       return;
     }
@@ -258,6 +266,21 @@ function postNative(message: unknown): void {
   }
 }
 
+function recordReplayOutcome(
+  url: string,
+  resourceType: string,
+  outcome: "hit" | "miss" | "lookup_error" | "timeout" | "fulfill_error",
+  bodyBytes = 0,
+): void {
+  postNative({
+    type: "cache_replay_outcome",
+    url,
+    resource_type: resourceType,
+    outcome,
+    body_bytes: outcome === "hit" ? bodyBytes : 0,
+  });
+}
+
 function lookupCachedResponse(
   url: string,
   resourceType: string,
@@ -268,11 +291,14 @@ function lookupCachedResponse(
   const lookupId = crypto.randomUUID();
   return new Promise((resolve) => {
     const timeoutId = setTimeout(() => {
+      recordReplayOutcome(url, resourceType, "timeout");
       finishCacheLookup(lookupId, null);
     }, CACHE_LOOKUP_TIMEOUT_MS);
     pendingCacheLookups.set(lookupId, {
       resolve,
       timeoutId,
+      url,
+      resourceType,
       chunks: [],
       nextSequence: 0,
     });
@@ -381,8 +407,15 @@ async function handlePausedRequest(
       responseHeaders,
       body: hit.bodyBase64,
     });
+    recordReplayOutcome(
+      event.request.url,
+      resourceType,
+      "hit",
+      hit.bodyBytes,
+    );
   } catch (error) {
     console.warn("Mirrarium could not fulfill cached response", error);
+    recordReplayOutcome(event.request.url, resourceType, "fulfill_error");
     await continuePausedRequest(tabId, event.requestId);
   }
 }
