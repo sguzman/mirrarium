@@ -219,6 +219,48 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(candidate?.reasons).toEqual([]);
       }
 
+      const replayCountsBefore = (await fetch(
+        "http://127.0.0.1:43118/replay-counts",
+      ).then((response) => response.json())) as { css: number; js: number };
+      expect(replayCountsBefore.css).toBeGreaterThanOrEqual(1);
+      expect(replayCountsBefore.js).toBeGreaterThanOrEqual(1);
+
+      const replaySession = await context.newCDPSession(page);
+      try {
+        await replaySession.send("Network.enable");
+        await replaySession.send("Network.setCacheDisabled", {
+          cacheDisabled: true,
+        });
+
+        const scriptHit = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/_next/static/app.js") &&
+            response.headers()["x-mirrarium-cache"] === "hit",
+          { timeout: 10_000 },
+        );
+        const stylesheetHit = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/_next/static/app.css") &&
+            response.headers()["x-mirrarium-cache"] === "hit",
+          { timeout: 10_000 },
+        );
+
+        const [, scriptResponse, stylesheetResponse] = await Promise.all([
+          page.goto("https://chatgpt.com:43117/replay-probe"),
+          scriptHit,
+          stylesheetHit,
+        ]);
+        expect(scriptResponse.status()).toBe(200);
+        expect(stylesheetResponse.status()).toBe(200);
+      } finally {
+        await replaySession.detach();
+      }
+
+      const replayCountsAfter = (await fetch(
+        "http://127.0.0.1:43118/replay-counts",
+      ).then((response) => response.json())) as { css: number; js: number };
+      expect(replayCountsAfter).toEqual(replayCountsBefore);
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "20"],

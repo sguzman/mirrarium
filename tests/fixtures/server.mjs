@@ -10,6 +10,8 @@ const healthPort = 43118;
 const certificateDirectory = mkdtempSync(join(tmpdir(), "mirrarium-cert-"));
 const keyPath = join(certificateDirectory, "key.pem");
 const certPath = join(certificateDirectory, "cert.pem");
+let staticCssHits = 0;
+let staticJsHits = 0;
 
 execFileSync("openssl", [
   "req",
@@ -93,6 +95,13 @@ Promise.all([
 });
 </script>`;
 
+const replayProbe = `<!doctype html>
+<meta charset="utf-8">
+<title>Mirrarium replay probe</title>
+<link rel="stylesheet" href="/_next/static/app.css">
+<script src="/_next/static/app.js"></script>
+<h1>replay probe</h1>`;
+
 const fixtureServer = https.createServer(
   {
     key: readFileSync(keyPath),
@@ -105,7 +114,17 @@ const fixtureServer = https.createServer(
       return;
     }
 
+    if (request.url === "/replay-probe") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      response.end(replayProbe);
+      return;
+    }
+
     if (request.url === "/_next/static/app.css") {
+      staticCssHits += 1;
       response.writeHead(200, {
         "content-type": "text/css",
         "cache-control": "public, max-age=31536000, immutable",
@@ -115,6 +134,7 @@ const fixtureServer = https.createServer(
     }
 
     if (request.url === "/_next/static/app.js") {
+      staticJsHits += 1;
       response.writeHead(200, {
         "content-type": "application/javascript",
         "cache-control": "public, max-age=31536000, immutable",
@@ -346,7 +366,16 @@ const fixtureServer = https.createServer(
   },
 );
 
-const healthServer = http.createServer((_request, response) => {
+const healthServer = http.createServer((request, response) => {
+  if (request.url === "/replay-counts") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      css: staticCssHits,
+      js: staticJsHits,
+    }));
+    return;
+  }
+
   response.writeHead(200, { "content-type": "text/plain" });
   response.end("ok");
 });
