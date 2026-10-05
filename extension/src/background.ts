@@ -2,6 +2,7 @@ const NATIVE_HOST = "com.sguzman.mirrarium";
 const CDP_VERSION = "1.3";
 const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
+const CACHE_LOOKUP_TIMEOUT_MS = 750;
 
 type RequestMetadata = {
   method: string;
@@ -41,6 +42,24 @@ type ResponseMetadata = {
   encodedDataLength?: number;
 };
 
+type CacheReplayHit = {
+  mimeType: string;
+  bodyHash: string;
+  bodyBytes: number;
+  cacheControl?: string;
+  etag?: string;
+  lastModified?: string;
+  bodyBase64: string;
+};
+
+type PendingCacheLookup = {
+  resolve: (hit: CacheReplayHit | null) => void;
+  timeoutId: number;
+  metadata?: Omit<CacheReplayHit, "bodyBase64">;
+  chunks: string[];
+  nextSequence: number;
+};
+
 type CdpResponse = {
   url: string;
   status: number;
@@ -57,6 +76,7 @@ type CdpResponse = {
 const attachedTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
+const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 let nativePort: chrome.runtime.Port | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -89,6 +109,122 @@ function clearTabState(tabId: number): void {
   }
 }
 
+function finishCacheLookup(
+  lookupId: string,
+  hit: CacheReplayHit | null,
+): void {
+  const pending = pendingCacheLookups.get(lookupId);
+  if (!pending) return;
+  clearTimeout(pending.timeoutId);
+  pendingCacheLookups.delete(lookupId);
+  pending.resolve(hit);
+}
+
+function failAllCacheLookups(): void {
+  for (const lookupId of Array.from(pendingCacheLookups.keys())) {
+    finishCacheLookup(lookupId, null);
+  }
+}
+
+function handleNativeMessage(message: unknown): void {
+  if (message === null || typeof message !== "object") return;
+  const record = message as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : undefined;
+
+  if (type === "error") {
+    console.error("Mirrarium native host error", message);
+    return;
+  }
+
+  const lookupId =
+    typeof record.lookup_id === "string" ? record.lookup_id : undefined;
+  if (!lookupId) return;
+  const pending = pendingCacheLookups.get(lookupId);
+  if (!pending) return;
+
+  if (type === "cache_miss") {
+    finishCacheLookup(lookupId, null);
+    return;
+  }
+
+  if (type === "cache_lookup_error") {
+    console.warn("Mirrarium cache lookup failed", record.message);
+    finishCacheLookup(lookupId, null);
+    return;
+  }
+
+  if (type === "cache_hit_start") {
+    const mimeType =
+      typeof record.mime_type === "string" ? record.mime_type : undefined;
+    const bodyHash =
+      typeof record.body_hash === "string" ? record.body_hash : undefined;
+    const bodyBytes =
+      typeof record.body_bytes === "number" &&
+      Number.isSafeInteger(record.body_bytes) &&
+      record.body_bytes >= 0
+        ? record.body_bytes
+        : undefined;
+    if (!mimeType || !bodyHash || bodyBytes === undefined) {
+      finishCacheLookup(lookupId, null);
+      return;
+    }
+    pending.metadata = {
+      mimeType,
+      bodyHash,
+      bodyBytes,
+      cacheControl:
+        typeof record.cache_control === "string" ? record.cache_control : undefined,
+      etag: typeof record.etag === "string" ? record.etag : undefined,
+      lastModified:
+        typeof record.last_modified === "string" ? record.last_modified : undefined,
+    };
+    pending.chunks = [];
+    pending.nextSequence = 0;
+    return;
+  }
+
+  if (type === "cache_hit_chunk") {
+    const sequence =
+      typeof record.sequence === "number" &&
+      Number.isSafeInteger(record.sequence) &&
+      record.sequence >= 0
+        ? record.sequence
+        : undefined;
+    const dataBase64 =
+      typeof record.data_base64 === "string" ? record.data_base64 : undefined;
+    if (
+      !pending.metadata ||
+      sequence === undefined ||
+      sequence !== pending.nextSequence ||
+      dataBase64 === undefined
+    ) {
+      finishCacheLookup(lookupId, null);
+      return;
+    }
+    pending.chunks.push(dataBase64);
+    pending.nextSequence += 1;
+    return;
+  }
+
+  if (type === "cache_hit_finish") {
+    if (!pending.metadata) {
+      finishCacheLookup(lookupId, null);
+      return;
+    }
+    const bodyBase64 = pending.chunks.join("");
+    const expectedBase64Length = Math.ceil(pending.metadata.bodyBytes / 3) * 4;
+    if (bodyBase64.length !== expectedBase64Length) {
+      console.warn("Mirrarium replay chunk length mismatch", lookupId);
+      finishCacheLookup(lookupId, null);
+      return;
+    }
+    finishCacheLookup(lookupId, {
+      ...pending.metadata,
+      bodyBase64,
+    });
+  }
+}
+
 function getNativePort(): chrome.runtime.Port | undefined {
   if (nativePort) return nativePort;
 
@@ -96,16 +232,14 @@ function getNativePort(): chrome.runtime.Port | undefined {
     const port = chrome.runtime.connectNative(NATIVE_HOST);
     port.onDisconnect.addListener(() => {
       if (nativePort === port) nativePort = undefined;
+      failAllCacheLookups();
       void chrome.runtime.lastError;
     });
-    port.onMessage.addListener((message) => {
-      if (message?.type === "error") {
-        console.error("Mirrarium native host error", message);
-      }
-    });
+    port.onMessage.addListener(handleNativeMessage);
     nativePort = port;
     return port;
   } catch (error) {
+    failAllCacheLookups();
     console.warn("Mirrarium native host unavailable", error);
     return undefined;
   }
@@ -123,14 +257,172 @@ function postNative(message: unknown): void {
   }
 }
 
+function lookupCachedResponse(
+  url: string,
+  resourceType: string,
+): Promise<CacheReplayHit | null> {
+  const port = getNativePort();
+  if (!port) return Promise.resolve(null);
+
+  const lookupId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      finishCacheLookup(lookupId, null);
+    }, CACHE_LOOKUP_TIMEOUT_MS);
+    pendingCacheLookups.set(lookupId, {
+      resolve,
+      timeoutId,
+      chunks: [],
+      nextSequence: 0,
+    });
+
+    try {
+      port.postMessage({
+        type: "cache_lookup",
+        lookup_id: lookupId,
+        url,
+        resource_type: resourceType,
+      });
+    } catch (error) {
+      if (nativePort === port) nativePort = undefined;
+      console.warn("Mirrarium could not query local cache", error);
+      finishCacheLookup(lookupId, null);
+    }
+  });
+}
+
+function isReplayInterceptCandidate(
+  rawUrl: string,
+  method: string,
+  resourceType: string | undefined,
+): boolean {
+  if (
+    method.toUpperCase() !== "GET" ||
+    !resourceType ||
+    !["script", "stylesheet"].includes(resourceType.toLowerCase())
+  ) {
+    return false;
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    return (
+      url.protocol === "https:" &&
+      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
+      url.pathname.startsWith("/_next/static/") &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function safeReplayHeaderValue(value: string | undefined): string | undefined {
+  if (!value || value.includes("\r") || value.includes("\n")) return undefined;
+  return value;
+}
+
+async function continuePausedRequest(tabId: number, requestId: string): Promise<void> {
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.continueRequest", {
+      requestId,
+    });
+  } catch {
+    // The tab/request may have disappeared while a local cache lookup was pending.
+  }
+}
+
+async function handlePausedRequest(
+  tabId: number,
+  event: {
+    requestId: string;
+    resourceType?: string;
+    request: { method: string; url: string };
+  },
+): Promise<void> {
+  const resourceType = event.resourceType ?? "";
+  if (
+    !isReplayInterceptCandidate(
+      event.request.url,
+      event.request.method,
+      resourceType,
+    )
+  ) {
+    await continuePausedRequest(tabId, event.requestId);
+    return;
+  }
+
+  const hit = await lookupCachedResponse(event.request.url, resourceType);
+  if (!hit) {
+    await continuePausedRequest(tabId, event.requestId);
+    return;
+  }
+
+  const responseHeaders: Array<{ name: string; value: string }> = [
+    { name: "Content-Type", value: hit.mimeType },
+    { name: "X-Mirrarium-Cache", value: "hit" },
+  ];
+  for (const [name, rawValue] of [
+    ["Cache-Control", hit.cacheControl],
+    ["ETag", hit.etag],
+    ["Last-Modified", hit.lastModified],
+  ] as const) {
+    const value = safeReplayHeaderValue(rawValue);
+    if (value) responseHeaders.push({ name, value });
+  }
+
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.fulfillRequest", {
+      requestId: event.requestId,
+      responseCode: 200,
+      responsePhrase: "OK",
+      responseHeaders,
+      body: hit.bodyBase64,
+    });
+  } catch (error) {
+    console.warn("Mirrarium could not fulfill cached response", error);
+    await continuePausedRequest(tabId, event.requestId);
+  }
+}
+
 async function attach(tabId: number, url: string | undefined): Promise<void> {
   if (!isSupportedChatGptUrl(url) || attachedTabs.has(tabId)) return;
 
+  let debuggerAttached = false;
   try {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
+    debuggerAttached = true;
     await chrome.debugger.sendCommand({ tabId }, "Network.enable");
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.enable", {
+      patterns: [
+        {
+          urlPattern: "https://chatgpt.com/_next/static/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chatgpt.com:*/_next/static/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chat.openai.com/_next/static/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chat.openai.com:*/_next/static/*",
+          requestStage: "Request",
+        },
+      ],
+    });
     attachedTabs.add(tabId);
   } catch (error) {
+    if (debuggerAttached) {
+      try {
+        await chrome.debugger.detach({ tabId });
+      } catch {
+        // Ignore cleanup failure after a partial debugger setup.
+      }
+    }
     console.warn("Mirrarium could not attach to ChatGPT tab", tabId, error);
   }
 }
@@ -710,6 +1002,19 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined || !attachedTabs.has(source.tabId)) return;
 
   const tabId = source.tabId;
+
+  if (method === "Fetch.requestPaused") {
+    const event = params as {
+      requestId: string;
+      resourceType?: string;
+      request: {
+        method: string;
+        url: string;
+      };
+    };
+    void handlePausedRequest(tabId, event);
+    return;
+  }
 
   if (method === "Network.requestWillBeSent") {
     const event = params as {
