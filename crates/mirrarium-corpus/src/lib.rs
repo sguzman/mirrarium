@@ -1007,17 +1007,29 @@ fn merge_stream_revisions_into_canonical(
         let children: Vec<&StreamRevisionCandidate> = candidates
             .values()
             .filter(|candidate| {
-                candidate.valid
-                    && !applied.contains(&candidate.message_id)
+                !applied.contains(&candidate.message_id)
                     && !canonical_ids.contains(&candidate.message_id)
                     && candidate.parent_id.as_deref() == Some(tail_id.as_str())
-                    && (candidate.role.is_some() || candidate.content_text.is_some())
             })
             .collect();
 
         match children.as_slice() {
             [] => break,
             [child] => {
+                if !child.valid {
+                    warnings.push(format!(
+                        "stream tail child {:?} has conflicting revision evidence; refusing to append it",
+                        child.message_id
+                    ));
+                    break;
+                }
+                if child.role.is_none() && child.content_text.is_none() {
+                    warnings.push(format!(
+                        "stream tail child {:?} has no role or content evidence; refusing to append it",
+                        child.message_id
+                    ));
+                    break;
+                }
                 if !seen_tail_ids.insert(child.message_id.clone()) {
                     warnings.push(format!(
                         "stream tail cycle detected at message {:?}; refusing to continue",
@@ -2394,6 +2406,52 @@ mod tests {
                 parent_id: Some("user-1".to_owned()),
                 role: Some("assistant".to_owned()),
                 content_text: Some("branch b".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+        ];
+
+        let warnings = merge_stream_revisions_into_canonical(&mut messages, &revisions);
+        assert_eq!(messages.len(), 1);
+        assert!(warnings.iter().any(|warning| warning.contains("refusing to guess a branch")));
+    }
+
+    #[test]
+    fn conflicting_sibling_still_blocks_stream_tail_branch_choice() {
+        let mut messages = vec![CanonicalMessageView {
+            message_id: Some("user-1".to_owned()),
+            parent_id: Some("root".to_owned()),
+            role: Some("user".to_owned()),
+            content_text: Some("question".to_owned()),
+        }];
+        let revisions = vec![
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 0,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-a".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("safe branch".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 1,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-b".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("conflict one".to_owned()),
+                source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            },
+            StreamMessageRevisionView {
+                capture_id: "stream".to_owned(),
+                sequence: 2,
+                conversation_id: "conversation-a".to_owned(),
+                message_id: "assistant-b".to_owned(),
+                parent_id: Some("user-1".to_owned()),
+                role: Some("assistant".to_owned()),
+                content_text: Some("different conflict".to_owned()),
                 source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
             },
         ];
