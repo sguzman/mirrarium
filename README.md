@@ -13,7 +13,7 @@ Mirrarium starts as a passive recorder. It must become trustworthy before it is 
 ## Browser and QA contract
 
 - The extension targets Chromium Manifest V3.
-- Playwright using its managed Chromium build is the canonical automated QA environment.
+- Playwright using its bundled Chromium build is the canonical automated QA environment.
 - Automated tests use disposable Chromium profiles.
 - Automated tooling must never launch, attach to, inspect, modify, or reuse Salvador's personal Microsoft Edge profile.
 - Edge is a deployment target for normal personal use, not a development or QA sandbox.
@@ -55,6 +55,20 @@ Mirrarium keeps three distinct conceptual stores:
 Raw evidence is preserved. Derived representations may be deleted and rebuilt as parsers improve.
 
 Reusable authentication secrets are not archival data and must not be persisted.
+
+## Inspection CLI
+
+The Rust CLI reads the same local store as the native host:
+
+```bash
+mirrarium stats
+mirrarium captures 20
+mirrarium verify
+```
+
+`verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
+
+The data root is resolved from `MIRRARIUM_DATA_DIR`, then `XDG_DATA_HOME/mirrarium`, then `~/.local/share/mirrarium`.
 
 ## MVP: Passive Recorder
 

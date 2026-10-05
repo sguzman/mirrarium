@@ -1,20 +1,16 @@
-use std::{
-    env,
-    io::{self, Read, Write},
-    path::PathBuf,
-};
+use std::io::{self, Read, Write};
 
 use anyhow::{Context, Result};
 use mirrarium_protocol::{HostRequest, HostResponse};
-use mirrarium_store::CaptureStore;
+use mirrarium_store::{default_data_root, CaptureStore};
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 fn main() -> Result<()> {
-    let arguments: Vec<String> = env::args().skip(1).collect();
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
 
     if arguments.first().map(String::as_str) == Some("--stats") {
-        let store = CaptureStore::open(data_root()?)?;
+        let store = CaptureStore::open(default_data_root()?)?;
         println!("{}", serde_json::to_string_pretty(&store.stats()?)?);
         return Ok(());
     }
@@ -27,7 +23,7 @@ fn run_native_host() -> Result<()> {
     let stdout = io::stdout();
     let mut input = stdin.lock();
     let mut output = stdout.lock();
-    let mut store = CaptureStore::open(data_root()?)?;
+    let mut store = CaptureStore::open(default_data_root()?)?;
 
     while let Some(payload) = read_native_message(&mut input)? {
         let response = match serde_json::from_slice::<HostRequest>(&payload) {
@@ -78,22 +74,6 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             message: format!("{error:#}"),
         },
     }
-}
-
-fn data_root() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("MIRRARIUM_DATA_DIR") {
-        return Ok(PathBuf::from(path));
-    }
-
-    if let Some(path) = env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(path).join("mirrarium"));
-    }
-
-    if let Some(home) = env::var_os("HOME") {
-        return Ok(PathBuf::from(home).join(".local/share/mirrarium"));
-    }
-
-    anyhow::bail!("set MIRRARIUM_DATA_DIR, XDG_DATA_HOME, or HOME")
 }
 
 fn read_native_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {

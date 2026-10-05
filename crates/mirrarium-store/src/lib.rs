@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
+    env,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -29,6 +30,15 @@ impl PrivacyClass {
             Self::Unknown => "unknown",
         }
     }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "public" => Some(Self::Public),
+            "private" => Some(Self::Private),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +54,27 @@ pub struct StoreStats {
     pub unknown_objects: u64,
     pub captured_body_bytes: u64,
     pub body_errors: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CaptureSummary {
+    pub captured_at_ms: u64,
+    pub method: String,
+    pub url: String,
+    pub status: i64,
+    pub mime_type: String,
+    pub resource_type: String,
+    pub privacy_class: String,
+    pub body_hash: Option<String>,
+    pub body_bytes: u64,
+    pub body_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyReport {
+    pub checked_objects: u64,
+    pub corrupt_objects: u64,
+    pub errors: Vec<String>,
 }
 
 struct InFlightCapture {
@@ -324,6 +355,142 @@ impl CaptureStore {
         })
     }
 
+    pub fn recent_captures(&self, limit: u64) -> Result<Vec<CaptureSummary>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                captured_at_ms,
+                method,
+                url,
+                status,
+                mime_type,
+                resource_type,
+                privacy_class,
+                body_hash,
+                body_bytes,
+                body_error
+            FROM captures
+            ORDER BY captured_at_ms DESC
+            LIMIT ?1
+            "#,
+        )?;
+
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(CaptureSummary {
+                captured_at_ms: row.get::<_, i64>(0)? as u64,
+                method: row.get(1)?,
+                url: row.get(2)?,
+                status: row.get(3)?,
+                mime_type: row.get(4)?,
+                resource_type: row.get(5)?,
+                privacy_class: row.get(6)?,
+                body_hash: row.get(7)?,
+                body_bytes: row.get::<_, i64>(8)? as u64,
+                body_error: row.get(9)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading recent captures")
+    }
+
+    pub fn verify(&self) -> Result<VerifyReport> {
+        let mut statement = self.connection.prepare(
+            "SELECT storage_class, hash, bytes, relative_path FROM objects ORDER BY storage_class, hash",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let mut report = VerifyReport {
+            checked_objects: 0,
+            corrupt_objects: 0,
+            errors: Vec::new(),
+        };
+
+        for row in rows {
+            let (storage_class, hash, expected_bytes, indexed_relative_path) = row?;
+            report.checked_objects += 1;
+
+            let Some(class) = PrivacyClass::parse(&storage_class) else {
+                report.corrupt_objects += 1;
+                report
+                    .errors
+                    .push(format!("{storage_class}/{hash}: invalid storage class"));
+                continue;
+            };
+
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                report.corrupt_objects += 1;
+                report
+                    .errors
+                    .push(format!("{storage_class}/{hash}: invalid SHA-256 key"));
+                continue;
+            }
+
+            if expected_bytes < 0 {
+                report.corrupt_objects += 1;
+                report.errors.push(format!(
+                    "{storage_class}/{hash}: negative byte count {expected_bytes}"
+                ));
+                continue;
+            }
+
+            let expected_relative_path = object_relative_path(class, &hash);
+            if Path::new(&indexed_relative_path) != expected_relative_path {
+                report.corrupt_objects += 1;
+                report.errors.push(format!(
+                    "{storage_class}/{hash}: ledger path mismatch: {indexed_relative_path}"
+                ));
+                continue;
+            }
+
+            let path = self.root.join(&expected_relative_path);
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) => {
+                    report.corrupt_objects += 1;
+                    report.errors.push(format!(
+                        "{storage_class}/{hash}: cannot open {}: {error}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+
+            let mut reader = BufReader::new(file);
+            let mut hasher = Sha256::new();
+            let mut actual_bytes = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+                actual_bytes = actual_bytes
+                    .checked_add(read as u64)
+                    .context("verified byte count overflow")?;
+            }
+
+            let actual_hash = format!("{:x}", hasher.finalize());
+            if actual_hash != hash || actual_bytes != expected_bytes as u64 {
+                report.corrupt_objects += 1;
+                report.errors.push(format!(
+                    "{storage_class}/{hash}: expected {expected_bytes} bytes/{hash}, got {actual_bytes} bytes/{actual_hash}"
+                ));
+            }
+        }
+
+        Ok(report)
+    }
+
     fn insert_capture(
         &self,
         metadata: &CaptureMetadata,
@@ -381,6 +548,22 @@ impl CaptureStore {
         )?;
         Ok(())
     }
+}
+
+pub fn default_data_root() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("MIRRARIUM_DATA_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+
+    if let Some(path) = env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(path).join("mirrarium"));
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".local/share/mirrarium"));
+    }
+
+    anyhow::bail!("set MIRRARIUM_DATA_DIR, XDG_DATA_HOME, or HOME")
 }
 
 pub fn classify(metadata: &CaptureMetadata) -> PrivacyClass {
@@ -524,6 +707,40 @@ mod tests {
         assert_eq!(stats.private_objects, 1);
         assert_eq!(stats.public_objects, 1);
         assert_eq!(stats.objects, 2);
+
+        let captures = store.recent_captures(2).unwrap();
+        assert_eq!(captures.len(), 2);
+
+        let report = store.verify().unwrap();
+        assert_eq!(report.checked_objects, 2);
+        assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn verifier_detects_corruption() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let body = BASE64.encode(b"original");
+        store
+            .begin(metadata(
+                "corrupt-me",
+                "https://chatgpt.com/backend-api/test",
+                "Fetch",
+            ))
+            .unwrap();
+        store.append_chunk("corrupt-me", 0, &body).unwrap();
+        store.finish("corrupt-me", Some(8), None).unwrap();
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        let hash = capture.body_hash.unwrap();
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        fs::write(path, b"tampered").unwrap();
+
+        let report = store.verify().unwrap();
+        assert_eq!(report.checked_objects, 1);
+        assert_eq!(report.corrupt_objects, 1);
     }
 
     #[test]
