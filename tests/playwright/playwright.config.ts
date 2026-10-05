@@ -7,7 +7,7 @@ export default defineConfig({
   workers: 1,
   reporter: "line",
   webServer: {
-    command: "node tests/fixtures/server.mjs",
+    command: "node ../fixtures/server.mjs",
     url: "http://127.0.0.1:43118/health",
     reuseExistingServer: false,
   },
