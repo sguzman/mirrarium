@@ -415,6 +415,15 @@ async function captureRequestBody(
     return;
   }
 
+  if (request.contentType?.toLowerCase().includes("multipart/form-data")) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "suppressed:multipart_request_body_not_archived",
+    });
+    return;
+  }
+
   let body = request.postData;
   if (body === undefined && request.hasPostData && !allowPostDataFetch) {
     postNative({
