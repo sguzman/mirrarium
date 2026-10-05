@@ -124,6 +124,24 @@ fn run() -> Result<()> {
                     )?
                 );
             }
+            Some("stream-revisions") => {
+                let conversation_id = arguments
+                    .get(2)
+                    .context("missing conversation id")?;
+                let limit = arguments
+                    .get(3)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("stream revision limit must be a positive integer")?
+                    .unwrap_or(500);
+                anyhow::ensure!(limit > 0, "stream revision limit must be greater than zero");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::stream_message_revisions(&root, conversation_id, limit)?
+                    )?
+                );
+            }
             Some(command) => anyhow::bail!(
                 "unknown corpus command {command:?}; run 'mirrarium help'"
             ),
@@ -324,6 +342,7 @@ USAGE:
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>
   mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
+  mirrarium corpus stream-revisions <CONVERSATION_ID> [LIMIT]
   mirrarium native-host install [BROWSER] [MIRRARIUMD_PATH]
   mirrarium native-host status [BROWSER]
   mirrarium native-host uninstall [BROWSER]
