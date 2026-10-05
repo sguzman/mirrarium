@@ -174,6 +174,51 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(stats.private_objects).toBeLessThan(stats.private_captures + stats.request_bodies);
       expect(stats.request_body_errors).toBe(0);
 
+      await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(cliPath, ["cache", "stats"], {
+              env: {
+                ...process.env,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            });
+            return (JSON.parse(stdout) as { eligible_urls: number }).eligible_urls;
+          },
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThanOrEqual(2);
+
+      const { stdout: cacheCandidatesStdout } = await execFileAsync(
+        cliPath,
+        ["cache", "candidates", "50"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const cacheCandidates = JSON.parse(cacheCandidatesStdout) as Array<{
+        url: string;
+        resource_type: string;
+        body_hash: string;
+        cache_control?: string;
+        capture_count: number;
+        distinct_body_hashes: number;
+        eligible: boolean;
+        reasons: string[];
+      }>;
+      for (const suffix of ["/_next/static/app.js", "/_next/static/app.css"]) {
+        const candidate = cacheCandidates.find((item) => item.url.endsWith(suffix));
+        expect(candidate, `missing cache candidate for ${suffix}`).toBeTruthy();
+        expect(candidate?.eligible).toBe(true);
+        expect(candidate?.distinct_body_hashes).toBe(1);
+        expect(candidate?.body_hash).toMatch(/^[0-9a-f]{64}$/);
+        expect(candidate?.cache_control?.toLowerCase()).toContain("immutable");
+        expect(candidate?.reasons).toEqual([]);
+      }
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "20"],
