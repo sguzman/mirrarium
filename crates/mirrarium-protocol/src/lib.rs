@@ -52,6 +52,11 @@ pub struct CaptureMetadata {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostRequest {
     Ping,
+    CacheLookup {
+        lookup_id: String,
+        url: String,
+        resource_type: String,
+    },
     CaptureStart { metadata: CaptureMetadata },
     CaptureChunk {
         capture_id: String,
@@ -82,6 +87,30 @@ pub enum HostRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostResponse {
     Pong,
+    CacheMiss {
+        lookup_id: String,
+    },
+    CacheHitStart {
+        lookup_id: String,
+        mime_type: String,
+        body_hash: String,
+        body_bytes: u64,
+        cache_control: Option<String>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+    CacheHitChunk {
+        lookup_id: String,
+        sequence: u32,
+        data_base64: String,
+    },
+    CacheHitFinish {
+        lookup_id: String,
+    },
+    CacheLookupError {
+        lookup_id: String,
+        message: String,
+    },
     Ack { capture_id: Option<String> },
     Error {
         capture_id: Option<String>,
