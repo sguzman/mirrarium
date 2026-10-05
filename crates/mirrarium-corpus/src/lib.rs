@@ -78,6 +78,7 @@ pub struct MessageObservationView {
 pub struct StreamReconstructionView {
     pub capture_id: String,
     pub conversation_id: String,
+    pub message_id: Option<String>,
     pub source_url: String,
     pub text: String,
     pub fragment_count: u64,
@@ -108,6 +109,7 @@ pub struct CanonicalConversationView {
     pub basis_kind: String,
     pub current_node: Option<String>,
     pub messages: Vec<CanonicalMessageView>,
+    pub linked_streams: Vec<StreamReconstructionView>,
     pub unlinked_streams: Vec<StreamReconstructionView>,
     pub warnings: Vec<String>,
 }
@@ -153,6 +155,14 @@ struct DownloadSource {
     privacy_class: String,
     body_hash: String,
     body_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct StreamAccumulator {
+    text: String,
+    fragment_count: u64,
+    message_id: Option<String>,
+    linkable: bool,
 }
 
 pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
@@ -277,6 +287,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         CREATE TABLE stream_reconstructions (
             capture_id TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
+            message_id TEXT,
             source_url TEXT NOT NULL,
             text TEXT NOT NULL,
             fragment_count INTEGER NOT NULL,
@@ -641,7 +652,7 @@ pub fn canonical(
     let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("canonical snapshot is not JSON: {}", source_path.display()))?;
 
-    let (basis_kind, current_node, messages, mut warnings) =
+    let (basis_kind, current_node, mut messages, mut warnings) =
         canonical_messages_from_snapshot(&value);
 
     if let Some(snapshot_id) = conversation_id_from_value(&value)
@@ -655,10 +666,13 @@ pub fn canonical(
         }
     }
 
-    let unlinked_streams = stream_views_for_conversation(&connection, conversation_id)?;
+    let streams = stream_views_for_conversation(&connection, conversation_id)?;
+    let (linked_streams, unlinked_streams, stream_warnings) =
+        merge_exact_id_streams(&mut messages, streams);
+    warnings.extend(stream_warnings);
     if !unlinked_streams.is_empty() {
         warnings.push(
-            "stream reconstructions are preserved separately because no safe message linkage is known"
+            "some stream reconstructions remain separate because no safe exact-ID merge was possible"
                 .to_owned(),
         );
     }
@@ -672,6 +686,7 @@ pub fn canonical(
         basis_kind,
         current_node,
         messages,
+        linked_streams,
         unlinked_streams,
         warnings,
     }))
@@ -686,6 +701,7 @@ fn stream_views_for_conversation(
         SELECT
             capture_id,
             conversation_id,
+            message_id,
             source_url,
             text,
             fragment_count
@@ -698,13 +714,77 @@ fn stream_views_for_conversation(
         Ok(StreamReconstructionView {
             capture_id: row.get(0)?,
             conversation_id: row.get(1)?,
-            source_url: row.get(2)?,
-            text: row.get(3)?,
-            fragment_count: row.get::<_, i64>(4)? as u64,
+            message_id: row.get(2)?,
+            source_url: row.get(3)?,
+            text: row.get(4)?,
+            fragment_count: row.get::<_, i64>(5)? as u64,
         })
     })?;
     let streams = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(streams)
+}
+
+fn merge_exact_id_streams(
+    messages: &mut [CanonicalMessageView],
+    streams: Vec<StreamReconstructionView>,
+) -> (
+    Vec<StreamReconstructionView>,
+    Vec<StreamReconstructionView>,
+    Vec<String>,
+) {
+    let mut linked = Vec::new();
+    let mut unlinked = Vec::new();
+    let mut warnings = Vec::new();
+
+    for stream in streams {
+        let Some(message_id) = stream.message_id.as_deref() else {
+            unlinked.push(stream);
+            continue;
+        };
+
+        let matching_indices: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                (message.message_id.as_deref() == Some(message_id)).then_some(index)
+            })
+            .collect();
+
+        if matching_indices.len() != 1 {
+            warnings.push(format!(
+                "stream for message {message_id:?} matched {} canonical messages; refusing to merge",
+                matching_indices.len()
+            ));
+            unlinked.push(stream);
+            continue;
+        }
+
+        let target = &mut messages[matching_indices[0]];
+        let compatible = match target.content_text.as_deref() {
+            None => {
+                target.content_text = Some(stream.text.clone());
+                true
+            }
+            Some(snapshot_text) if snapshot_text == stream.text => true,
+            Some(snapshot_text) if stream.text.starts_with(snapshot_text) => {
+                target.content_text = Some(stream.text.clone());
+                true
+            }
+            Some(snapshot_text) if snapshot_text.starts_with(&stream.text) => true,
+            Some(_) => false,
+        };
+
+        if compatible {
+            linked.push(stream);
+        } else {
+            warnings.push(format!(
+                "stream text for message {message_id:?} conflicts with canonical snapshot content; refusing to merge"
+            ));
+            unlinked.push(stream);
+        }
+    }
+
+    (linked, unlinked, warnings)
 }
 
 fn canonical_messages_from_snapshot(
@@ -1020,7 +1100,7 @@ fn derive_stream_capture(
         ],
     )?;
 
-    let mut reconstructions: BTreeMap<String, (String, u64)> = BTreeMap::new();
+    let mut reconstructions: BTreeMap<String, StreamAccumulator> = BTreeMap::new();
 
     for (sequence, event) in events.into_iter().enumerate() {
         let parsed = serde_json::from_str::<Value>(&event.data).ok();
@@ -1051,11 +1131,25 @@ fn derive_stream_capture(
             conversation_id.as_deref(),
             value.get("delta").and_then(Value::as_str),
         ) {
+            let explicit_message_id = stream_message_id(&value);
             let entry = reconstructions
                 .entry(conversation_id.to_owned())
-                .or_insert_with(|| (String::new(), 0));
-            entry.0.push_str(delta);
-            entry.1 += 1;
+                .or_insert_with(|| StreamAccumulator {
+                    message_id: explicit_message_id.clone(),
+                    linkable: explicit_message_id.is_some(),
+                    ..StreamAccumulator::default()
+                });
+
+            if entry.fragment_count > 0
+                && entry.linkable
+                && entry.message_id.as_deref() != explicit_message_id.as_deref()
+            {
+                entry.linkable = false;
+                entry.message_id = None;
+            }
+
+            entry.text.push_str(delta);
+            entry.fragment_count += 1;
         }
 
         let message_value = value.get("message").unwrap_or(&value);
@@ -1074,25 +1168,40 @@ fn derive_stream_capture(
         }
     }
 
-    for (conversation_id, (text, fragment_count)) in reconstructions {
+    for (conversation_id, reconstruction) in reconstructions {
+        let message_id = if reconstruction.linkable {
+            reconstruction.message_id.as_deref()
+        } else {
+            None
+        };
         transaction.execute(
             r#"
             INSERT INTO stream_reconstructions
-                (capture_id, conversation_id, source_url, text, fragment_count)
+                (capture_id, conversation_id, message_id, source_url, text, fragment_count)
             VALUES
-                (?1, ?2, ?3, ?4, ?5)
+                (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
             params![
                 capture_id,
                 conversation_id,
+                message_id,
                 source_url,
-                text,
-                fragment_count as i64,
+                reconstruction.text,
+                reconstruction.fragment_count as i64,
             ],
         )?;
     }
 
     Ok(())
+}
+
+fn stream_message_id(value: &Value) -> Option<String> {
+    value
+        .pointer("/message/id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message_id").and_then(Value::as_str))
+        .or_else(|| value.get("messageId").and_then(Value::as_str))
+        .map(str::to_owned)
 }
 
 fn derive_json_capture(
@@ -1788,6 +1897,59 @@ mod tests {
         assert!(url.contains("keep=yes"));
         assert!(!url.contains("secret"));
         assert!(url.contains("%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn exact_id_stream_extends_prefix_compatible_canonical_message() {
+        let mut messages = vec![CanonicalMessageView {
+            message_id: Some("assistant-1".to_owned()),
+            parent_id: Some("user-1".to_owned()),
+            role: Some("assistant".to_owned()),
+            content_text: Some("hello".to_owned()),
+        }];
+        let streams = vec![StreamReconstructionView {
+            capture_id: "stream-capture".to_owned(),
+            conversation_id: "conversation-a".to_owned(),
+            message_id: Some("assistant-1".to_owned()),
+            source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            text: "hello world".to_owned(),
+            fragment_count: 2,
+        }];
+
+        let (linked, unlinked, warnings) =
+            merge_exact_id_streams(&mut messages, streams);
+        assert_eq!(messages[0].content_text.as_deref(), Some("hello world"));
+        assert_eq!(linked.len(), 1);
+        assert!(unlinked.is_empty());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn conflicting_exact_id_stream_stays_unlinked() {
+        let mut messages = vec![CanonicalMessageView {
+            message_id: Some("assistant-1".to_owned()),
+            parent_id: Some("user-1".to_owned()),
+            role: Some("assistant".to_owned()),
+            content_text: Some("snapshot answer".to_owned()),
+        }];
+        let streams = vec![StreamReconstructionView {
+            capture_id: "stream-capture".to_owned(),
+            conversation_id: "conversation-a".to_owned(),
+            message_id: Some("assistant-1".to_owned()),
+            source_url: "https://chatgpt.com/backend-api/conversation/stream".to_owned(),
+            text: "different answer".to_owned(),
+            fragment_count: 2,
+        }];
+
+        let (linked, unlinked, warnings) =
+            merge_exact_id_streams(&mut messages, streams);
+        assert_eq!(
+            messages[0].content_text.as_deref(),
+            Some("snapshot answer")
+        );
+        assert!(linked.is_empty());
+        assert_eq!(unlinked.len(), 1);
+        assert_eq!(warnings.len(), 1);
     }
 
     #[test]
