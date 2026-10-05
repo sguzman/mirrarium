@@ -6,7 +6,7 @@
     "build:extension": "pnpm --dir extension build",
     "check:rust": "cargo test --workspace",
     "check:extension": "pnpm --dir extension typecheck",
-    "test:e2e": "pnpm build:extension && playwright test -c tests/playwright/playwright.config.ts",
+    "test:e2e": "cargo build -p mirrariumd && pnpm build:extension && sh -c 'if [ -n "${DISPLAY:-}" ]; then playwright test -c tests/playwright/playwright.config.ts; else xvfb-run -a playwright test -c tests/playwright/playwright.config.ts; fi'",
     "test": "pnpm check:extension && pnpm check:rust && pnpm test:e2e"
   },
   "devDependencies": {

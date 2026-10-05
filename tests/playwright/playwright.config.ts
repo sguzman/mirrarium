@@ -6,12 +6,9 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: "line",
-  use: {
-    browserName: "chromium",
-  },
   webServer: {
     command: "node tests/fixtures/server.mjs",
-    url: "http://127.0.0.1:43117/health",
+    url: "http://127.0.0.1:43118/health",
     reuseExistingServer: false,
   },
 });

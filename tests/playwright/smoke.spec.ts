@@ -1,35 +1,112 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { chromium, expect, test } from "@playwright/test";
 
-test("loads Mirrarium only in an isolated Playwright Chromium profile", async () => {
-  const userDataDir = await mkdtemp(join(tmpdir(), "mirrarium-playwright-"));
+const execFileAsync = promisify(execFile);
+const nativeHostName = "com.sguzman.mirrarium";
+const expectedExtensionId = "oodcefibmdmabgepkcpanjpjolnbignk";
+
+test("captures ChatGPT-shaped traffic into isolated durable storage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mirrarium-e2e-"));
+  const browserHome = join(root, "home");
+  const userDataDir = join(root, "chromium-profile");
+  const dataDir = join(root, "data");
   const extensionPath = resolve("extension/dist");
+  const daemonPath = resolve("target/debug/mirrariumd");
 
   try {
+    const nativeManifestPath = join(
+      browserHome,
+      ".config/chromium/NativeMessagingHosts",
+      `${nativeHostName}.json`,
+    );
+    await mkdir(dirname(nativeManifestPath), { recursive: true });
+    await mkdir(userDataDir, { recursive: true });
+    await mkdir(dataDir, { recursive: true });
+
+    await writeFile(
+      nativeManifestPath,
+      JSON.stringify({
+        name: nativeHostName,
+        description: "Mirrarium test native host",
+        path: daemonPath,
+        type: "stdio",
+        allowed_origins: [`chrome-extension://${expectedExtensionId}/`],
+      }),
+    );
+
     const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
+      headless: false,
+      ignoreHTTPSErrors: true,
+      env: {
+        ...process.env,
+        HOME: browserHome,
+        XDG_CONFIG_HOME: join(browserHome, ".config"),
+        MIRRARIUM_DATA_DIR: dataDir,
+      },
       args: [
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
+        "--host-resolver-rules=MAP chatgpt.com 127.0.0.1",
+        "--no-proxy-server",
       ],
     });
 
     try {
-      const page = await context.newPage();
-      await page.goto("http://127.0.0.1:43117/");
-      await expect(page).toHaveTitle("Mirrarium fixture");
+      const workers = context.serviceWorkers();
+      const worker = workers[0] ?? (await context.waitForEvent("serviceworker"));
+      expect(worker.url()).toBe(
+        `chrome-extension://${expectedExtensionId}/background.js`,
+      );
 
-      const serviceWorkers = context.serviceWorkers();
-      expect(
-        serviceWorkers.some((worker) => worker.url().startsWith("chrome-extension://")),
-      ).toBe(true);
+      const page = await context.newPage();
+
+      // Warm up the ChatGPT origin so the extension can attach CDP before the
+      // page whose requests we actually assert.
+      await page.goto("https://chatgpt.com:43117/warmup");
+      await page.waitForTimeout(500);
+
+      await page.goto("https://chatgpt.com:43117/");
+      await expect(page).toHaveTitle("Mirrarium fixture");
+      await expect
+        .poll(() => page.locator("body").getAttribute("data-ready"))
+        .toBe("yes");
+
+      const stats = await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(daemonPath, ["--stats"], {
+              env: {
+                ...process.env,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            });
+            return JSON.parse(stdout) as {
+              captures: number;
+              objects: number;
+              public_objects: number;
+              private_objects: number;
+              body_errors: number;
+            };
+          },
+          { timeout: 10_000 },
+        )
+        .toMatchObject({
+          body_errors: 0,
+        });
+
+      expect(stats.captures).toBeGreaterThanOrEqual(5);
+      expect(stats.public_objects).toBeGreaterThanOrEqual(2);
+      expect(stats.private_objects).toBeGreaterThanOrEqual(2);
+      expect(stats.objects).toBeLessThan(stats.captures);
     } finally {
       await context.close();
     }
   } finally {
-    await rm(userDataDir, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
 });

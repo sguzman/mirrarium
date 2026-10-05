@@ -3,6 +3,7 @@
   "name": "Mirrarium",
   "version": "0.1.0",
   "description": "Passive local recorder and corpus builder for ChatGPT.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvpQ9t6L0ysOtFDiR9aDLI3cWmgJU2y5X7cZIA8sn6IVLMiFMgDGo46STKO2bfaauDTrsGE2UMW+4dm/oH2OMa/TmaYHQtAI+N+YuSyZV4afFX+vwDDVHEWZ0PVpB5rwX3Xi80rp1ov8H46DLtMQimIHoFktrc1z+uHCW0xbFq1yZeUVFIFrO581xpv8OmB9PTgl+CCni1tkXZxUlPg9cBnYTrbbNp4zi9dMCc+gskys77gvOskvaL5R+Fu0SPWM8DDKroJDJGD0m0xuVZmeNGOsOQXe73HDBb7WKQtO8xptGyjGXbgNdjomhjAauEZeNl1qBTfpF6+LP8+cDtIZaDwIDAQAB",
   "permissions": [
     "debugger",
     "nativeMessaging",
