@@ -12,6 +12,7 @@ const keyPath = join(certificateDirectory, "key.pem");
 const certPath = join(certificateDirectory, "cert.pem");
 let staticCssHits = 0;
 let staticJsHits = 0;
+let staticImageHits = 0;
 
 execFileSync("openssl", [
   "req",
@@ -36,6 +37,7 @@ const page = `<!doctype html>
 <title>Mirrarium fixture</title>
 <link rel="stylesheet" href="/_next/static/app.css">
 <h1>fixture</h1>
+<img alt="fixture pixel" src="/_next/static/pixel.svg">
 <script src="/_next/static/app.js"></script>
 <script>
 const requestMessage = ["hello", "from", "request", "body"].join(" ");
@@ -99,6 +101,7 @@ const replayProbe = `<!doctype html>
 <meta charset="utf-8">
 <title>Mirrarium replay probe</title>
 <link rel="stylesheet" href="/_next/static/app.css">
+<img alt="replay pixel" src="/_next/static/pixel.svg">
 <script src="/_next/static/app.js"></script>
 <h1>replay probe</h1>`;
 
@@ -130,6 +133,18 @@ const fixtureServer = https.createServer(
         "cache-control": "public, max-age=31536000, immutable",
       });
       response.end("body { font-family: sans-serif; }");
+      return;
+    }
+
+    if (request.url === "/_next/static/pixel.svg") {
+      staticImageHits += 1;
+      response.writeHead(200, {
+        "content-type": "image/svg+xml",
+        "cache-control": "public, max-age=31536000, immutable",
+      });
+      response.end(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>',
+      );
       return;
     }
 
@@ -372,6 +387,7 @@ const healthServer = http.createServer((request, response) => {
     response.end(JSON.stringify({
       css: staticCssHits,
       js: staticJsHits,
+      image: staticImageHits,
     }));
     return;
   }

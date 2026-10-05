@@ -209,7 +209,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         eligible: boolean;
         reasons: string[];
       }>;
-      for (const suffix of ["/_next/static/app.js", "/_next/static/app.css"]) {
+      for (const suffix of [
+        "/_next/static/app.js",
+        "/_next/static/app.css",
+        "/_next/static/pixel.svg",
+      ]) {
         const candidate = cacheCandidates.find((item) => item.url.endsWith(suffix));
         expect(candidate, `missing cache candidate for ${suffix}`).toBeTruthy();
         expect(candidate?.eligible).toBe(true);
@@ -221,9 +225,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const replayCountsBefore = (await fetch(
         "http://127.0.0.1:43118/replay-counts",
-      ).then((response) => response.json())) as { css: number; js: number };
+      ).then((response) => response.json())) as {
+        css: number;
+        js: number;
+        image: number;
+      };
       expect(replayCountsBefore.css).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.js).toBeGreaterThanOrEqual(1);
+      expect(replayCountsBefore.image).toBeGreaterThanOrEqual(1);
 
       const replaySession = await context.newCDPSession(page);
       try {
@@ -244,21 +253,34 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
             response.headers()["x-mirrarium-cache"] === "hit",
           { timeout: 10_000 },
         );
+        const imageHit = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/_next/static/pixel.svg") &&
+            response.headers()["x-mirrarium-cache"] === "hit",
+          { timeout: 10_000 },
+        );
 
-        const [, scriptResponse, stylesheetResponse] = await Promise.all([
-          page.goto("https://chatgpt.com:43117/replay-probe"),
-          scriptHit,
-          stylesheetHit,
-        ]);
+        const [, scriptResponse, stylesheetResponse, imageResponse] =
+          await Promise.all([
+            page.goto("https://chatgpt.com:43117/replay-probe"),
+            scriptHit,
+            stylesheetHit,
+            imageHit,
+          ]);
         expect(scriptResponse.status()).toBe(200);
         expect(stylesheetResponse.status()).toBe(200);
+        expect(imageResponse.status()).toBe(200);
       } finally {
         await replaySession.detach();
       }
 
       const replayCountsAfter = (await fetch(
         "http://127.0.0.1:43118/replay-counts",
-      ).then((response) => response.json())) as { css: number; js: number };
+      ).then((response) => response.json())) as {
+        css: number;
+        js: number;
+        image: number;
+      };
       expect(replayCountsAfter).toEqual(replayCountsBefore);
 
       type ReplayStats = {
@@ -286,11 +308,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       await expect
         .poll(async () => (await readReplayStats()).hits, { timeout: 10_000 })
-        .toBeGreaterThanOrEqual(2);
+        .toBeGreaterThanOrEqual(3);
       const replayStats = await readReplayStats();
-      expect(replayStats.attempts).toBeGreaterThanOrEqual(4);
-      expect(replayStats.hits).toBeGreaterThanOrEqual(2);
-      expect(replayStats.misses).toBeGreaterThanOrEqual(2);
+      expect(replayStats.attempts).toBeGreaterThanOrEqual(6);
+      expect(replayStats.hits).toBeGreaterThanOrEqual(3);
+      expect(replayStats.misses).toBeGreaterThanOrEqual(3);
       expect(replayStats.replayed_bytes).toBeGreaterThan(0);
       expect(replayStats.lookup_errors).toBe(0);
       expect(replayStats.timeouts).toBe(0);

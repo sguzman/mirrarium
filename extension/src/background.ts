@@ -326,7 +326,7 @@ function isReplayInterceptCandidate(
   if (
     method.toUpperCase() !== "GET" ||
     !resourceType ||
-    !["script", "stylesheet"].includes(resourceType.toLowerCase())
+    !["script", "stylesheet", "image"].includes(resourceType.toLowerCase())
   ) {
     return false;
   }

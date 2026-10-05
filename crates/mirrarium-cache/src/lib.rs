@@ -170,7 +170,7 @@ pub fn lookup(
 ) -> Result<Option<ReplayEntry>> {
     if !matches!(
         resource_type.to_ascii_lowercase().as_str(),
-        "script" | "stylesheet"
+        "script" | "stylesheet" | "image"
     ) {
         return Ok(None);
     }
