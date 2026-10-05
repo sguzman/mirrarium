@@ -75,7 +75,7 @@ The browser integration test launches Playwright's Chromium with:
 - an unpacked Mirrarium extension;
 - a disposable Chromium user-data directory;
 - a disposable HOME/configuration tree;
-- a test-only native-host manifest;
+- a native-host manifest installed by the same CLI path used for normal deployment, pointed only at the disposable test profile;
 - a deterministic local TLS fixture mapped to `chatgpt.com`;
 - a disposable Mirrarium data directory.
 
@@ -107,12 +107,13 @@ Implemented:
 - conversation snapshots and message observations from ChatGPT-shaped JSON;
 - reconstructed stream text from conversation-tagged SSE deltas;
 - read-only conversation discovery and evidence inspection through the CLI;
-- branch-aware canonical conversation views computed from immutable snapshot evidence.
+- branch-aware canonical conversation views computed from immutable snapshot evidence;
+- user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
 - attachment/download correlation without treating signed URLs as durable credentials;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - stream-to-message linkage and revision-aware canonical tail merging;
-- native-host installation tooling for normal Edge deployment;
+- extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.

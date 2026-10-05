@@ -69,11 +69,25 @@ mirrarium corpus stats
 mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
+mirrarium native-host install
+mirrarium native-host status
 ```
 
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
 
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
+
+## Linux native-host install
+
+For normal Edge use, build or install `mirrarium` and `mirrariumd` side by side, then run:
+
+```bash
+mirrarium native-host install
+```
+
+Edge is the default browser target. The command installs only Mirrarium's user-level Native Messaging manifest and resolves `mirrariumd` to an absolute executable path. It does not inspect browser history, cookies, sessions, or other profile contents.
+
+Use `mirrarium native-host status` to inspect whether the manifest exists and `mirrarium native-host uninstall` to remove only that manifest. Supported browser names are `edge`, `chromium`, `chrome`, and `chrome-for-testing`. An explicit daemon path may be supplied after the browser name when `mirrariumd` is not next to the CLI. `MIRRARIUM_BROWSER_USER_DATA_DIR` overrides the browser user-data root for non-default or disposable profiles.
 
 The data root is resolved from `MIRRARIUM_DATA_DIR`, then `XDG_DATA_HOME/mirrarium`, then `~/.local/share/mirrarium`.
 
