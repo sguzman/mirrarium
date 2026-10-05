@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { chromium, expect, test } from "@playwright/test";
@@ -59,28 +59,35 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   }
 
   try {
-    const nativeManifest = JSON.stringify({
-      name: nativeHostName,
-      description: "Mirrarium test native host",
-      path: daemonPath,
-      type: "stdio",
-      allowed_origins: [`chrome-extension://${expectedExtensionId}/`],
-    });
-    const nativeManifestDirectories = [
-      join(userDataDir, "NativeMessagingHosts"),
-      join(browserHome, ".config/google-chrome-for-testing/NativeMessagingHosts"),
-      join(browserHome, ".config/chromium/NativeMessagingHosts"),
-      join(browserHome, ".config/google-chrome/NativeMessagingHosts"),
-    ];
-
-    for (const directory of nativeManifestDirectories) {
-      const nativeManifestPath = join(directory, `${nativeHostName}.json`);
-      await mkdir(dirname(nativeManifestPath), { recursive: true });
-      await writeFile(nativeManifestPath, nativeManifest);
-    }
-
     await mkdir(userDataDir, { recursive: true });
     await mkdir(dataDir, { recursive: true });
+
+    const { stdout: nativeInstallStdout } = await execFileAsync(
+      cliPath,
+      ["native-host", "install", "chrome-for-testing", daemonPath],
+      {
+        env: {
+          ...process.env,
+          HOME: browserHome,
+          XDG_CONFIG_HOME: join(browserHome, ".config"),
+          MIRRARIUM_BROWSER_USER_DATA_DIR: userDataDir,
+        },
+      },
+    );
+    const nativeInstall = JSON.parse(nativeInstallStdout) as {
+      browser: string;
+      manifest_path: string;
+      host_path: string;
+      extension_id: string;
+    };
+    expect(nativeInstall).toMatchObject({
+      browser: "chrome-for-testing",
+      host_path: daemonPath,
+      extension_id: expectedExtensionId,
+    });
+    expect(nativeInstall.manifest_path).toBe(
+      join(userDataDir, "NativeMessagingHosts", `${nativeHostName}.json`),
+    );
 
     const context = await chromium.launchPersistentContext(userDataDir, {
       channel: "chromium",
