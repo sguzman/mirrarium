@@ -1,11 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    fs,
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use url::Url;
+
+const MAX_REPLAY_BODY_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CacheCandidate {
@@ -19,6 +24,20 @@ pub struct CacheCandidate {
     pub distinct_body_hashes: u64,
     pub eligible: bool,
     pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ReplayEntry {
+    pub url: String,
+    pub resource_type: String,
+    pub mime_type: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    pub cache_control: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    #[serde(skip)]
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -71,6 +90,214 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
         ineligible_urls: unique_urls.saturating_sub(eligible_urls),
         conflicting_urls,
     })
+}
+
+pub fn lookup(
+    raw_root: impl AsRef<Path>,
+    raw_url: &str,
+    resource_type: &str,
+) -> Result<Option<ReplayEntry>> {
+    if !matches!(
+        resource_type.to_ascii_lowercase().as_str(),
+        "script" | "stylesheet"
+    ) {
+        return Ok(None);
+    }
+
+    let Some(url) = replayable_url(raw_url) else {
+        return Ok(None);
+    };
+    let root = raw_root.as_ref();
+    let database = root.join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    let mut hashes = BTreeSet::new();
+    let mut statement = connection.prepare(
+        r#"
+        SELECT body_hash
+        FROM captures
+        WHERE url = ?1
+          AND privacy_class = 'public'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND body_hash IS NOT NULL
+          AND body_error IS NULL
+        ORDER BY captured_at_ms, rowid
+        "#,
+    )?;
+    let rows = statement.query_map([url.as_str()], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        hashes.insert(row?);
+    }
+    if hashes.len() != 1 {
+        return Ok(None);
+    }
+
+    let row = connection
+        .query_row(
+            r#"
+            SELECT
+                resource_type,
+                mime_type,
+                body_hash,
+                body_bytes,
+                cache_control,
+                etag,
+                last_modified
+            FROM captures
+            WHERE url = ?1
+              AND privacy_class = 'public'
+              AND lower(method) = 'get'
+              AND status = 200
+              AND body_hash IS NOT NULL
+              AND body_error IS NULL
+            ORDER BY captured_at_ms DESC, rowid DESC
+            LIMIT 1
+            "#,
+            [url.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        stored_resource_type,
+        mime_type,
+        body_hash,
+        body_bytes,
+        cache_control,
+        etag,
+        last_modified,
+    )) = row
+    else {
+        return Ok(None);
+    };
+
+    if !stored_resource_type.eq_ignore_ascii_case(resource_type) {
+        return Ok(None);
+    }
+    if !cache_control_allows_replay(cache_control.as_deref()) {
+        return Ok(None);
+    }
+
+    let body_bytes: u64 = body_bytes.try_into().context("negative body byte count")?;
+    if body_bytes > MAX_REPLAY_BODY_BYTES {
+        return Ok(None);
+    }
+    if body_hash.len() != 64 || !body_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid public CAS hash for replay candidate");
+    }
+
+    let expected_relative_path = public_object_relative_path(&body_hash);
+    let indexed_object = connection
+        .query_row(
+            r#"
+            SELECT bytes, relative_path
+            FROM objects
+            WHERE storage_class = 'public'
+              AND hash = ?1
+            "#,
+            [&body_hash],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((indexed_bytes, indexed_relative_path)) = indexed_object else {
+        anyhow::bail!("public replay object is missing from object index");
+    };
+    let indexed_bytes: u64 = indexed_bytes
+        .try_into()
+        .context("negative indexed object byte count")?;
+    anyhow::ensure!(
+        indexed_bytes == body_bytes,
+        "public replay object byte count disagrees with capture"
+    );
+    anyhow::ensure!(
+        Path::new(&indexed_relative_path) == expected_relative_path,
+        "public replay object path disagrees with CAS layout"
+    );
+    anyhow::ensure!(
+        expected_relative_path
+            .components()
+            .all(|component| !matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))),
+        "invalid public replay object path"
+    );
+
+    let object_path = root.join(&expected_relative_path);
+    let body = fs::read(&object_path)
+        .with_context(|| format!("reading replay object {}", object_path.display()))?;
+    anyhow::ensure!(
+        body.len() as u64 == body_bytes,
+        "public replay object length verification failed"
+    );
+    let actual_hash = format!("{:x}", Sha256::digest(&body));
+    anyhow::ensure!(
+        actual_hash == body_hash,
+        "public replay object hash verification failed"
+    );
+
+    Ok(Some(ReplayEntry {
+        url: url.to_string(),
+        resource_type: stored_resource_type,
+        mime_type,
+        body_hash,
+        body_bytes,
+        cache_control,
+        etag,
+        last_modified,
+        body,
+    }))
+}
+
+fn replayable_url(raw_url: &str) -> Option<Url> {
+    let url = Url::parse(raw_url).ok()?;
+    if url.scheme() != "https:"
+        || !matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url)
+}
+
+fn cache_control_allows_replay(cache_control: Option<&str>) -> bool {
+    let normalized = cache_control.unwrap_or_default().to_ascii_lowercase();
+    let directives: Vec<&str> = normalized
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty())
+        .collect();
+    !directives
+        .iter()
+        .any(|directive| *directive == "no-store" || directive.starts_with("private"))
+        && directives.iter().any(|directive| *directive == "immutable")
+}
+
+fn public_object_relative_path(hash: &str) -> PathBuf {
+    PathBuf::from("public")
+        .join("objects")
+        .join(&hash[..2])
+        .join(hash)
 }
 
 fn build_inventory(raw_root: impl AsRef<Path>) -> Result<Vec<CacheCandidate>> {
@@ -203,6 +430,7 @@ fn candidate_from_aggregate(url: String, aggregate: Aggregate) -> CacheCandidate
 mod tests {
     use super::*;
     use rusqlite::params;
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     fn open_fixture() -> (tempfile::TempDir, Connection) {
@@ -212,6 +440,14 @@ mod tests {
         connection
             .execute_batch(
                 r#"
+                CREATE TABLE objects (
+                    storage_class TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    bytes INTEGER NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (storage_class, hash)
+                );
                 CREATE TABLE captures (
                     capture_id TEXT PRIMARY KEY,
                     captured_at_ms INTEGER NOT NULL,
@@ -224,6 +460,8 @@ mod tests {
                     body_hash TEXT,
                     body_bytes INTEGER NOT NULL,
                     cache_control TEXT,
+                    etag TEXT,
+                    last_modified TEXT,
                     body_error TEXT
                 );
                 "#,
@@ -255,9 +493,11 @@ mod tests {
                     body_hash,
                     body_bytes,
                     cache_control,
+                    etag,
+                    last_modified,
                     body_error
                 ) VALUES (?1, ?2, 'GET', ?3, 200, 'application/javascript',
-                          'Script', 'public', ?4, 12, ?5, NULL)
+                          'Script', 'public', ?4, 12, ?5, '"fixture-etag"', NULL, NULL)
                 "#,
                 params![id, timestamp, url, hash, cache_control],
             )
@@ -319,6 +559,91 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "url_observed_with_multiple_body_hashes"));
+    }
+
+    #[test]
+    fn lookup_reads_and_verifies_public_replay_object() {
+        let (directory, connection) = open_fixture();
+        let body = b"fixture body";
+        let hash = format!("{:x}", Sha256::digest(body));
+        let relative_path = public_object_relative_path(&hash);
+        let object_path = directory.path().join(&relative_path);
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::write(&object_path, body).unwrap();
+        connection
+            .execute(
+                "INSERT INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('public', ?1, ?2, ?3, 1)",
+                params![hash, body.len() as i64, relative_path.to_string_lossy()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO captures (
+                    capture_id,
+                    captured_at_ms,
+                    method,
+                    url,
+                    status,
+                    mime_type,
+                    resource_type,
+                    privacy_class,
+                    body_hash,
+                    body_bytes,
+                    cache_control,
+                    etag,
+                    last_modified,
+                    body_error
+                ) VALUES (
+                    'replay',
+                    1,
+                    'GET',
+                    'https://chatgpt.com/_next/static/replay.js',
+                    200,
+                    'application/javascript',
+                    'Script',
+                    'public',
+                    ?1,
+                    ?2,
+                    'public, max-age=31536000, immutable',
+                    '"fixture-etag"',
+                    NULL,
+                    NULL
+                )
+                "#,
+                params![hash, body.len() as i64],
+            )
+            .unwrap();
+
+        let replay = lookup(
+            directory.path(),
+            "https://chatgpt.com/_next/static/replay.js",
+            "Script",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.body, body);
+        assert_eq!(replay.body_hash, hash);
+        assert_eq!(replay.etag.as_deref(), Some(""fixture-etag""));
+    }
+
+    #[test]
+    fn lookup_rejects_query_urls_and_resource_type_mismatch() {
+        let (directory, _connection) = open_fixture();
+        assert!(lookup(
+            directory.path(),
+            "https://chatgpt.com/_next/static/replay.js?v=1",
+            "Script"
+        )
+        .unwrap()
+        .is_none());
+        assert!(lookup(
+            directory.path(),
+            "https://chatgpt.com/_next/static/replay.js",
+            "Fetch"
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
