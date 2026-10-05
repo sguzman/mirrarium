@@ -9,6 +9,13 @@ type RequestMetadata = {
   postData?: string;
   hasPostData?: boolean;
   contentType?: string;
+  headers: Record<string, string>;
+  frameId?: string;
+  loaderId?: string;
+  documentUrl?: string;
+  initiatorType?: string;
+  requestWallTimeMs?: number;
+  servedFromCache: boolean;
 };
 
 type ResponseMetadata = {
@@ -19,6 +26,12 @@ type ResponseMetadata = {
   etag?: string;
   lastModified?: string;
   cacheControl?: string;
+  headers: Record<string, string>;
+  responseProtocol?: string;
+  responseTimeMs?: number;
+  fromDiskCache: boolean;
+  fromServiceWorker: boolean;
+  fromPrefetchCache: boolean;
 };
 
 const attachedTabs = new Set<number>();
@@ -128,6 +141,95 @@ function header(
   }
 
   return undefined;
+}
+
+function isSensitiveHeaderName(name: string): boolean {
+  const normalized = name.trim().toLowerCase().replaceAll("-", "_");
+  return (
+    [
+      "authorization",
+      "proxy_authorization",
+      "cookie",
+      "set_cookie",
+      "authentication_info",
+      "proxy_authenticate",
+      "www_authenticate",
+      "x_csrf_token",
+      "x_xsrf_token",
+      "x_auth_token",
+      "x_api_key",
+    ].includes(normalized) ||
+    normalized.endsWith("_token") ||
+    normalized.includes("credential")
+  );
+}
+
+function isSensitiveQueryKey(key: string): boolean {
+  const normalized = key.trim().toLowerCase().replaceAll("-", "_");
+  return (
+    [
+      "token",
+      "access_token",
+      "id_token",
+      "refresh_token",
+      "session",
+      "session_token",
+      "auth",
+      "authorization",
+      "signature",
+      "x_amz_signature",
+      "x_goog_signature",
+      "key",
+      "api_key",
+      "apikey",
+      "code",
+    ].includes(normalized) ||
+    normalized.endsWith("_token") ||
+    normalized.endsWith("_signature") ||
+    normalized.includes("credential")
+  );
+}
+
+function sanitizeUrlForStorage(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (isSensitiveQueryKey(key)) url.searchParams.set(key, "[REDACTED]");
+    }
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function sanitizeHeaders(
+  headers: Record<string, string | number> | undefined,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  if (!headers) return sanitized;
+
+  for (const [name, rawValue] of Object.entries(headers)) {
+    const normalized = name.trim().toLowerCase().replaceAll("-", "_");
+    let value = String(rawValue);
+    if (isSensitiveHeaderName(name)) {
+      value = "[REDACTED]";
+    } else if (
+      ["referer", "referrer", "location", "content_location"].includes(normalized)
+    ) {
+      value = sanitizeUrlForStorage(value);
+    }
+    sanitized[name] = value;
+  }
+
+  return sanitized;
+}
+
+function secondsToMilliseconds(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.trunc(value * 1000);
 }
 
 function shouldSuppressResponseBody(rawUrl: string): boolean {
@@ -399,6 +501,21 @@ async function captureBody(
       etag: response?.etag,
       last_modified: response?.lastModified,
       cache_control: response?.cacheControl,
+      provenance: {
+        frame_id: request?.frameId,
+        loader_id: request?.loaderId,
+        document_url: request?.documentUrl,
+        initiator_type: request?.initiatorType,
+        request_wall_time_ms: request?.requestWallTimeMs,
+        response_time_ms: response?.responseTimeMs,
+        response_protocol: response?.responseProtocol,
+        served_from_cache: request?.servedFromCache ?? false,
+        from_disk_cache: response?.fromDiskCache ?? false,
+        from_service_worker: response?.fromServiceWorker ?? false,
+        from_prefetch_cache: response?.fromPrefetchCache ?? false,
+        request_headers: request?.headers ?? {},
+        response_headers: response?.headers ?? {},
+      },
     },
   });
 
@@ -477,6 +594,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === "Network.requestWillBeSent") {
     const event = params as {
       requestId: string;
+      loaderId?: string;
+      frameId?: string;
+      documentURL?: string;
+      wallTime?: number;
+      initiator?: { type?: string };
       request: {
         method: string;
         url: string;
@@ -491,7 +613,21 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       postData: event.request.postData,
       hasPostData: event.request.hasPostData,
       contentType: header(event.request.headers, "content-type"),
+      headers: sanitizeHeaders(event.request.headers),
+      frameId: event.frameId,
+      loaderId: event.loaderId,
+      documentUrl: event.documentURL,
+      initiatorType: event.initiator?.type,
+      requestWallTimeMs: secondsToMilliseconds(event.wallTime),
+      servedFromCache: false,
     });
+    return;
+  }
+
+  if (method === "Network.requestServedFromCache") {
+    const event = params as { requestId: string };
+    const request = requests.get(requestKey(tabId, event.requestId));
+    if (request) request.servedFromCache = true;
     return;
   }
 
@@ -503,6 +639,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         url: string;
         status: number;
         mimeType: string;
+        protocol?: string;
+        responseTime?: number;
+        fromDiskCache?: boolean;
+        fromServiceWorker?: boolean;
+        fromPrefetchCache?: boolean;
         headers?: Record<string, string | number>;
       };
     };
@@ -514,6 +655,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       etag: header(event.response.headers, "etag"),
       lastModified: header(event.response.headers, "last-modified"),
       cacheControl: header(event.response.headers, "cache-control"),
+      headers: sanitizeHeaders(event.response.headers),
+      responseProtocol: event.response.protocol,
+      responseTimeMs: secondsToMilliseconds(event.response.responseTime),
+      fromDiskCache: event.response.fromDiskCache ?? false,
+      fromServiceWorker: event.response.fromServiceWorker ?? false,
+      fromPrefetchCache: event.response.fromPrefetchCache ?? false,
     });
     return;
   }

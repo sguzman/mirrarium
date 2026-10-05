@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Read, Write},
@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use mirrarium_protocol::CaptureMetadata;
-use rusqlite::{params, Connection};
+use mirrarium_protocol::{CaptureMetadata, CaptureProvenance};
+use rusqlite::{params, types::Type, Connection};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -79,6 +79,7 @@ pub struct CaptureSummary {
     pub request_body_hash: Option<String>,
     pub request_body_bytes: u64,
     pub request_body_error: Option<String>,
+    pub provenance: CaptureProvenance,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +163,8 @@ impl CaptureStore {
                 etag TEXT,
                 last_modified TEXT,
                 cache_control TEXT,
-                body_error TEXT
+                body_error TEXT,
+                provenance_json TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE INDEX IF NOT EXISTS captures_url_idx
@@ -183,6 +185,12 @@ impl CaptureStore {
             "#,
         )?;
 
+        ensure_capture_column(
+            &connection,
+            "provenance_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )?;
+
         Ok(Self {
             root,
             connection,
@@ -199,6 +207,7 @@ impl CaptureStore {
 
         let suppressed_reason = credential_endpoint_reason(&metadata.url).map(str::to_owned);
         metadata.url = sanitize_url_for_storage(&metadata.url);
+        sanitize_provenance(&mut metadata.provenance);
 
         let temp_name = format!("{}.part", sha256_hex(metadata.capture_id.as_bytes()));
         let temp_path = self.root.join(".incoming").join(temp_name);
@@ -581,7 +590,8 @@ impl CaptureStore {
                 captures.body_error,
                 request_bodies.body_hash,
                 COALESCE(request_bodies.body_bytes, 0),
-                request_bodies.body_error
+                request_bodies.body_error,
+                captures.provenance_json
             FROM captures
             LEFT JOIN request_bodies USING (capture_id)
             ORDER BY captured_at_ms DESC
@@ -604,6 +614,13 @@ impl CaptureStore {
                 request_body_hash: row.get(10)?,
                 request_body_bytes: row.get::<_, i64>(11)? as u64,
                 request_body_error: row.get(12)?,
+                provenance: serde_json::from_str(&row.get::<_, String>(13)?).map_err(
+                    |error| rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        Type::Text,
+                        Box::new(error),
+                    ),
+                )?,
             })
         })?;
 
@@ -834,10 +851,11 @@ impl CaptureStore {
                 etag,
                 last_modified,
                 cache_control,
-                body_error
+                body_error,
+                provenance_json
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
             )
             "#,
             params![
@@ -858,10 +876,86 @@ impl CaptureStore {
                 metadata.last_modified,
                 metadata.cache_control,
                 body_error,
+                serde_json::to_string(&metadata.provenance)?,
             ],
         )?;
         Ok(())
     }
+}
+
+fn ensure_capture_column(
+    connection: &Connection,
+    column_name: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(captures)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+
+    for column in columns {
+        if column? == column_name {
+            return Ok(());
+        }
+    }
+
+    anyhow::ensure!(
+        column_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        "invalid capture column name"
+    );
+    connection.execute(
+        &format!("ALTER TABLE captures ADD COLUMN {column_name} {definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
+fn sanitize_provenance(provenance: &mut CaptureProvenance) {
+    if let Some(document_url) = provenance.document_url.as_mut() {
+        *document_url = sanitize_url_for_storage(document_url);
+    }
+    provenance.request_headers =
+        sanitize_headers(std::mem::take(&mut provenance.request_headers));
+    provenance.response_headers =
+        sanitize_headers(std::mem::take(&mut provenance.response_headers));
+}
+
+fn sanitize_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .into_iter()
+        .map(|(name, value)| {
+            let normalized = name.trim().to_ascii_lowercase().replace('-', "_");
+            let value = if is_sensitive_header_name(&normalized) {
+                "[REDACTED]".to_owned()
+            } else if matches!(
+                normalized.as_str(),
+                "referer" | "referrer" | "location" | "content_location"
+            ) {
+                sanitize_url_for_storage(&value)
+            } else {
+                value
+            };
+            (name, value)
+        })
+        .collect()
+}
+
+fn is_sensitive_header_name(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "authorization"
+            | "proxy_authorization"
+            | "cookie"
+            | "set_cookie"
+            | "authentication_info"
+            | "proxy_authenticate"
+            | "www_authenticate"
+            | "x_csrf_token"
+            | "x_xsrf_token"
+            | "x_auth_token"
+            | "x_api_key"
+    ) || normalized.ends_with("_token")
+        || normalized.contains("credential")
 }
 
 pub fn default_data_root() -> Result<PathBuf> {
@@ -1148,7 +1242,7 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mirrarium_protocol::CaptureMetadata;
+    use mirrarium_protocol::{CaptureMetadata, CaptureProvenance};
     use tempfile::tempdir;
 
     fn metadata(capture_id: &str, url: &str, resource_type: &str) -> CaptureMetadata {
@@ -1164,6 +1258,7 @@ mod tests {
             etag: None,
             last_modified: None,
             cache_control: None,
+            provenance: CaptureProvenance::default(),
         }
     }
 
@@ -1357,6 +1452,53 @@ mod tests {
         let capture = store.recent_captures(1).unwrap().pop().unwrap();
         assert!(capture.request_body_hash.is_none());
         assert_eq!(capture.request_body_bytes, 0);
+    }
+
+    #[test]
+    fn provenance_is_sanitized_before_it_reaches_the_ledger() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let mut item = metadata(
+            "provenance",
+            "https://chatgpt.com/backend-api/test",
+            "Fetch",
+        );
+        item.provenance.document_url =
+            Some("https://chatgpt.com/c/test?access_token=secret#fragment".to_owned());
+        item.provenance
+            .request_headers
+            .insert("Authorization".to_owned(), "Bearer secret".to_owned());
+        item.provenance
+            .response_headers
+            .insert("Set-Cookie".to_owned(), "session=secret".to_owned());
+        item.provenance.response_headers.insert(
+            "Location".to_owned(),
+            "https://chatgpt.com/next?token=secret".to_owned(),
+        );
+        item.provenance.response_protocol = Some("h2".to_owned());
+        item.provenance.from_disk_cache = true;
+
+        store.begin(item).unwrap();
+        store
+            .append_chunk("provenance", 0, &BASE64.encode(b"body"))
+            .unwrap();
+        store.finish("provenance", Some(4), None).unwrap();
+
+        let provenance = store
+            .recent_captures(1)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .provenance;
+        assert_eq!(
+            provenance.request_headers["Authorization"],
+            "[REDACTED]"
+        );
+        assert_eq!(provenance.response_headers["Set-Cookie"], "[REDACTED]");
+        assert!(!provenance.document_url.unwrap().contains("secret"));
+        assert!(!provenance.response_headers["Location"].contains("secret"));
+        assert_eq!(provenance.response_protocol.as_deref(), Some("h2"));
+        assert!(provenance.from_disk_cache);
     }
 
     #[test]

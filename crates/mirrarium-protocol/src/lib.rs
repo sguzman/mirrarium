@@ -1,4 +1,24 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureProvenance {
+    pub frame_id: Option<String>,
+    pub loader_id: Option<String>,
+    pub document_url: Option<String>,
+    pub initiator_type: Option<String>,
+    pub request_wall_time_ms: Option<u64>,
+    pub response_time_ms: Option<u64>,
+    pub response_protocol: Option<String>,
+    pub served_from_cache: bool,
+    pub from_disk_cache: bool,
+    pub from_service_worker: bool,
+    pub from_prefetch_cache: bool,
+    pub request_headers: BTreeMap<String, String>,
+    pub response_headers: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureMetadata {
@@ -13,15 +33,14 @@ pub struct CaptureMetadata {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub cache_control: Option<String>,
+    pub provenance: CaptureProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostRequest {
     Ping,
-    CaptureStart {
-        metadata: CaptureMetadata,
-    },
+    CaptureStart { metadata: CaptureMetadata },
     CaptureChunk {
         capture_id: String,
         sequence: u32,
@@ -51,9 +70,7 @@ pub enum HostRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostResponse {
     Pong,
-    Ack {
-        capture_id: Option<String>,
-    },
+    Ack { capture_id: Option<String> },
     Error {
         capture_id: Option<String>,
         message: String,
