@@ -914,6 +914,9 @@ fn sanitize_provenance(provenance: &mut CaptureProvenance) {
     if let Some(document_url) = provenance.document_url.as_mut() {
         *document_url = sanitize_url_for_storage(document_url);
     }
+    if let Some(redirected_from_url) = provenance.redirected_from_url.as_mut() {
+        *redirected_from_url = sanitize_url_for_storage(redirected_from_url);
+    }
     provenance.request_headers =
         sanitize_headers(std::mem::take(&mut provenance.request_headers));
     provenance.response_headers =
@@ -1465,6 +1468,10 @@ mod tests {
         );
         item.provenance.document_url =
             Some("https://chatgpt.com/c/test?access_token=secret#fragment".to_owned());
+        item.provenance.lifecycle_id = Some("lifecycle-1".to_owned());
+        item.provenance.redirect_hop = Some(1);
+        item.provenance.redirected_from_url =
+            Some("https://chatgpt.com/start?token=redirect-secret".to_owned());
         item.provenance
             .request_headers
             .insert("Authorization".to_owned(), "Bearer secret".to_owned());
@@ -1496,6 +1503,9 @@ mod tests {
         );
         assert_eq!(provenance.response_headers["Set-Cookie"], "[REDACTED]");
         assert!(!provenance.document_url.unwrap().contains("secret"));
+        assert!(!provenance.redirected_from_url.unwrap().contains("redirect-secret"));
+        assert_eq!(provenance.lifecycle_id.as_deref(), Some("lifecycle-1"));
+        assert_eq!(provenance.redirect_hop, Some(1));
         assert!(!provenance.response_headers["Location"].contains("secret"));
         assert_eq!(provenance.response_protocol.as_deref(), Some("h2"));
         assert!(provenance.from_disk_cache);

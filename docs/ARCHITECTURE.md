@@ -89,6 +89,7 @@ Implemented:
 - CDP attachment restricted to ChatGPT origins;
 - request/response metadata observation;
 - sanitized transport provenance: request/response headers, frame and loader identity, initiator, wall-clock timing, response protocol, and browser-cache/service-worker/prefetch signals;
+- redirect-chain preservation with stable lifecycle IDs, hop numbers, and sanitized previous-URL provenance;
 - outbound JSON/form request-body capture with extension + daemon secret filtering;
 - completed response-body extraction;
 - ordered chunk transport over a persistent Native Messaging port;
@@ -107,8 +108,8 @@ Implemented:
 
 Next:
 
-- redirect-chain preservation and explicit request lifecycle identities;
 - multipart/upload provenance without unsafe raw-body archival;
+- deeper redirect/body semantics where Chromium exposes safe evidence;
 - canonical conversation views across snapshots, branches, and stream revisions;
 - native-host installation tooling for normal Edge deployment;
 - encryption/key management for private storage.

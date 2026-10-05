@@ -145,7 +145,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const captures = JSON.parse(capturesStdout) as Array<{
         method: string;
         url: string;
+        status: number;
         provenance: {
+          lifecycle_id?: string;
+          redirect_hop?: number;
+          redirected_from_url?: string;
           initiator_type?: string;
           request_wall_time_ms?: number;
           response_protocol?: string;
@@ -176,6 +180,33 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(requestHeaders.authorization).toBe("[REDACTED]");
       expect(requestHeaders["x-mirrarium-fixture"]).toBe("preserve-me");
       expect(responseHeaders["x-mirrarium-response"]).toBe("preserve-me-too");
+
+      const redirectStart = captures.find(
+        (capture) =>
+          capture.status === 302 &&
+          capture.url.includes("/backend-api/redirect-start"),
+      );
+      const redirectFinal = captures.find((capture) =>
+        capture.url.includes("/backend-api/redirect-final"),
+      );
+      expect(redirectStart).toBeTruthy();
+      expect(redirectFinal).toBeTruthy();
+      expect(redirectStart?.provenance.lifecycle_id).toBeTruthy();
+      expect(redirectFinal?.provenance.lifecycle_id).toBe(
+        redirectStart?.provenance.lifecycle_id,
+      );
+      expect(redirectStart?.provenance.redirect_hop).toBe(0);
+      expect(redirectFinal?.provenance.redirect_hop).toBe(1);
+      expect(redirectFinal?.provenance.redirected_from_url).toContain(
+        "/backend-api/redirect-start",
+      );
+      expect(redirectFinal?.url).not.toContain("fixture-redirect-secret");
+      const redirectHeaders = Object.fromEntries(
+        Object.entries(redirectStart?.provenance.response_headers ?? {}).map(
+          ([key, value]) => [key.toLowerCase(), value],
+        ),
+      );
+      expect(redirectHeaders.location).not.toContain("fixture-redirect-secret");
 
       const privateObjects = await readFilesRecursively(join(dataDir, "private", "objects"));
       const requestBodyObjects = privateObjects

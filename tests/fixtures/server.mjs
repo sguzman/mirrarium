@@ -54,7 +54,8 @@ Promise.all([
       access_token: requestSecret,
     }),
   }).then((response) => response.json()),
-  fetch("/backend-api/conversation/stream").then((response) => response.text())
+  fetch("/backend-api/conversation/stream").then((response) => response.text()),
+  fetch("/backend-api/redirect-start").then((response) => response.text())
 ]).then(() => {
   document.body.dataset.ready = "yes";
 });
@@ -100,6 +101,20 @@ const fixtureServer = https.createServer(
         title: "Private fixture",
         messages: [{ role: "user", content: "private corpus material" }],
       }));
+      return;
+    }
+
+    if (request.url === "/backend-api/redirect-start") {
+      response.writeHead(302, {
+        location: "/backend-api/redirect-final?token=fixture-redirect-secret",
+      });
+      response.end();
+      return;
+    }
+
+    if (request.url?.startsWith("/backend-api/redirect-final")) {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("redirect complete");
       return;
     }
 

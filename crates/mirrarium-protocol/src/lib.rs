@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub struct CaptureProvenance {
     pub frame_id: Option<String>,
     pub loader_id: Option<String>,
+    pub lifecycle_id: Option<String>,
+    pub redirect_hop: Option<u32>,
+    pub redirected_from_url: Option<String>,
     pub document_url: Option<String>,
     pub initiator_type: Option<String>,
     pub request_wall_time_ms: Option<u64>,

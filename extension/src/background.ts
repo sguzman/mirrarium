@@ -16,6 +16,10 @@ type RequestMetadata = {
   initiatorType?: string;
   requestWallTimeMs?: number;
   servedFromCache: boolean;
+  lifecycleId: string;
+  redirectHop: number;
+  redirectedFromUrl?: string;
+  resourceType?: string;
 };
 
 type ResponseMetadata = {
@@ -32,6 +36,20 @@ type ResponseMetadata = {
   fromDiskCache: boolean;
   fromServiceWorker: boolean;
   fromPrefetchCache: boolean;
+  encodedDataLength?: number;
+};
+
+type CdpResponse = {
+  url: string;
+  status: number;
+  mimeType: string;
+  protocol?: string;
+  responseTime?: number;
+  fromDiskCache?: boolean;
+  fromServiceWorker?: boolean;
+  fromPrefetchCache?: boolean;
+  encodedDataLength?: number;
+  headers?: Record<string, string | number>;
 };
 
 const attachedTabs = new Set<number>();
@@ -364,6 +382,7 @@ async function captureRequestBody(
   requestId: string,
   captureId: string,
   request: RequestMetadata | undefined,
+  allowPostDataFetch = true,
 ): Promise<void> {
   if (!request || (request.postData === undefined && !request.hasPostData)) return;
 
@@ -383,6 +402,15 @@ async function captureRequestBody(
   }
 
   let body = request.postData;
+  if (body === undefined && request.hasPostData && !allowPostDataFetch) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "request body unavailable after redirect",
+    });
+    return;
+  }
+
   if (body === undefined && request.hasPostData) {
     try {
       const result = (await chrome.debugger.sendCommand(
@@ -469,6 +497,91 @@ function postUtf8Body(captureId: string, body: string): void {
   }
 }
 
+function responseMetadataFromCdp(
+  response: CdpResponse,
+  resourceType: string,
+): ResponseMetadata {
+  return {
+    url: response.url,
+    status: response.status,
+    mimeType: response.mimeType,
+    resourceType,
+    etag: header(response.headers, "etag"),
+    lastModified: header(response.headers, "last-modified"),
+    cacheControl: header(response.headers, "cache-control"),
+    headers: sanitizeHeaders(response.headers),
+    responseProtocol: response.protocol,
+    responseTimeMs: secondsToMilliseconds(response.responseTime),
+    fromDiskCache: response.fromDiskCache ?? false,
+    fromServiceWorker: response.fromServiceWorker ?? false,
+    fromPrefetchCache: response.fromPrefetchCache ?? false,
+    encodedDataLength: response.encodedDataLength,
+  };
+}
+
+function postCaptureStart(
+  tabId: number,
+  requestId: string,
+  captureId: string,
+  request: RequestMetadata | undefined,
+  response: ResponseMetadata | undefined,
+): void {
+  postNative({
+    type: "capture_start",
+    metadata: {
+      capture_id: captureId,
+      tab_id: tabId,
+      request_id: requestId,
+      method: request?.method ?? "GET",
+      url: request?.url ?? response?.url ?? "",
+      status: Math.trunc(response?.status ?? 0),
+      mime_type: response?.mimeType ?? "",
+      resource_type: response?.resourceType ?? request?.resourceType ?? "Unknown",
+      etag: response?.etag,
+      last_modified: response?.lastModified,
+      cache_control: response?.cacheControl,
+      provenance: {
+        frame_id: request?.frameId,
+        loader_id: request?.loaderId,
+        lifecycle_id: request?.lifecycleId,
+        redirect_hop: request?.redirectHop,
+        redirected_from_url: request?.redirectedFromUrl,
+        document_url: request?.documentUrl,
+        initiator_type: request?.initiatorType,
+        request_wall_time_ms: request?.requestWallTimeMs,
+        response_time_ms: response?.responseTimeMs,
+        response_protocol: response?.responseProtocol,
+        served_from_cache: request?.servedFromCache ?? false,
+        from_disk_cache: response?.fromDiskCache ?? false,
+        from_service_worker: response?.fromServiceWorker ?? false,
+        from_prefetch_cache: response?.fromPrefetchCache ?? false,
+        request_headers: request?.headers ?? {},
+        response_headers: response?.headers ?? {},
+      },
+    },
+  });
+}
+
+async function captureRedirectHop(
+  tabId: number,
+  requestId: string,
+  request: RequestMetadata,
+  response: ResponseMetadata,
+): Promise<void> {
+  const captureId = crypto.randomUUID();
+  postCaptureStart(tabId, requestId, captureId, request, response);
+  await captureRequestBody(tabId, requestId, captureId, request, false);
+  postNative({
+    type: "capture_finish",
+    capture_id: captureId,
+    encoded_data_length:
+      response.encodedDataLength === undefined
+        ? undefined
+        : Math.max(0, Math.trunc(response.encodedDataLength)),
+    body_error: "suppressed:redirect_body_not_available",
+  });
+}
+
 async function captureBody(
   tabId: number,
   requestId: string,
@@ -487,37 +600,7 @@ async function captureBody(
 
   const captureId = crypto.randomUUID();
 
-  postNative({
-    type: "capture_start",
-    metadata: {
-      capture_id: captureId,
-      tab_id: tabId,
-      request_id: requestId,
-      method: request?.method ?? "GET",
-      url: request?.url ?? response?.url ?? "",
-      status: Math.trunc(response?.status ?? 0),
-      mime_type: response?.mimeType ?? "",
-      resource_type: response?.resourceType ?? "Unknown",
-      etag: response?.etag,
-      last_modified: response?.lastModified,
-      cache_control: response?.cacheControl,
-      provenance: {
-        frame_id: request?.frameId,
-        loader_id: request?.loaderId,
-        document_url: request?.documentUrl,
-        initiator_type: request?.initiatorType,
-        request_wall_time_ms: request?.requestWallTimeMs,
-        response_time_ms: response?.responseTimeMs,
-        response_protocol: response?.responseProtocol,
-        served_from_cache: request?.servedFromCache ?? false,
-        from_disk_cache: response?.fromDiskCache ?? false,
-        from_service_worker: response?.fromServiceWorker ?? false,
-        from_prefetch_cache: response?.fromPrefetchCache ?? false,
-        request_headers: request?.headers ?? {},
-        response_headers: response?.headers ?? {},
-      },
-    },
-  });
+  postCaptureStart(tabId, requestId, captureId, request, response);
 
   await captureRequestBody(tabId, requestId, captureId, request);
 
@@ -598,7 +681,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       frameId?: string;
       documentURL?: string;
       wallTime?: number;
+      type?: string;
       initiator?: { type?: string };
+      redirectResponse?: CdpResponse;
       request: {
         method: string;
         url: string;
@@ -607,7 +692,26 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         headers?: Record<string, string | number>;
       };
     };
-    requests.set(requestKey(tabId, event.requestId), {
+    const key = requestKey(tabId, event.requestId);
+    const previous = requests.get(key);
+
+    let lifecycleId = previous?.lifecycleId ?? crypto.randomUUID();
+    let redirectHop = previous?.redirectHop ?? 0;
+    let redirectedFromUrl: string | undefined;
+
+    if (event.redirectResponse && previous) {
+      const redirectResponse = responseMetadataFromCdp(
+        event.redirectResponse,
+        previous.resourceType ?? event.type ?? "Other",
+      );
+      responses.delete(key);
+      void captureRedirectHop(tabId, event.requestId, previous, redirectResponse);
+      lifecycleId = previous.lifecycleId;
+      redirectHop = previous.redirectHop + 1;
+      redirectedFromUrl = previous.url;
+    }
+
+    requests.set(key, {
       method: event.request.method,
       url: event.request.url,
       postData: event.request.postData,
@@ -620,6 +724,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       initiatorType: event.initiator?.type,
       requestWallTimeMs: secondsToMilliseconds(event.wallTime),
       servedFromCache: false,
+      lifecycleId,
+      redirectHop,
+      redirectedFromUrl,
+      resourceType: event.type,
     });
     return;
   }
@@ -635,33 +743,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     const event = params as {
       requestId: string;
       type: string;
-      response: {
-        url: string;
-        status: number;
-        mimeType: string;
-        protocol?: string;
-        responseTime?: number;
-        fromDiskCache?: boolean;
-        fromServiceWorker?: boolean;
-        fromPrefetchCache?: boolean;
-        headers?: Record<string, string | number>;
-      };
+      response: CdpResponse;
     };
-    responses.set(requestKey(tabId, event.requestId), {
-      url: event.response.url,
-      status: event.response.status,
-      mimeType: event.response.mimeType,
-      resourceType: event.type,
-      etag: header(event.response.headers, "etag"),
-      lastModified: header(event.response.headers, "last-modified"),
-      cacheControl: header(event.response.headers, "cache-control"),
-      headers: sanitizeHeaders(event.response.headers),
-      responseProtocol: event.response.protocol,
-      responseTimeMs: secondsToMilliseconds(event.response.responseTime),
-      fromDiskCache: event.response.fromDiskCache ?? false,
-      fromServiceWorker: event.response.fromServiceWorker ?? false,
-      fromPrefetchCache: event.response.fromPrefetchCache ?? false,
-    });
+    responses.set(
+      requestKey(tabId, event.requestId),
+      responseMetadataFromCdp(event.response, event.type),
+    );
     return;
   }
 
