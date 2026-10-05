@@ -18,6 +18,8 @@ pub struct CorpusStats {
     pub conversation_snapshots: u64,
     pub message_observations: u64,
     pub stream_reconstructions: u64,
+    pub attachment_observations: u64,
+    pub attachment_downloads: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +102,28 @@ struct ConversationExtraction {
     messages: Vec<MessageObservation>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachmentObservation {
+    conversation_id: Option<String>,
+    message_id: Option<String>,
+    attachment_id: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    size_bytes: Option<u64>,
+    sanitized_url: Option<String>,
+    json_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadSource {
+    capture_id: String,
+    source_url: String,
+    mime_type: String,
+    privacy_class: String,
+    body_hash: String,
+    body_bytes: u64,
+}
+
 pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     let raw_root = raw_root.as_ref();
     let raw_database = raw_root.join("ledger.sqlite3");
@@ -125,6 +149,8 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         PRAGMA synchronous = NORMAL;
         PRAGMA foreign_keys = ON;
 
+        DROP TABLE IF EXISTS attachment_downloads;
+        DROP TABLE IF EXISTS attachment_observations;
         DROP TABLE IF EXISTS message_observations;
         DROP TABLE IF EXISTS conversation_snapshots;
         DROP TABLE IF EXISTS stream_reconstructions;
@@ -175,6 +201,48 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         CREATE INDEX message_observations_message_idx
             ON message_observations(message_id);
 
+        CREATE TABLE attachment_observations (
+            capture_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            conversation_id TEXT,
+            message_id TEXT,
+            attachment_id TEXT,
+            file_name TEXT,
+            mime_type TEXT,
+            size_bytes INTEGER,
+            sanitized_url TEXT,
+            url_identity TEXT,
+            source_url TEXT NOT NULL,
+            json_path TEXT NOT NULL,
+            PRIMARY KEY (capture_id, sequence)
+        );
+
+        CREATE INDEX attachment_observations_conversation_idx
+            ON attachment_observations(conversation_id);
+        CREATE INDEX attachment_observations_message_idx
+            ON attachment_observations(message_id);
+        CREATE INDEX attachment_observations_url_idx
+            ON attachment_observations(url_identity);
+
+        CREATE TABLE attachment_downloads (
+            attachment_capture_id TEXT NOT NULL,
+            attachment_sequence INTEGER NOT NULL,
+            download_capture_id TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            privacy_class TEXT NOT NULL,
+            body_hash TEXT NOT NULL,
+            body_bytes INTEGER NOT NULL,
+            PRIMARY KEY (
+                attachment_capture_id,
+                attachment_sequence,
+                download_capture_id
+            ),
+            FOREIGN KEY (attachment_capture_id, attachment_sequence)
+                REFERENCES attachment_observations(capture_id, sequence)
+                ON DELETE CASCADE
+        );
+
         CREATE TABLE stream_reconstructions (
             capture_id TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
@@ -214,6 +282,8 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         "#,
     )?;
 
+    let download_sources = collect_download_sources(&raw)?;
+
     let transaction = corpus.transaction()?;
 
     for (capture_id, source_url, privacy_class, body_hash) in stream_sources {
@@ -238,6 +308,8 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         )?;
     }
 
+    correlate_attachment_downloads(&transaction, &download_sources)?;
+
     transaction.commit()?;
     stats(raw_root)
 }
@@ -260,6 +332,8 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         "conversation_snapshots",
         "message_observations",
         "stream_reconstructions",
+        "attachment_observations",
+        "attachment_downloads",
     ] {
         anyhow::ensure!(
             table_exists(&connection, table)?,
@@ -288,6 +362,14 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         stream_reconstructions: scalar_u64(
             &connection,
             "SELECT COUNT(*) FROM stream_reconstructions",
+        )?,
+        attachment_observations: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM attachment_observations",
+        )?,
+        attachment_downloads: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM attachment_downloads",
         )?,
     })
 }
@@ -625,6 +707,8 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         "conversation_snapshots",
         "message_observations",
         "stream_reconstructions",
+        "attachment_observations",
+        "attachment_downloads",
     ] {
         anyhow::ensure!(
             table_exists(&connection, table)?,
@@ -688,6 +772,83 @@ fn conversation_summary(
             .try_into()
             .context("negative stream reconstruction count")?,
     }))
+}
+
+
+fn collect_download_sources(connection: &Connection) -> Result<Vec<DownloadSource>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id,
+            url,
+            mime_type,
+            privacy_class,
+            body_hash,
+            body_bytes
+        FROM captures
+        WHERE body_hash IS NOT NULL
+        ORDER BY captured_at_ms, capture_id
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(DownloadSource {
+            capture_id: row.get(0)?,
+            source_url: row.get(1)?,
+            mime_type: row.get(2)?,
+            privacy_class: row.get(3)?,
+            body_hash: row.get(4)?,
+            body_bytes: row.get::<_, i64>(5)? as u64,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn correlate_attachment_downloads(
+    transaction: &Transaction<'_>,
+    downloads: &[DownloadSource],
+) -> Result<()> {
+    for download in downloads {
+        let Some(url_identity) = attachment_url_identity(&download.source_url, None) else {
+            continue;
+        };
+
+        transaction.execute(
+            r#"
+            INSERT OR IGNORE INTO attachment_downloads (
+                attachment_capture_id,
+                attachment_sequence,
+                download_capture_id,
+                source_url,
+                mime_type,
+                privacy_class,
+                body_hash,
+                body_bytes
+            )
+            SELECT
+                capture_id,
+                sequence,
+                ?1,
+                ?2,
+                ?3,
+                ?4,
+                ?5,
+                ?6
+            FROM attachment_observations
+            WHERE url_identity = ?7
+            "#,
+            params![
+                download.capture_id,
+                download.source_url,
+                download.mime_type,
+                download.privacy_class,
+                download.body_hash,
+                download.body_bytes as i64,
+                url_identity,
+            ],
+        )?;
+    }
+
+    Ok(())
 }
 
 fn collect_sources(
@@ -827,6 +988,24 @@ fn derive_json_capture(
         return Ok(());
     };
 
+    let root_conversation_id = conversation_id_from_value(&value)
+        .or_else(|| value.get("id").and_then(Value::as_str).map(str::to_owned))
+        .or_else(|| conversation_id_from_url(source_url));
+    let attachments = extract_attachment_observations(
+        &value,
+        source_url,
+        root_conversation_id.as_deref(),
+    );
+    for (sequence, attachment) in attachments.iter().enumerate() {
+        insert_attachment_observation(
+            transaction,
+            capture_id,
+            sequence as u64,
+            source_url,
+            attachment,
+        )?;
+    }
+
     let Some(extraction) = extract_conversation(&value, source_url) else {
         return Ok(());
     };
@@ -860,6 +1039,293 @@ fn derive_json_capture(
     }
 
     Ok(())
+}
+
+
+fn insert_attachment_observation(
+    transaction: &Transaction<'_>,
+    capture_id: &str,
+    sequence: u64,
+    source_url: &str,
+    attachment: &AttachmentObservation,
+) -> Result<()> {
+    let url_identity = attachment
+        .sanitized_url
+        .as_deref()
+        .and_then(|url| attachment_url_identity(url, Some(source_url)));
+
+    transaction.execute(
+        r#"
+        INSERT INTO attachment_observations (
+            capture_id,
+            sequence,
+            conversation_id,
+            message_id,
+            attachment_id,
+            file_name,
+            mime_type,
+            size_bytes,
+            sanitized_url,
+            url_identity,
+            source_url,
+            json_path
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+        )
+        "#,
+        params![
+            capture_id,
+            sequence as i64,
+            attachment.conversation_id.as_deref(),
+            attachment.message_id.as_deref(),
+            attachment.attachment_id.as_deref(),
+            attachment.file_name.as_deref(),
+            attachment.mime_type.as_deref(),
+            attachment.size_bytes.map(|value| value as i64),
+            attachment.sanitized_url.as_deref(),
+            url_identity,
+            source_url,
+            attachment.json_path,
+        ],
+    )?;
+    Ok(())
+}
+
+fn extract_attachment_observations(
+    value: &Value,
+    source_url: &str,
+    root_conversation_id: Option<&str>,
+) -> Vec<AttachmentObservation> {
+    let mut observations = Vec::new();
+    walk_attachment_values(
+        value,
+        source_url,
+        "$",
+        root_conversation_id.map(str::to_owned),
+        None,
+        &mut observations,
+    );
+    observations
+}
+
+fn walk_attachment_values(
+    value: &Value,
+    source_url: &str,
+    path: &str,
+    inherited_conversation_id: Option<String>,
+    inherited_message_id: Option<String>,
+    observations: &mut Vec<AttachmentObservation>,
+) {
+    match value {
+        Value::Object(map) => {
+            let conversation_id =
+                conversation_id_from_value(value).or(inherited_conversation_id);
+            let message_id = message_id_for_context(value).or(inherited_message_id);
+
+            if let Some(observation) = attachment_from_object(
+                map,
+                source_url,
+                path,
+                conversation_id.clone(),
+                message_id.clone(),
+            ) {
+                observations.push(observation);
+            }
+
+            for (key, child) in map {
+                let child_path = format!("{path}/{}", escape_json_pointer(key));
+                walk_attachment_values(
+                    child,
+                    source_url,
+                    &child_path,
+                    conversation_id.clone(),
+                    message_id.clone(),
+                    observations,
+                );
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                walk_attachment_values(
+                    child,
+                    source_url,
+                    &format!("{path}/{index}"),
+                    inherited_conversation_id.clone(),
+                    inherited_message_id.clone(),
+                    observations,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn attachment_from_object(
+    map: &serde_json::Map<String, Value>,
+    source_url: &str,
+    path: &str,
+    conversation_id: Option<String>,
+    message_id: Option<String>,
+) -> Option<AttachmentObservation> {
+    let explicit_id = first_string(
+        map,
+        &[
+            "file_id",
+            "fileId",
+            "attachment_id",
+            "attachmentId",
+            "asset_pointer",
+        ],
+    );
+    let file_name = first_string(map, &["file_name", "fileName", "filename", "name"]);
+    let mime_type = first_string(
+        map,
+        &["mime_type", "mimeType", "content_type", "contentType"],
+    );
+    let size_bytes = first_u64(map, &["size_bytes", "sizeBytes", "size"]);
+    let raw_url = first_string(
+        map,
+        &[
+            "download_url",
+            "downloadUrl",
+            "download_link",
+            "downloadLink",
+            "url",
+        ],
+    );
+
+    let path_lower = path.to_ascii_lowercase();
+    let attachment_context = path_lower.contains("attachment")
+        || path_lower.contains("/files")
+        || path_lower.contains("/file")
+        || map.contains_key("download_url")
+        || map.contains_key("downloadUrl")
+        || map.contains_key("file_id")
+        || map.contains_key("fileId")
+        || map.contains_key("attachment_id")
+        || map.contains_key("attachmentId")
+        || map.contains_key("asset_pointer");
+
+    if !attachment_context {
+        return None;
+    }
+
+    if explicit_id.is_none()
+        && file_name.is_none()
+        && mime_type.is_none()
+        && size_bytes.is_none()
+        && raw_url.is_none()
+    {
+        return None;
+    }
+
+    let attachment_id = explicit_id.or_else(|| {
+        map.get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    let sanitized_url = raw_url
+        .as_deref()
+        .and_then(|url| attachment_url_identity(url, Some(source_url)));
+
+    Some(AttachmentObservation {
+        conversation_id,
+        message_id,
+        attachment_id,
+        file_name,
+        mime_type,
+        size_bytes,
+        sanitized_url,
+        json_path: path.to_owned(),
+    })
+}
+
+fn first_string(
+    map: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| map.get(*key).and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+fn first_u64(
+    map: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        let value = map.get(*key)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+    })
+}
+
+fn message_id_for_context(value: &Value) -> Option<String> {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/author/role").and_then(Value::as_str));
+    role?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn attachment_url_identity(raw_url: &str, base_url: Option<&str>) -> Option<String> {
+    let mut url = Url::parse(raw_url).ok().or_else(|| {
+        let base = Url::parse(base_url?).ok()?;
+        base.join(raw_url).ok()
+    })?;
+
+    url.set_fragment(None);
+    let query_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+
+    if !query_pairs.is_empty() {
+        url.set_query(None);
+        let mut query = url.query_pairs_mut();
+        for (key, value) in query_pairs {
+            if is_sensitive_url_key(&key) {
+                query.append_pair(&key, "[REDACTED]");
+            } else {
+                query.append_pair(&key, &value);
+            }
+        }
+    }
+
+    Some(url.to_string())
+}
+
+fn is_sensitive_url_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "token"
+            | "access_token"
+            | "id_token"
+            | "refresh_token"
+            | "session"
+            | "session_token"
+            | "auth"
+            | "authorization"
+            | "signature"
+            | "x_amz_signature"
+            | "x_goog_signature"
+            | "key"
+            | "api_key"
+            | "apikey"
+            | "code"
+    ) || normalized.ends_with("_token")
+        || normalized.ends_with("_signature")
+        || normalized.contains("credential")
+}
+
+fn escape_json_pointer(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
 }
 
 fn insert_message_observation(
@@ -1156,6 +1622,50 @@ mod tests {
                 },
             ]
         );
+    }
+
+
+    #[test]
+    fn extracts_attachment_metadata_and_sanitizes_signed_url_identity() {
+        let value = serde_json::json!({
+            "conversation_id": "conversation-a",
+            "mapping": {
+                "message-node": {
+                    "message": {
+                        "id": "message-1",
+                        "author": {"role": "user"},
+                        "content": {
+                            "attachments": [{
+                                "file_id": "file-123",
+                                "filename": "notes.txt",
+                                "mime_type": "text/plain",
+                                "size_bytes": 42,
+                                "download_url": "/backend-api/files/file-123/download?token=secret&keep=yes"
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        let observations = extract_attachment_observations(
+            &value,
+            "https://chatgpt.com/backend-api/conversation/conversation-a",
+            Some("conversation-a"),
+        );
+        assert_eq!(observations.len(), 1);
+        let attachment = &observations[0];
+        assert_eq!(attachment.conversation_id.as_deref(), Some("conversation-a"));
+        assert_eq!(attachment.message_id.as_deref(), Some("message-1"));
+        assert_eq!(attachment.attachment_id.as_deref(), Some("file-123"));
+        assert_eq!(attachment.file_name.as_deref(), Some("notes.txt"));
+        assert_eq!(attachment.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(attachment.size_bytes, Some(42));
+        let url = attachment.sanitized_url.as_deref().unwrap();
+        assert!(url.contains("/backend-api/files/file-123/download"));
+        assert!(url.contains("keep=yes"));
+        assert!(!url.contains("secret"));
+        assert!(url.contains("%5BREDACTED%5D"));
     }
 
     #[test]
