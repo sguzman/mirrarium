@@ -624,7 +624,7 @@ mod tests {
         .unwrap();
         assert_eq!(replay.body, body);
         assert_eq!(replay.body_hash, hash);
-        assert_eq!(replay.etag.as_deref(), Some(""fixture-etag""));
+        assert_eq!(replay.etag.as_deref(), Some("\"fixture-etag\""));
     }
 
     #[test]
