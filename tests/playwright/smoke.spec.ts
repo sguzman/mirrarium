@@ -298,6 +298,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         stream_captures: number;
         stream_events: number;
         json_stream_events: number;
+        stream_message_revisions: number;
         conversation_snapshots: number;
         message_observations: number;
         stream_reconstructions: number;
@@ -307,6 +308,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
       expect(corpusStats.json_stream_events).toBeGreaterThanOrEqual(2);
+      expect(corpusStats.stream_message_revisions).toBeGreaterThanOrEqual(2);
       expect(corpusStats.conversation_snapshots).toBeGreaterThanOrEqual(1);
       expect(corpusStats.message_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_reconstructions).toBeGreaterThanOrEqual(1);
@@ -486,6 +488,67 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(canonical.messages.map((message) => message.content_text)).not.toContain(
         "discarded branch",
       );
+
+      const { stdout: streamRevisionsStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "stream-revisions", "fixture-stream-tail", "20"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const streamRevisions = JSON.parse(streamRevisionsStdout) as Array<{
+        message_id: string;
+        parent_id?: string;
+        role?: string;
+        content_text?: string;
+      }>;
+      expect(streamRevisions).toHaveLength(2);
+      expect(streamRevisions.map((revision) => revision.content_text)).toEqual([
+        "hello",
+        "hello world",
+      ]);
+      expect(
+        streamRevisions.every(
+          (revision) =>
+            revision.message_id === "stream-tail-assistant" &&
+            revision.parent_id === "stream-tail-user" &&
+            revision.role === "assistant",
+        ),
+      ).toBe(true);
+
+      const { stdout: streamTailCanonicalStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "canonical", "fixture-stream-tail"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const streamTailCanonical = JSON.parse(streamTailCanonicalStdout) as {
+        conversation_id: string;
+        messages: Array<{
+          message_id?: string;
+          parent_id?: string;
+          role?: string;
+          content_text?: string;
+        }>;
+        warnings: string[];
+      };
+      expect(streamTailCanonical.conversation_id).toBe("fixture-stream-tail");
+      expect(
+        streamTailCanonical.messages.map((message) => message.content_text),
+      ).toEqual(["question", "hello world"]);
+      expect(streamTailCanonical.messages[1]).toMatchObject({
+        message_id: "stream-tail-assistant",
+        parent_id: "stream-tail-user",
+        role: "assistant",
+      });
+      expect(streamTailCanonical.warnings).toEqual([]);
 
       const { stdout: streamConversationStdout } = await execFileAsync(
         cliPath,

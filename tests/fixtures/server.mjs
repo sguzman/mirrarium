@@ -63,6 +63,8 @@ Promise.all([
     }),
   }).then((response) => response.json()),
   fetch("/backend-api/conversation/stream").then((response) => response.text()),
+  fetch("/backend-api/conversation/stream-tail").then((response) => response.json()),
+  fetch("/backend-api/conversation/stream-tail/events").then((response) => response.text()),
   fetch("/backend-api/redirect-start").then((response) => response.text()),
   fetch("/backend-api/upload-fixture", {
     method: "POST",
@@ -240,6 +242,52 @@ const fixtureServer = https.createServer(
     if (request.url?.startsWith("/backend-api/redirect-final")) {
       response.writeHead(200, { "content-type": "text/plain" });
       response.end("redirect complete");
+      return;
+    }
+
+    if (request.url === "/backend-api/conversation/stream-tail") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        etag: "\"fixture-stream-tail-v1\"",
+      });
+      response.end(JSON.stringify({
+        id: "fixture-stream-tail",
+        title: "Stream tail fixture",
+        current_node: "stream-tail-user",
+        mapping: {
+          root: {
+            parent: null,
+            children: ["stream-tail-user"],
+            message: null,
+          },
+          "stream-tail-user": {
+            parent: "root",
+            children: [],
+            message: {
+              id: "stream-tail-user",
+              author: { role: "user" },
+              content: { parts: ["question"] },
+            },
+          },
+        },
+      }));
+      return;
+    }
+
+    if (request.url === "/backend-api/conversation/stream-tail/events") {
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      });
+      response.write("event: message\n");
+      response.write(
+        'data: {"conversation_id":"fixture-stream-tail","parent_message_id":"stream-tail-user","message":{"id":"stream-tail-assistant","author":{"role":"assistant"},"content":{"parts":["hello"]}}}\n\n',
+      );
+      response.write("event: message\n");
+      response.write(
+        'data: {"conversation_id":"fixture-stream-tail","parent_message_id":"stream-tail-user","message":{"id":"stream-tail-assistant","author":{"role":"assistant"},"content":{"parts":["hello world"]}}}\n\n',
+      );
+      response.end("data: [DONE]\n\n");
       return;
     }
 
