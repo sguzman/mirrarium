@@ -41,6 +41,13 @@ const requestSecret = ["fixture", "secret", "token"].join("-");
 Promise.all([
   fetch("/backend-api/conversation/test").then((response) => response.json()),
   fetch("/backend-api/conversation/branch-fixture").then((response) => response.json()),
+  fetch("/backend-api/conversation/attachment-fixture")
+    .then((response) => response.json())
+    .then((conversation) =>
+      fetch(
+        conversation.mapping["attachment-message"].message.content.attachments[0].download_url,
+      ).then((response) => response.text()),
+    ),
   fetch("/backend-api/repeat/a").then((response) => response.text()),
   fetch("/backend-api/repeat/b").then((response) => response.text()),
   fetch("/backend-api/conversation/post", {
@@ -162,6 +169,54 @@ const fixtureServer = https.createServer(
           },
         },
       }));
+      return;
+    }
+
+    if (request.url === "/backend-api/conversation/attachment-fixture") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        etag: "\"fixture-attachment-v1\"",
+      });
+      response.end(JSON.stringify({
+        id: "fixture-attachment-conversation",
+        title: "Attachment fixture",
+        current_node: "attachment-message",
+        mapping: {
+          root: {
+            parent: null,
+            children: ["attachment-message"],
+            message: null,
+          },
+          "attachment-message": {
+            parent: "root",
+            children: [],
+            message: {
+              id: "attachment-message",
+              author: { role: "user" },
+              content: {
+                parts: ["attachment"],
+                attachments: [{
+                  file_id: "file-123",
+                  filename: "fixture-attachment.txt",
+                  mime_type: "text/plain",
+                  size_bytes: 24,
+                  download_url:
+                    "/backend-api/files/file-123/download?token=fixture-download-secret&keep=yes",
+                }],
+              },
+            },
+          },
+        },
+      }));
+      return;
+    }
+
+    if (request.url?.startsWith("/backend-api/files/file-123/download")) {
+      response.writeHead(200, {
+        "content-type": "text/plain",
+        "content-disposition": 'attachment; filename="fixture-attachment.txt"',
+      });
+      response.end("fixture attachment bytes");
       return;
     }
 

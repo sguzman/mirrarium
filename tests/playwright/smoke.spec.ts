@@ -273,6 +273,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(requestBodyObjects.length).toBeGreaterThanOrEqual(1);
       expect(requestBodyObjects.some((body) => body.includes("[REDACTED]"))).toBe(true);
       expect(requestBodyObjects.some((body) => body.includes("fixture-secret-token"))).toBe(false);
+      expect(
+        privateObjects.some((body) =>
+          body.toString("utf8").includes("fixture-download-secret"),
+        ),
+      ).toBe(false);
 
       const { stdout: corpusStdout } = await execFileAsync(
         cliPath,
@@ -291,6 +296,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         conversation_snapshots: number;
         message_observations: number;
         stream_reconstructions: number;
+        attachment_observations: number;
+        attachment_downloads: number;
       };
       expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
@@ -298,6 +305,63 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.conversation_snapshots).toBeGreaterThanOrEqual(1);
       expect(corpusStats.message_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_reconstructions).toBeGreaterThanOrEqual(1);
+      expect(corpusStats.attachment_observations).toBeGreaterThanOrEqual(1);
+      expect(corpusStats.attachment_downloads).toBeGreaterThanOrEqual(1);
+
+      const { stdout: attachmentsStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "attachments", "fixture-attachment-conversation", "20"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const attachments = JSON.parse(attachmentsStdout) as Array<{
+        observation: {
+          conversation_id?: string;
+          message_id?: string;
+          attachment_id?: string;
+          file_name?: string;
+          mime_type?: string;
+          size_bytes?: number;
+          sanitized_url?: string;
+        };
+        downloads: Array<{
+          source_url: string;
+          mime_type: string;
+          body_hash: string;
+          body_bytes: number;
+        }>;
+      }>;
+      const attachment = attachments.find(
+        (item) => item.observation.attachment_id === "file-123",
+      );
+      expect(attachment?.observation).toMatchObject({
+        conversation_id: "fixture-attachment-conversation",
+        message_id: "attachment-message",
+        attachment_id: "file-123",
+        file_name: "fixture-attachment.txt",
+        mime_type: "text/plain",
+        size_bytes: 24,
+      });
+      expect(attachment?.observation.sanitized_url).toContain(
+        "/backend-api/files/file-123/download",
+      );
+      expect(attachment?.observation.sanitized_url).toContain("keep=yes");
+      expect(attachment?.observation.sanitized_url).not.toContain(
+        "fixture-download-secret",
+      );
+      expect(attachment?.downloads).toHaveLength(1);
+      expect(attachment?.downloads[0]).toMatchObject({
+        mime_type: "text/plain",
+      });
+      expect(attachment?.downloads[0].source_url).not.toContain(
+        "fixture-download-secret",
+      );
+      expect(attachment?.downloads[0].body_hash).toHaveLength(64);
+      expect(attachment?.downloads[0].body_bytes).toBeGreaterThan(0);
 
       const { stdout: conversationsStdout } = await execFileAsync(
         cliPath,
