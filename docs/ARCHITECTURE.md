@@ -86,6 +86,7 @@ Implemented:
 - MV3 extension loading and stable unpacked extension identity;
 - CDP attachment restricted to ChatGPT origins;
 - request/response metadata observation;
+- sanitized transport provenance: request/response headers, frame and loader identity, initiator, wall-clock timing, response protocol, and browser-cache/service-worker/prefetch signals;
 - outbound JSON/form request-body capture with extension + daemon secret filtering;
 - completed response-body extraction;
 - ordered chunk transport over a persistent Native Messaging port;
@@ -102,7 +103,7 @@ Implemented:
 
 Next:
 
-- richer request/session provenance;
+- redirect-chain preservation and explicit request lifecycle identities;
 - multipart/upload provenance without unsafe raw-body archival;
 - ChatGPT-specific conversation/message reconstruction from raw JSON + derived stream events;
 - native-host installation tooling for normal Edge deployment;

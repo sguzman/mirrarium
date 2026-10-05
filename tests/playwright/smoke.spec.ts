@@ -132,6 +132,51 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(stats.private_objects).toBeLessThan(stats.private_captures + stats.request_bodies);
       expect(stats.request_body_errors).toBe(0);
 
+      const { stdout: capturesStdout } = await execFileAsync(
+        cliPath,
+        ["captures", "20"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const captures = JSON.parse(capturesStdout) as Array<{
+        method: string;
+        url: string;
+        provenance: {
+          initiator_type?: string;
+          request_wall_time_ms?: number;
+          response_protocol?: string;
+          request_headers: Record<string, string>;
+          response_headers: Record<string, string>;
+        };
+      }>;
+      const postCapture = captures.find(
+        (capture) =>
+          capture.method === "POST" &&
+          capture.url.includes("/backend-api/conversation/post"),
+      );
+      expect(postCapture).toBeTruthy();
+      expect(postCapture?.provenance.initiator_type).toBe("script");
+      expect(postCapture?.provenance.request_wall_time_ms).toBeGreaterThan(0);
+      expect(postCapture?.provenance.response_protocol).toBeTruthy();
+
+      const requestHeaders = Object.fromEntries(
+        Object.entries(postCapture?.provenance.request_headers ?? {}).map(
+          ([key, value]) => [key.toLowerCase(), value],
+        ),
+      );
+      const responseHeaders = Object.fromEntries(
+        Object.entries(postCapture?.provenance.response_headers ?? {}).map(
+          ([key, value]) => [key.toLowerCase(), value],
+        ),
+      );
+      expect(requestHeaders.authorization).toBe("[REDACTED]");
+      expect(requestHeaders["x-mirrarium-fixture"]).toBe("preserve-me");
+      expect(responseHeaders["x-mirrarium-response"]).toBe("preserve-me-too");
+
       const privateObjects = await readFilesRecursively(join(dataDir, "private", "objects"));
       const requestBodyObjects = privateObjects
         .map((body) => body.toString("utf8"))

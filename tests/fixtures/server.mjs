@@ -44,7 +44,11 @@ Promise.all([
   fetch("/backend-api/repeat/b").then((response) => response.text()),
   fetch("/backend-api/conversation/post", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "authorization": "Bearer fixture-header-secret",
+      "x-mirrarium-fixture": "preserve-me",
+    },
     body: JSON.stringify({
       message: requestMessage,
       access_token: requestSecret,
@@ -122,7 +126,10 @@ const fixtureServer = https.createServer(
         incoming += chunk;
       });
       request.on("end", () => {
-        response.writeHead(200, { "content-type": "application/json" });
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "x-mirrarium-response": "preserve-me-too",
+        });
         response.end(JSON.stringify({ ok: true, received_bytes: incoming.length }));
       });
       return;

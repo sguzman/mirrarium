@@ -54,7 +54,7 @@ Mirrarium keeps three distinct conceptual stores:
 
 Raw evidence is preserved. Derived representations may be deleted and rebuilt as parsers improve.
 
-Reusable authentication secrets are not archival data and must not be persisted. Credential-bearing auth/session bodies are suppressed, and credential-like query parameters are redacted before URLs are written to the ledger.
+Reusable authentication secrets are not archival data and must not be persisted. Credential-bearing auth/session bodies are suppressed, credential-like query parameters are redacted before URLs are written to the ledger, request bodies are sanitized before persistence, and sensitive request/response headers are redacted before transport provenance is stored.
 
 ## Inspection CLI
 
@@ -64,6 +64,8 @@ The Rust CLI reads the same local store as the native host:
 mirrarium stats
 mirrarium captures 20
 mirrarium verify
+mirrarium corpus rebuild
+mirrarium corpus stats
 ```
 
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
