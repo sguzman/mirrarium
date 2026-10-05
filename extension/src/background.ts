@@ -393,6 +393,7 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
   try {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
     debuggerAttached = true;
+    attachedTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Network.enable");
     await chrome.debugger.sendCommand({ tabId }, "Fetch.enable", {
       patterns: [
@@ -414,8 +415,8 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
         },
       ],
     });
-    attachedTabs.add(tabId);
   } catch (error) {
+    attachedTabs.delete(tabId);
     if (debuggerAttached) {
       try {
         await chrome.debugger.detach({ tabId });
