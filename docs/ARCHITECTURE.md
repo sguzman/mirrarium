@@ -118,11 +118,13 @@ Implemented:
 - chunked native-host replay transport kept below Chrome's per-message host-to-extension limit;
 - fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts and stylesheets;
 - Chromium end-to-end proof that replay still works with browser cache disabled and avoids origin requests;
+- privacy-bounded durable replay outcome telemetry with hit/miss/error/timeout/fulfillment buckets and replayed-byte totals;
+- Chromium cold-to-warm lifecycle proof covering initial misses, warm hits, saved bytes, and zero healthy-path replay errors;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
-- replay hit/miss/byte observability before expanding the replay surface;
+- cautiously expand verified immutable replay to additional static resource classes, starting with images;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.
