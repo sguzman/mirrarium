@@ -738,14 +738,34 @@ impl CaptureStore {
             }
 
             if !final_path.exists() {
+                let temp_name = format!(
+                    "{}.request.part",
+                    sha256_hex(format!("{capture_id}:request-body").as_bytes())
+                );
+                let temp_path = self.root.join(".incoming").join(temp_name);
                 let mut file = OpenOptions::new()
-                    .create_new(true)
+                    .create(true)
+                    .truncate(true)
                     .write(true)
-                    .open(&final_path)
-                    .with_context(|| format!("creating {}", final_path.display()))?;
+                    .open(&temp_path)
+                    .with_context(|| format!("creating {}", temp_path.display()))?;
+                harden_file(&temp_path)?;
                 file.write_all(&request_body.bytes)?;
                 file.flush()?;
-                harden_file(&final_path)?;
+                drop(file);
+
+                if final_path.exists() {
+                    fs::remove_file(&temp_path)?;
+                } else {
+                    fs::rename(&temp_path, &final_path).with_context(|| {
+                        format!(
+                            "moving {} to {}",
+                            temp_path.display(),
+                            final_path.display()
+                        )
+                    })?;
+                    harden_file(&final_path)?;
+                }
             }
 
             self.connection.execute(
@@ -931,7 +951,13 @@ fn redact_json_secrets(value: &mut Value) -> bool {
             }
             changed
         }
-        Value::Array(values) => values.iter_mut().any(redact_json_secrets),
+        Value::Array(values) => {
+            let mut changed = false;
+            for child in values {
+                changed |= redact_json_secrets(child);
+            }
+            changed
+        },
         _ => false,
     }
 }
@@ -1271,7 +1297,7 @@ mod tests {
                 "request-body",
                 0,
                 &BASE64.encode(
-                    br#"{"message":"hello from request body","access_token":"fixture-secret-token"}"#,
+                    br#"{"message":"hello from request body","access_token":"fixture-secret-token","nested":[{"id_token":"first-secret"},{"refresh_token":"second-secret"}]}"#,
                 ),
             )
             .unwrap();
@@ -1294,6 +1320,8 @@ mod tests {
         assert!(persisted.contains("hello from request body"));
         assert!(persisted.contains("[REDACTED]"));
         assert!(!persisted.contains("fixture-secret-token"));
+        assert!(!persisted.contains("first-secret"));
+        assert!(!persisted.contains("second-secret"));
     }
 
     #[test]
