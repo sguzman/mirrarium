@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -573,7 +573,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('public', ?1, ?2, ?3, 1)",
-                params![hash, body.len() as i64, relative_path.to_string_lossy()],
+                params![hash, body.len() as i64, relative_path.to_string_lossy().to_string()],
             )
             .unwrap();
         connection
