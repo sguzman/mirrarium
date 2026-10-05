@@ -1598,23 +1598,25 @@ mod tests {
         let body = BASE64.encode(b"same bytes");
 
         for capture_id in ["one", "two"] {
-            store
-                .begin(metadata(
-                    capture_id,
-                    "https://chatgpt.com/backend-api/conversation/example",
-                    "Fetch",
-                ))
-                .unwrap();
+            let mut item = metadata(
+                capture_id,
+                "https://chatgpt.com/backend-api/conversation/example",
+                "Fetch",
+            );
+            item.mime_type = "text/plain".to_owned();
+            store.begin(item).unwrap();
             store.append_chunk(capture_id, 0, &body).unwrap();
             store.finish(capture_id, Some(10), None).unwrap();
         }
 
+        let mut public_item = metadata(
+            "public-copy",
+            "https://chatgpt.com/_next/static/example.js",
+            "Script",
+        );
+        public_item.mime_type = "application/javascript".to_owned();
         store
-            .begin(metadata(
-                "public-copy",
-                "https://chatgpt.com/_next/static/example.js",
-                "Script",
-            ))
+            .begin(public_item)
             .unwrap();
         store.append_chunk("public-copy", 0, &body).unwrap();
         store.finish("public-copy", Some(10), None).unwrap();
@@ -1640,13 +1642,13 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut store = CaptureStore::open(directory.path()).unwrap();
         let body = BASE64.encode(b"original");
-        store
-            .begin(metadata(
-                "corrupt-me",
-                "https://chatgpt.com/backend-api/test",
-                "Fetch",
-            ))
-            .unwrap();
+        let mut item = metadata(
+            "corrupt-me",
+            "https://chatgpt.com/backend-api/test",
+            "Fetch",
+        );
+        item.mime_type = "text/plain".to_owned();
+        store.begin(item).unwrap();
         store.append_chunk("corrupt-me", 0, &body).unwrap();
         store.finish("corrupt-me", Some(8), None).unwrap();
 
