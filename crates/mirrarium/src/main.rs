@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use mirrarium_cache as cache;
 use mirrarium_corpus as corpus;
 use mirrarium_store::{default_data_root, CaptureStore};
 
@@ -58,6 +59,33 @@ fn run() -> Result<()> {
                 report.corrupt_objects
             );
         }
+        Some("cache") => match arguments.get(1).map(String::as_str) {
+            Some("stats") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&cache::stats(&root)?)?
+                );
+            }
+            Some("candidates") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("cache candidate limit must be a positive integer")?
+                    .unwrap_or(200);
+                anyhow::ensure!(limit > 0, "cache candidate limit must be greater than zero");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&cache::candidates(&root, limit)?)?
+                );
+            }
+            Some(command) => anyhow::bail!(
+                "unknown cache command {command:?}; use stats or candidates"
+            ),
+            None => anyhow::bail!(
+                "missing cache command; use 'mirrarium cache stats' or 'mirrarium cache candidates'"
+            ),
+        },
         Some("corpus") => match arguments.get(1).map(String::as_str) {
             Some("rebuild") => {
                 println!("{}", serde_json::to_string_pretty(&corpus::rebuild(&root)?)?);
@@ -336,6 +364,8 @@ USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
   mirrarium verify
+  mirrarium cache stats
+  mirrarium cache candidates [LIMIT]
   mirrarium corpus rebuild
   mirrarium corpus stats
   mirrarium corpus conversations [LIMIT]
