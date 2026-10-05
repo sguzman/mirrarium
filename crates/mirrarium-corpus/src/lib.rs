@@ -15,6 +15,7 @@ pub struct CorpusStats {
     pub stream_captures: u64,
     pub stream_events: u64,
     pub json_stream_events: u64,
+    pub stream_message_revisions: u64,
     pub conversation_snapshots: u64,
     pub message_observations: u64,
     pub stream_reconstructions: u64,
@@ -195,6 +196,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         DROP TABLE IF EXISTS message_observations;
         DROP TABLE IF EXISTS conversation_snapshots;
         DROP TABLE IF EXISTS stream_reconstructions;
+        DROP TABLE IF EXISTS stream_message_revisions;
         DROP TABLE IF EXISTS stream_events;
         DROP TABLE IF EXISTS stream_captures;
 
@@ -215,6 +217,24 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             json_valid INTEGER NOT NULL,
             PRIMARY KEY (capture_id, sequence)
         );
+
+        CREATE TABLE stream_message_revisions (
+            capture_id TEXT NOT NULL
+                REFERENCES stream_captures(capture_id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL,
+            conversation_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            parent_id TEXT,
+            role TEXT,
+            content_text TEXT,
+            source_url TEXT NOT NULL,
+            PRIMARY KEY (capture_id, sequence, message_id)
+        );
+
+        CREATE INDEX stream_message_revisions_conversation_idx
+            ON stream_message_revisions(conversation_id);
+        CREATE INDEX stream_message_revisions_message_idx
+            ON stream_message_revisions(message_id);
 
         CREATE TABLE conversation_snapshots (
             capture_id TEXT PRIMARY KEY,
@@ -371,6 +391,7 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     for table in [
         "stream_captures",
         "stream_events",
+        "stream_message_revisions",
         "conversation_snapshots",
         "message_observations",
         "stream_reconstructions",
@@ -392,6 +413,10 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         json_stream_events: scalar_u64(
             &connection,
             "SELECT COUNT(*) FROM stream_events WHERE json_valid = 1",
+        )?,
+        stream_message_revisions: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM stream_message_revisions",
         )?,
         conversation_snapshots: scalar_u64(
             &connection,
@@ -906,6 +931,7 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
     for table in [
         "stream_captures",
         "stream_events",
+        "stream_message_revisions",
         "conversation_snapshots",
         "message_observations",
         "stream_reconstructions",
@@ -1157,6 +1183,39 @@ fn derive_stream_capture(
             if message.conversation_id.is_none() {
                 message.conversation_id = conversation_id;
             }
+
+            if let (Some(conversation_id), Some(message_id)) = (
+                message.conversation_id.as_deref(),
+                message.message_id.as_deref(),
+            ) {
+                transaction.execute(
+                    r#"
+                    INSERT INTO stream_message_revisions (
+                        capture_id,
+                        sequence,
+                        conversation_id,
+                        message_id,
+                        parent_id,
+                        role,
+                        content_text,
+                        source_url
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+                    )
+                    "#,
+                    params![
+                        capture_id,
+                        sequence as i64,
+                        conversation_id,
+                        message_id,
+                        parent_message_id_from_stream_value(&value, message_value),
+                        message.role.as_deref(),
+                        message.content_text.as_deref(),
+                        source_url,
+                    ],
+                )?;
+            }
+
             insert_message_observation(
                 transaction,
                 capture_id,
@@ -1193,6 +1252,26 @@ fn derive_stream_capture(
     }
 
     Ok(())
+}
+
+fn parent_message_id_from_stream_value(
+    event: &Value,
+    message: &Value,
+) -> Option<String> {
+    message
+        .get("parent_id")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("parentId").and_then(Value::as_str))
+        .or_else(|| event.get("parent_id").and_then(Value::as_str))
+        .or_else(|| event.get("parentId").and_then(Value::as_str))
+        .or_else(|| event.get("parent_message_id").and_then(Value::as_str))
+        .or_else(|| event.get("parentMessageId").and_then(Value::as_str))
+        .or_else(|| {
+            message
+                .pointer("/metadata/parent_id")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
 }
 
 fn stream_message_id(value: &Value) -> Option<String> {
@@ -1897,6 +1976,24 @@ mod tests {
         assert!(url.contains("keep=yes"));
         assert!(!url.contains("secret"));
         assert!(url.contains("%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn extracts_stream_parent_message_identity() {
+        let event = serde_json::json!({
+            "conversation_id": "conversation-a",
+            "parent_message_id": "user-1",
+            "message": {
+                "id": "assistant-1",
+                "author": {"role": "assistant"},
+                "content": {"parts": ["hello"]}
+            }
+        });
+
+        assert_eq!(
+            parent_message_id_from_stream_value(&event, &event["message"]).as_deref(),
+            Some("user-1")
+        );
     }
 
     #[test]
