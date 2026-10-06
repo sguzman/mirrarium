@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
     if arguments.first().map(String::as_str) == Some("--stats") {
-        let store = CaptureStore::open(default_data_root()?)?;
+        let store = CaptureStore::open_read_only(default_data_root()?)?;
         println!("{}", serde_json::to_string_pretty(&store.stats()?)?);
         return Ok(());
     }
