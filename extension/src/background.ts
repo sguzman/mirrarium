@@ -426,6 +426,17 @@ function recordReplayOutcome(
   });
 }
 
+function recordPrivateRevalidationOutcome(
+  outcome: "not_modified" | "refreshed" | "fulfill_error",
+  bodyBytes = 0,
+): void {
+  postNative({
+    type: "private_revalidation_outcome",
+    outcome,
+    body_bytes: outcome === "not_modified" ? bodyBytes : 0,
+  });
+}
+
 function lookupCachedResponse(
   url: string,
   resourceType: string,
@@ -655,7 +666,15 @@ async function finishPrivateRevalidation(
   const hit = privateRevalidations.get(key);
   privateRevalidations.delete(key);
 
-  if (!hit || event.responseStatusCode !== 304) {
+  if (!hit) {
+    await continuePausedResponse(tabId, event.requestId);
+    return;
+  }
+
+  if (event.responseStatusCode !== 304) {
+    if (event.responseStatusCode === 200) {
+      recordPrivateRevalidationOutcome("refreshed");
+    }
     await continuePausedResponse(tabId, event.requestId);
     return;
   }
@@ -681,8 +700,10 @@ async function finishPrivateRevalidation(
       responseHeaders,
       body: hit.bodyBase64,
     });
+    recordPrivateRevalidationOutcome("not_modified", hit.bodyBytes);
   } catch (error) {
     console.warn("Mirrarium could not fulfill private 304 revalidation", error);
+    recordPrivateRevalidationOutcome("fulfill_error");
     await continuePausedResponse(tabId, event.requestId);
   }
 }
