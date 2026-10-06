@@ -229,6 +229,47 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(candidate?.reasons).toEqual([]);
       }
 
+      const { stdout: publicCoverageStdout } = await execFileAsync(
+        cliPath,
+        ["cache", "public-coverage"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const publicCoverage = JSON.parse(publicCoverageStdout) as Array<{
+        host: string;
+        observed_captures: number;
+        unique_urls: number;
+        unique_body_bytes: number;
+        eligible_urls: number;
+        eligible_body_bytes: number;
+        replay_supported_urls: number;
+        replay_supported_body_bytes: number;
+        expansion_candidate_urls: number;
+        expansion_candidate_body_bytes: number;
+      }>;
+
+      const chatgptPublicCoverage = publicCoverage.find(
+        (item) => item.host === "chatgpt.com",
+      );
+      expect(chatgptPublicCoverage).toBeTruthy();
+      expect(chatgptPublicCoverage?.replay_supported_urls).toBeGreaterThanOrEqual(4);
+      expect(chatgptPublicCoverage?.replay_supported_body_bytes).toBeGreaterThan(0);
+      expect(chatgptPublicCoverage?.expansion_candidate_urls).toBe(0);
+      expect(chatgptPublicCoverage?.expansion_candidate_body_bytes).toBe(0);
+
+      const cdnPublicCoverage = publicCoverage.find(
+        (item) => item.host === "cdn.oaistatic.com",
+      );
+      expect(cdnPublicCoverage).toBeTruthy();
+      expect(cdnPublicCoverage?.replay_supported_urls).toBeGreaterThanOrEqual(1);
+      expect(cdnPublicCoverage?.replay_supported_body_bytes).toBeGreaterThan(0);
+      expect(cdnPublicCoverage?.expansion_candidate_urls).toBe(0);
+      expect(cdnPublicCoverage?.expansion_candidate_body_bytes).toBe(0);
+
       const { stdout: privateReadsStdout } = await execFileAsync(
         cliPath,
         ["cache", "private-reads", "50"],
