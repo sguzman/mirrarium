@@ -1757,6 +1757,27 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
 pub fn migrate_private_storage(root: impl AsRef<Path>) -> Result<PrivateMigrationReport> {
     let root = root.as_ref();
     let key_path = private_key_path(root)?;
+
+    if root.join("ledger.sqlite3").is_file() {
+        let reader = CaptureStore::open_read_only(root)?;
+        let status = reader.private_storage_status()?;
+        if status.legacy_plaintext_private_objects == 0
+            && status.missing_or_invalid_private_objects == 0
+            && status.ledger_encrypted
+            && !status.ledger_plaintext_legacy
+        {
+            return Ok(PrivateMigrationReport {
+                key_path: status.key_path,
+                migrated_objects: 0,
+                migrated_body_bytes: 0,
+                already_encrypted_objects: status.encrypted_private_objects,
+                ledger_migrated: false,
+                ledger_already_encrypted: true,
+                ledger_plaintext_bytes: 0,
+            });
+        }
+    }
+
     let mut store = CaptureStore::open(root)?;
     let objects = store.migrate_private_objects()?;
     let writer_lock = store.writer_lock.take();
@@ -3294,6 +3315,33 @@ mod tests {
         let second = store.migrate_private_objects().unwrap();
         assert_eq!(second.migrated_objects, 0);
         assert_eq!(second.already_encrypted_objects, 1);
+    }
+
+    #[test]
+    fn fully_encrypted_migration_is_read_only_while_writer_is_live() {
+        let directory = tempdir().unwrap();
+        let mut writer = CaptureStore::open(directory.path()).unwrap();
+        let mut item = metadata(
+            "live-migration-noop",
+            "https://chatgpt.com/backend-api/conversation/live",
+            "Fetch",
+        );
+        item.mime_type = "text/plain".to_owned();
+        writer.begin(item).unwrap();
+        writer
+            .append_chunk(
+                "live-migration-noop",
+                0,
+                &BASE64.encode(b"already encrypted"),
+            )
+            .unwrap();
+        writer.finish("live-migration-noop", None, None).unwrap();
+
+        let report = migrate_private_storage(directory.path()).unwrap();
+        assert_eq!(report.migrated_objects, 0);
+        assert_eq!(report.already_encrypted_objects, 1);
+        assert!(!report.ledger_migrated);
+        assert!(report.ledger_already_encrypted);
     }
 
     #[test]
