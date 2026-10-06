@@ -1485,28 +1485,80 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         build_id: updatedBuildId,
       });
 
-      const updateTriggerPage = await context.newPage();
-      await updateTriggerPage.goto("https://chatgpt.com:43117/");
+      const workerBeforeUpdateCheck =
+        context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"));
+      const runningBuildBeforeUpdate = await workerBeforeUpdateCheck.evaluate(() => {
+        const manifest = chrome.runtime.getManifest();
+        return manifest.version_name ?? manifest.version;
+      });
+      expect(runningBuildBeforeUpdate).toBe(extensionInstall.build_id);
+
+      const installedState = await workerBeforeUpdateCheck.evaluate(
+        async (hostName) => {
+          const chromeApi = (globalThis as typeof globalThis & {
+            chrome: {
+              runtime: {
+                lastError?: { message?: string };
+                sendNativeMessage(
+                  name: string,
+                  message: unknown,
+                  callback: (response: unknown) => void,
+                ): void;
+              };
+            };
+          }).chrome;
+          return await new Promise<unknown>((resolve, reject) => {
+            chromeApi.runtime.sendNativeMessage(
+              hostName,
+              { type: "extension_install_state" },
+              (response) => {
+                const error = chromeApi.runtime.lastError;
+                if (error) {
+                  reject(new Error(error.message ?? "native install-state query failed"));
+                  return;
+                }
+                resolve(response);
+              },
+            );
+          });
+        },
+        nativeHostName,
+      );
+      expect(installedState).toEqual({
+        type: "extension_install_state",
+        build_id: updatedBuildId,
+      });
+
+      const neutralPage = await context.newPage();
+      await neutralPage.goto("about:blank");
+      await neutralPage.bringToFront();
+      await page.bringToFront();
+      await page.waitForTimeout(500);
+      await neutralPage.bringToFront();
+      await page.bringToFront();
+
       await expect
         .poll(
           async () => {
+            const buildIds: string[] = [];
             for (const candidate of context.serviceWorkers()) {
               try {
-                const buildId = await candidate.evaluate(() => {
-                  const manifest = chrome.runtime.getManifest();
-                  return manifest.version_name ?? manifest.version;
-                });
-                if (buildId === updatedBuildId) return buildId;
+                buildIds.push(
+                  await candidate.evaluate(() => {
+                    const manifest = chrome.runtime.getManifest();
+                    return manifest.version_name ?? manifest.version;
+                  }),
+                );
               } catch {
                 // The old worker may disappear while runtime.reload() replaces it.
               }
             }
-            return null;
+            return buildIds.join(",");
           },
           { timeout: 10_000 },
         )
-        .toBe(updatedBuildId);
-      await updateTriggerPage.close();
+        .toContain(updatedBuildId);
+      await neutralPage.close();
     } finally {
       await context.close();
     }
