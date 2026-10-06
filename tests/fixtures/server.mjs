@@ -17,6 +17,7 @@ let staticFontHits = 0;
 let cdnJsHits = 0;
 let privateConversationHits = 0;
 let privateConversationConditional304s = 0;
+let privateConversationVersion = 1;
 
 execFileSync("openssl", [
   "req",
@@ -191,7 +192,7 @@ const fixtureServer = https.createServer(
 
     if (request.url === "/backend-api/conversation/test") {
       privateConversationHits += 1;
-      const etag = "\"fixture-conversation-v1\"";
+      const etag = `"fixture-conversation-v${privateConversationVersion}"`;
       if (request.headers["if-none-match"] === etag) {
         privateConversationConditional304s += 1;
         response.writeHead(304, {
@@ -210,6 +211,7 @@ const fixtureServer = https.createServer(
       response.end(JSON.stringify({
         id: "fixture-conversation",
         title: "Private fixture",
+        version: privateConversationVersion,
         messages: [{ role: "user", content: "private corpus material" }],
       }));
       return;
@@ -426,6 +428,13 @@ const fixtureServer = https.createServer(
 );
 
 const healthServer = http.createServer((request, response) => {
+  if (request.url === "/private-bump") {
+    privateConversationVersion += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ version: privateConversationVersion }));
+    return;
+  }
+
   if (request.url === "/private-revalidation-counts") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({

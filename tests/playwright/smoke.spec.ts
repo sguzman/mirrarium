@@ -309,6 +309,83 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           body: {
             id: "fixture-conversation",
             title: "Private fixture",
+            version: 1,
+            messages: [{ role: "user", content: "private corpus material" }],
+          },
+        });
+
+        const bumped = (await fetch(
+          "http://127.0.0.1:43118/private-bump",
+        ).then((response) => response.json())) as { version: number };
+        expect(bumped.version).toBe(2);
+
+        const refreshedPrivateRead = await page.evaluate(async () => {
+          const response = await fetch("/backend-api/conversation/test", {
+            cache: "no-store",
+          });
+          return {
+            status: response.status,
+            marker: response.headers.get("x-mirrarium-revalidated"),
+            body: await response.json(),
+          };
+        });
+        expect(refreshedPrivateRead).toEqual({
+          status: 200,
+          marker: null,
+          body: {
+            id: "fixture-conversation",
+            title: "Private fixture",
+            version: 2,
+            messages: [{ role: "user", content: "private corpus material" }],
+          },
+        });
+
+        await expect
+          .poll(
+            async () => {
+              const { stdout } = await execFileAsync(
+                cliPath,
+                ["cache", "private-reads", "50"],
+                {
+                  env: {
+                    ...process.env,
+                    MIRRARIUM_DATA_DIR: dataDir,
+                  },
+                },
+              );
+              const items = JSON.parse(stdout) as Array<{
+                url: string;
+                latest_etag?: string;
+                distinct_body_hashes: number;
+              }>;
+              return items.find((item) =>
+                item.url.includes("/backend-api/conversation/test"),
+              );
+            },
+            { timeout: 10_000 },
+          )
+          .toMatchObject({
+            latest_etag: "\"fixture-conversation-v2\"",
+            distinct_body_hashes: 2,
+          });
+
+        const secondRevalidation = await page.evaluate(async () => {
+          const response = await fetch("/backend-api/conversation/test", {
+            cache: "no-store",
+          });
+          return {
+            status: response.status,
+            marker: response.headers.get("x-mirrarium-revalidated"),
+            body: await response.json(),
+          };
+        });
+        expect(secondRevalidation).toEqual({
+          status: 200,
+          marker: "hit",
+          body: {
+            id: "fixture-conversation",
+            title: "Private fixture",
+            version: 2,
             messages: [{ role: "user", content: "private corpus material" }],
           },
         });
@@ -319,9 +396,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           total: number;
           conditional_304: number;
         };
-        expect(privateCountsAfter.total).toBe(privateCountsBefore.total + 1);
+        expect(privateCountsAfter.total).toBe(privateCountsBefore.total + 3);
         expect(privateCountsAfter.conditional_304).toBe(
-          privateCountsBefore.conditional_304 + 1,
+          privateCountsBefore.conditional_304 + 2,
         );
 
         const scriptHit = page.waitForResponse(
