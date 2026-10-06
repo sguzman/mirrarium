@@ -356,6 +356,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           return {
             status: response.status,
             marker: response.headers.get("x-mirrarium-revalidated"),
+            origin304: response.headers.get("x-mirrarium-origin-304"),
             body: await response.json(),
           };
         });
@@ -383,6 +384,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           return {
             status: response.status,
             marker: response.headers.get("x-mirrarium-revalidated"),
+            origin304: response.headers.get("x-mirrarium-origin-304"),
             body: await response.json(),
           };
         });
@@ -434,6 +436,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           return {
             status: response.status,
             marker: response.headers.get("x-mirrarium-revalidated"),
+            origin304: response.headers.get("x-mirrarium-origin-304"),
             body: await response.json(),
           };
         });
