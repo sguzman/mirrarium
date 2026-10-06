@@ -27,6 +27,22 @@ pub struct CacheCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateCoverageProfile {
+    pub resource_type: String,
+    pub mime_type: String,
+    pub capture_count: u64,
+    pub unique_urls: u64,
+    pub body_bytes: u64,
+    pub validator_captures: u64,
+    pub validator_body_bytes: u64,
+    pub no_store_captures: u64,
+    pub current_policy_captures: u64,
+    pub current_policy_body_bytes: u64,
+    pub expansion_candidate_captures: u64,
+    pub expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PrivateReadProfile {
     pub url: String,
     pub mime_type: String,
@@ -102,6 +118,20 @@ pub struct CacheStats {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Debug, Default)]
+struct PrivateCoverageAggregate {
+    capture_count: u64,
+    urls: BTreeSet<String>,
+    body_bytes: u64,
+    validator_captures: u64,
+    validator_body_bytes: u64,
+    no_store_captures: u64,
+    current_policy_captures: u64,
+    current_policy_body_bytes: u64,
+    expansion_candidate_captures: u64,
+    expansion_candidate_body_bytes: u64,
+}
+
 struct PrivateReadAggregate {
     mime_type: String,
     capture_count: u64,
@@ -279,6 +309,178 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
         ineligible_urls: unique_urls.saturating_sub(eligible_urls),
         conflicting_urls,
     })
+}
+
+pub fn private_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PrivateCoverageProfile>> {
+    let database = raw_root.as_ref().join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            url,
+            resource_type,
+            mime_type,
+            body_bytes,
+            etag,
+            last_modified,
+            cache_control
+        FROM captures
+        WHERE privacy_class = 'private'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND body_hash IS NOT NULL
+          AND body_error IS NULL
+        ORDER BY rowid
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+
+    let mut aggregates: BTreeMap<(String, String), PrivateCoverageAggregate> =
+        BTreeMap::new();
+
+    for row in rows {
+        let (
+            url,
+            resource_type,
+            mime_type,
+            body_bytes,
+            etag,
+            last_modified,
+            cache_control,
+        ) = row?;
+        let body_bytes: u64 = body_bytes
+            .try_into()
+            .context("negative private coverage body byte count")?;
+        let has_validator = etag.is_some() || last_modified.is_some();
+        let no_store = cache_control_has_no_store(cache_control.as_deref());
+        let safe_shape = private_revalidation_shape_is_safe(&url, &resource_type);
+        let current_mime = private_revalidation_mime_is_supported(&mime_type);
+        let current_policy = has_validator && !no_store && safe_shape && current_mime;
+        let expansion_candidate =
+            has_validator && !no_store && safe_shape && !current_mime;
+
+        let aggregate = aggregates
+            .entry((resource_type.clone(), mime_type.clone()))
+            .or_default();
+        aggregate.capture_count = aggregate
+            .capture_count
+            .checked_add(1)
+            .context("private coverage capture count overflow")?;
+        aggregate.urls.insert(url);
+        aggregate.body_bytes = aggregate
+            .body_bytes
+            .checked_add(body_bytes)
+            .context("private coverage body bytes overflow")?;
+
+        if has_validator {
+            aggregate.validator_captures = aggregate
+                .validator_captures
+                .checked_add(1)
+                .context("private coverage validator count overflow")?;
+            aggregate.validator_body_bytes = aggregate
+                .validator_body_bytes
+                .checked_add(body_bytes)
+                .context("private coverage validator bytes overflow")?;
+        }
+        if no_store {
+            aggregate.no_store_captures = aggregate
+                .no_store_captures
+                .checked_add(1)
+                .context("private coverage no-store count overflow")?;
+        }
+        if current_policy {
+            aggregate.current_policy_captures = aggregate
+                .current_policy_captures
+                .checked_add(1)
+                .context("private coverage current-policy count overflow")?;
+            aggregate.current_policy_body_bytes = aggregate
+                .current_policy_body_bytes
+                .checked_add(body_bytes)
+                .context("private coverage current-policy bytes overflow")?;
+        }
+        if expansion_candidate {
+            aggregate.expansion_candidate_captures = aggregate
+                .expansion_candidate_captures
+                .checked_add(1)
+                .context("private coverage expansion count overflow")?;
+            aggregate.expansion_candidate_body_bytes = aggregate
+                .expansion_candidate_body_bytes
+                .checked_add(body_bytes)
+                .context("private coverage expansion bytes overflow")?;
+        }
+    }
+
+    let mut profiles: Vec<PrivateCoverageProfile> = aggregates
+        .into_iter()
+        .map(|((resource_type, mime_type), aggregate)| PrivateCoverageProfile {
+            resource_type,
+            mime_type,
+            capture_count: aggregate.capture_count,
+            unique_urls: aggregate.urls.len() as u64,
+            body_bytes: aggregate.body_bytes,
+            validator_captures: aggregate.validator_captures,
+            validator_body_bytes: aggregate.validator_body_bytes,
+            no_store_captures: aggregate.no_store_captures,
+            current_policy_captures: aggregate.current_policy_captures,
+            current_policy_body_bytes: aggregate.current_policy_body_bytes,
+            expansion_candidate_captures: aggregate.expansion_candidate_captures,
+            expansion_candidate_body_bytes: aggregate.expansion_candidate_body_bytes,
+        })
+        .collect();
+
+    profiles.sort_by(|left, right| {
+        right
+            .expansion_candidate_body_bytes
+            .cmp(&left.expansion_candidate_body_bytes)
+            .then_with(|| {
+                right
+                    .current_policy_body_bytes
+                    .cmp(&left.current_policy_body_bytes)
+            })
+            .then_with(|| right.body_bytes.cmp(&left.body_bytes))
+            .then_with(|| left.resource_type.cmp(&right.resource_type))
+            .then_with(|| left.mime_type.cmp(&right.mime_type))
+    });
+
+    Ok(profiles)
+}
+
+fn private_revalidation_mime_is_supported(mime_type: &str) -> bool {
+    let mime = mime_type.to_ascii_lowercase();
+    mime.contains("json") || mime.starts_with("text/html")
+}
+
+fn private_revalidation_shape_is_safe(raw_url: &str, resource_type: &str) -> bool {
+    let Some(url) = private_revalidation_url(raw_url) else {
+        return false;
+    };
+    match resource_type.to_ascii_lowercase().as_str() {
+        "document" => true,
+        "fetch" | "xhr" => url.path().to_ascii_lowercase().starts_with("/backend-api/"),
+        _ => false,
+    }
 }
 
 pub fn private_reads(
@@ -1268,6 +1470,116 @@ mod tests {
                 params![id, timestamp, url, hash, cache_control, etag],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn private_coverage_separates_current_policy_and_expansion_candidates() {
+        let (directory, connection) = open_fixture();
+        for (
+            id,
+            url,
+            resource_type,
+            mime_type,
+            bytes,
+            etag,
+            cache_control,
+        ) in [
+            (
+                "json-current",
+                "https://chatgpt.com/backend-api/conversation/a",
+                "Fetch",
+                "application/json",
+                100_i64,
+                Some("\"json-v1\""),
+                Some("private, max-age=0, must-revalidate"),
+            ),
+            (
+                "html-current",
+                "https://chatgpt.com/",
+                "Document",
+                "text/html",
+                200_i64,
+                Some("\"html-v1\""),
+                Some("private, max-age=0, must-revalidate"),
+            ),
+            (
+                "text-expansion",
+                "https://chatgpt.com/backend-api/plain",
+                "Fetch",
+                "text/plain",
+                300_i64,
+                Some("\"plain-v1\""),
+                Some("private, max-age=0, must-revalidate"),
+            ),
+            (
+                "stream-no-store",
+                "https://chatgpt.com/backend-api/stream",
+                "Fetch",
+                "text/event-stream",
+                400_i64,
+                Some("\"stream-v1\""),
+                Some("no-store"),
+            ),
+        ] {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO captures (
+                        capture_id,
+                        captured_at_ms,
+                        method,
+                        url,
+                        status,
+                        mime_type,
+                        resource_type,
+                        privacy_class,
+                        body_hash,
+                        body_bytes,
+                        cache_control,
+                        etag,
+                        last_modified,
+                        body_error
+                    ) VALUES (
+                        ?1, 1, 'GET', ?2, 200, ?3, ?4, 'private',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        ?5, ?6, ?7, NULL, NULL
+                    )
+                    "#,
+                    params![id, url, mime_type, resource_type, bytes, cache_control, etag],
+                )
+                .unwrap();
+        }
+
+        let profiles = private_coverage(directory.path()).unwrap();
+        let json = profiles
+            .iter()
+            .find(|item| item.mime_type == "application/json")
+            .unwrap();
+        assert_eq!(json.current_policy_captures, 1);
+        assert_eq!(json.expansion_candidate_captures, 0);
+
+        let html = profiles
+            .iter()
+            .find(|item| item.mime_type == "text/html")
+            .unwrap();
+        assert_eq!(html.current_policy_captures, 1);
+        assert_eq!(html.current_policy_body_bytes, 200);
+
+        let plain = profiles
+            .iter()
+            .find(|item| item.mime_type == "text/plain")
+            .unwrap();
+        assert_eq!(plain.current_policy_captures, 0);
+        assert_eq!(plain.expansion_candidate_captures, 1);
+        assert_eq!(plain.expansion_candidate_body_bytes, 300);
+
+        let stream = profiles
+            .iter()
+            .find(|item| item.mime_type == "text/event-stream")
+            .unwrap();
+        assert_eq!(stream.validator_captures, 1);
+        assert_eq!(stream.no_store_captures, 1);
+        assert_eq!(stream.expansion_candidate_captures, 0);
     }
 
     #[test]
