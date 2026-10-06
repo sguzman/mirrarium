@@ -1698,7 +1698,7 @@ function captureEventSourceMessage(
   const request = requests.get(key);
   const response = responses.get(key);
   const rawUrl = request?.url ?? response?.url;
-  if (!isSupportedChatGptUrl(rawUrl)) return;
+  if (!rawUrl || !isSupportedChatGptUrl(rawUrl)) return;
 
   const sequence = eventSourceSequences.get(key) ?? 0;
   eventSourceSequences.set(key, sequence + 1);
