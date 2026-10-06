@@ -523,6 +523,43 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           },
         });
 
+        type CaptureDiagnostic = {
+          captured_at_ms: number;
+          method: string;
+          url: string;
+          status: number;
+          resource_type: string;
+          body_hash?: string;
+          body_bytes: number;
+          body_error?: string;
+        };
+        const readConversationCaptureDiagnostics = async (): Promise<
+          CaptureDiagnostic[]
+        > => {
+          const { stdout } = await execFileAsync(
+            cliPath,
+            ["captures", "200"],
+            {
+              env: {
+                ...childEnv,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            },
+          );
+          return (JSON.parse(stdout) as CaptureDiagnostic[]).filter(
+            (capture) =>
+              capture.method === "GET" &&
+              capture.url.includes("/backend-api/conversation/test"),
+          );
+        };
+        const conversationCapturesBeforeRefresh =
+          await readConversationCaptureDiagnostics();
+        const successfulHashesBeforeRefresh = new Set(
+          conversationCapturesBeforeRefresh
+            .filter((capture) => !capture.body_error && capture.body_hash)
+            .map((capture) => capture.body_hash as string),
+        );
+
         const bumped = (await fetch(
           "http://127.0.0.1:43118/private-bump",
         ).then((response) => response.json())) as { version: number };
@@ -550,6 +587,34 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
             messages: [{ role: "user", content: "private corpus material" }],
           },
         });
+
+        await expect
+          .poll(
+            async () => {
+              const captures = await readConversationCaptureDiagnostics();
+              return captures.length;
+            },
+            { timeout: 10_000 },
+          )
+          .toBeGreaterThan(conversationCapturesBeforeRefresh.length);
+
+        const conversationCapturesAfterRefresh =
+          await readConversationCaptureDiagnostics();
+        const refreshedCapture =
+          conversationCapturesAfterRefresh.find(
+            (capture) =>
+              !capture.body_error &&
+              !!capture.body_hash &&
+              !successfulHashesBeforeRefresh.has(capture.body_hash),
+          ) ?? conversationCapturesAfterRefresh[0];
+        expect(refreshedCapture).toMatchObject({
+          status: 200,
+          body_error: null,
+        });
+        expect(refreshedCapture.body_hash).toBeTruthy();
+        expect(
+          successfulHashesBeforeRefresh.has(refreshedCapture.body_hash as string),
+        ).toBe(false);
 
         await expect
           .poll(
