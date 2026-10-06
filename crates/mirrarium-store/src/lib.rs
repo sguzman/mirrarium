@@ -4,7 +4,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, ErrorKind, Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -33,6 +33,7 @@ const PRIVATE_STREAM_TAG_BYTES: usize = 16;
 const PRIVATE_STREAM_REWRITE_CHUNK_BYTES: usize = 256 * 1024;
 const SQLITE_PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
 const LEDGER_KEY_PURPOSE: &str = "ledger-sqlcipher-v1";
+const READ_ONLY_LEDGER_BUSY_TIMEOUT_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyClass {
@@ -1483,6 +1484,12 @@ fn open_raw_ledger_connection(root: &Path, read_only: bool) -> Result<Connection
         Connection::open(&database)
     }
     .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    if read_only {
+        connection
+            .busy_timeout(Duration::from_millis(READ_ONLY_LEDGER_BUSY_TIMEOUT_MS))
+            .context("configuring read-only raw-ledger busy timeout")?;
+    }
 
     if !plaintext {
         apply_private_database_key(
@@ -3307,6 +3314,19 @@ mod tests {
         assert_eq!(abandoned.inflight_capture_files, 0);
         assert_eq!(abandoned.abandoned_capture_files, 1);
         assert!(abandoned.cleanup_on_next_writer_start);
+    }
+
+    #[test]
+    fn read_only_raw_ledger_uses_bounded_busy_timeout() {
+        let directory = tempdir().unwrap();
+        let writer = CaptureStore::open(directory.path()).unwrap();
+        drop(writer);
+
+        let connection = open_raw_ledger_read_only(directory.path()).unwrap();
+        let busy_timeout_ms: u64 = connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout_ms, READ_ONLY_LEDGER_BUSY_TIMEOUT_MS);
     }
 
     #[test]

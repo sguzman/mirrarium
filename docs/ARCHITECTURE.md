@@ -122,7 +122,7 @@ Implemented:
 - Chromium proof that the derived corpus is not a plaintext SQLite file and does not expose known fixture conversation plaintext at rest;
 - SQLCipher encryption for new authoritative raw ledgers from birth with a separate domain-derived key;
 - verified legacy raw-ledger migration via WAL checkpoint + `sqlcipher_export`, schema/row-count/user-version/integrity checks, atomic replacement, and interruption recovery;
-- read-only ledger inspection paths for CLI/cache/corpus/daemon stats so the browser's native host remains the sole long-lived writer;
+- read-only ledger inspection paths for CLI/cache/corpus/daemon stats so the browser's native host remains the sole long-lived writer, with a bounded 250 ms SQLite/SQLCipher busy timeout so brief writer lock windows do not immediately surface as read failures;
 - Chromium proof that encrypted raw-ledger capture, changed private-response persistence, and subsequent revalidation remain live while read-only inspection runs concurrently;
 - exclusive per-data-root writer locking for writable raw-store lifetimes, with read-only inspection left concurrent;
 - startup purge of abandoned hashed capture/request/object-migration part files while preserving raw-ledger migration recovery artifacts;
