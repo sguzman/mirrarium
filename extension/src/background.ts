@@ -333,10 +333,14 @@ function isReplayInterceptCandidate(
 
   try {
     const url = new URL(rawUrl);
+    const allowedPath =
+      url.hostname === "cdn.oaistatic.com"
+        ? true
+        : (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
+          url.pathname.startsWith("/_next/static/");
     return (
       url.protocol === "https:" &&
-      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
-      url.pathname.startsWith("/_next/static/") &&
+      allowedPath &&
       url.search === "" &&
       url.hash === ""
     );
@@ -445,6 +449,14 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
         },
         {
           urlPattern: "https://chat.openai.com:*/_next/static/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://cdn.oaistatic.com/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://cdn.oaistatic.com:*/*",
           requestStage: "Request",
         },
       ],

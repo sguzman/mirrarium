@@ -339,8 +339,15 @@ pub fn lookup(
 
 fn replayable_url(raw_url: &str) -> Option<Url> {
     let url = Url::parse(raw_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let allowed_path = match host.as_str() {
+        "chatgpt.com" | "chat.openai.com" => url.path().starts_with("/_next/static/"),
+        "cdn.oaistatic.com" => true,
+        _ => false,
+    };
+
     if url.scheme() != "https"
-        || !matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com"))
+        || !allowed_path
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -677,8 +684,13 @@ mod tests {
     fn replayable_url_accepts_exact_chatgpt_https_without_query() {
         assert!(replayable_url("https://chatgpt.com/_next/static/replay.js").is_some());
         assert!(replayable_url("https://chat.openai.com/_next/static/replay.css").is_some());
+        assert!(replayable_url("https://cdn.oaistatic.com/assets/replay.js").is_some());
+        assert!(replayable_url("https://chatgpt.com/backend-api/conversation/x").is_none());
+        assert!(replayable_url("https://oaistatic.com/assets/replay.js").is_none());
+        assert!(replayable_url("https://other.oaistatic.com/assets/replay.js").is_none());
         assert!(replayable_url("http://chatgpt.com/_next/static/replay.js").is_none());
         assert!(replayable_url("https://chatgpt.com/_next/static/replay.js?v=1").is_none());
+        assert!(replayable_url("https://cdn.oaistatic.com/assets/replay.js?v=1").is_none());
     }
 
     #[test]

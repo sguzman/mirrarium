@@ -667,13 +667,17 @@ impl CaptureStore {
     ) -> Result<()> {
         let url = Url::parse(raw_url).context("parsing replay telemetry URL")?;
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let allowed_path = match host.as_str() {
+            "chatgpt.com" | "chat.openai.com" => url.path().starts_with("/_next/static/"),
+            "cdn.oaistatic.com" => true,
+            _ => false,
+        };
         anyhow::ensure!(
             url.scheme() == "https"
-                && (host == "chatgpt.com" || host == "chat.openai.com")
-                && url.path().starts_with("/_next/static/")
+                && allowed_path
                 && url.query().is_none()
                 && url.fragment().is_none(),
-            "refusing replay telemetry for non-static ChatGPT URL"
+            "refusing replay telemetry for non-static public URL"
         );
         anyhow::ensure!(
             matches!(
@@ -1681,6 +1685,14 @@ mod tests {
                 0,
             )
             .unwrap();
+        store
+            .record_cache_replay_outcome(
+                "https://cdn.oaistatic.com/assets/app.js",
+                "Script",
+                "hit",
+                7,
+            )
+            .unwrap();
 
         assert!(store
             .record_cache_replay_outcome(
@@ -1715,8 +1727,8 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(count, 2);
-        assert_eq!(bytes, 42);
+        assert_eq!(count, 3);
+        assert_eq!(bytes, 49);
     }
 
     #[test]
