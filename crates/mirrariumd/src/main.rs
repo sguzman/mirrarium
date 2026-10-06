@@ -29,6 +29,7 @@ fn run_native_host() -> Result<()> {
     let mut output = stdout.lock();
     let root = default_data_root()?;
     let mut store = CaptureStore::open(&root)?;
+    let cache_reader = cache::CacheReader::open(&root)?;
 
     while let Some(payload) = read_native_message(&mut input)? {
         match serde_json::from_slice::<HostRequest>(&payload) {
@@ -39,7 +40,7 @@ fn run_native_host() -> Result<()> {
             }) => {
                 write_cache_lookup_responses(
                     &mut output,
-                    &root,
+                    &cache_reader,
                     lookup_id,
                     &url,
                     &resource_type,
@@ -48,7 +49,7 @@ fn run_native_host() -> Result<()> {
             Ok(HostRequest::PrivateReadLookup { lookup_id, url }) => {
                 write_private_read_lookup_responses(
                     &mut output,
-                    &root,
+                    &cache_reader,
                     lookup_id,
                     &url,
                 )?;
@@ -74,12 +75,12 @@ fn run_native_host() -> Result<()> {
 
 fn write_cache_lookup_responses(
     output: &mut impl Write,
-    root: &std::path::Path,
+    cache_reader: &cache::CacheReader,
     lookup_id: String,
     url: &str,
     resource_type: &str,
 ) -> Result<()> {
-    let entry = match cache::lookup(root, url, resource_type) {
+    let entry = match cache_reader.lookup(url, resource_type) {
         Ok(entry) => entry,
         Err(error) => {
             return write_native_response(
@@ -127,11 +128,11 @@ fn write_cache_lookup_responses(
 
 fn write_private_read_lookup_responses(
     output: &mut impl Write,
-    root: &std::path::Path,
+    cache_reader: &cache::CacheReader,
     lookup_id: String,
     url: &str,
 ) -> Result<()> {
-    let entry = match cache::private_lookup(root, url) {
+    let entry = match cache_reader.private_lookup(url) {
         Ok(entry) => entry,
         Err(error) => {
             return write_native_response(
