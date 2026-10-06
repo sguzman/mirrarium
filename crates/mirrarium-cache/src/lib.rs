@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -8,7 +7,6 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use mirrarium_store::read_verified_object;
-use sha2::{Digest, Sha256};
 use url::Url;
 
 const MAX_REPLAY_BODY_BYTES: u64 = 16 * 1024 * 1024;
@@ -1506,6 +1504,7 @@ fn candidate_from_aggregate(url: String, aggregate: Aggregate) -> CacheCandidate
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use rusqlite::params;
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;

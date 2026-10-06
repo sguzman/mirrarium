@@ -2363,7 +2363,7 @@ mod tests {
         let literal = sqlcipher_raw_key_literal(&[0xab; 32]);
         assert_eq!(literal.len(), 67);
         assert!(literal.starts_with("x'"));
-        assert!(literal.ends_with('''));
+        assert!(literal.ends_with('\''));
         assert_eq!(&literal[2..66], &"ab".repeat(32));
     }
 
