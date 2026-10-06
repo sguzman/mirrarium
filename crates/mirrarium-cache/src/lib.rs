@@ -23,18 +23,717 @@ impl CacheReader {
         Ok(Self { root, connection })
     }
 
-    pub fn private_lookup(
-    raw_root: impl AsRef<Path>,
-    raw_url: &str,
-) -> Result<Option<PrivateReadEntry>> {
-    CacheReader::open(raw_root)?.private_lookup(raw_url)
+    pub fn private_lookup(&self, raw_url: &str) -> Result<Option<PrivateReadEntry>> {
+        private_lookup_with_connection(&self.root, &self.connection, raw_url)
+    }
+
+    pub fn lookup(
+        &self,
+        raw_url: &str,
+        resource_type: &str,
+    ) -> Result<Option<ReplayEntry>> {
+        lookup_with_connection(&self.root, &self.connection, raw_url, resource_type)
+    }
 }
 
-fn private_lookup_with_connection(
-    root: &Path,
-    connection: &Connection,
-    raw_url: &str,
-) -> Result<Option<PrivateReadEntry>> {
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CacheCandidate {
+    pub url: String,
+    pub resource_type: String,
+    pub mime_type: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    pub cache_control: Option<String>,
+    pub capture_count: u64,
+    pub distinct_body_hashes: u64,
+    pub eligible: bool,
+    pub replay_supported: bool,
+    pub expansion_candidate: bool,
+    pub reasons: Vec<String>,
+    pub policy_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PublicCoverageProfile {
+    pub host: String,
+    pub observed_captures: u64,
+    pub unique_urls: u64,
+    pub unique_body_bytes: u64,
+    pub eligible_urls: u64,
+    pub eligible_body_bytes: u64,
+    pub replay_supported_urls: u64,
+    pub replay_supported_body_bytes: u64,
+    pub expansion_candidate_urls: u64,
+    pub expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateCoverageProfile {
+    pub resource_type: String,
+    pub mime_type: String,
+    pub capture_count: u64,
+    pub unique_urls: u64,
+    pub body_bytes: u64,
+    pub validator_captures: u64,
+    pub validator_body_bytes: u64,
+    pub no_store_captures: u64,
+    pub current_policy_captures: u64,
+    pub current_policy_body_bytes: u64,
+    pub expansion_candidate_captures: u64,
+    pub expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateReadProfile {
+    pub url: String,
+    pub mime_type: String,
+    pub capture_count: u64,
+    pub distinct_body_hashes: u64,
+    pub latest_body_hash: String,
+    pub latest_body_bytes: u64,
+    pub latest_captured_at_ms: u64,
+    pub latest_etag: Option<String>,
+    pub latest_last_modified: Option<String>,
+    pub latest_cache_control: Option<String>,
+    pub has_validator: bool,
+    pub stable_so_far: bool,
+    pub revalidation_candidate: bool,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateReadEntry {
+    pub url: String,
+    pub mime_type: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    pub captured_at_ms: u64,
+    pub cache_control: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    #[serde(skip)]
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ReplayEntry {
+    pub url: String,
+    pub resource_type: String,
+    pub mime_type: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    pub cache_control: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    #[serde(skip)]
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct PrivateRevalidationStats {
+    pub attempts: u64,
+    pub not_modified: u64,
+    pub refreshed: u64,
+    pub fulfill_errors: u64,
+    pub saved_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ReplayStats {
+    pub attempts: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub lookup_errors: u64,
+    pub timeouts: u64,
+    pub fulfill_errors: u64,
+    pub replayed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PublicExpansionLead {
+    pub host: String,
+    pub candidate_urls: u64,
+    pub body_bytes: u64,
+    pub blocking_gate: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateExpansionLead {
+    pub resource_type: String,
+    pub mime_type: String,
+    pub candidate_captures: u64,
+    pub unique_urls: u64,
+    pub body_bytes: u64,
+    pub blocking_gate: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CacheOpportunitySummary {
+    pub public_observed_captures: u64,
+    pub public_unique_urls: u64,
+    pub public_eligible_body_bytes: u64,
+    pub public_replay_supported_body_bytes: u64,
+    pub public_expansion_candidate_body_bytes: u64,
+    pub private_observed_captures: u64,
+    pub private_observed_body_bytes: u64,
+    pub private_validator_body_bytes: u64,
+    pub private_current_policy_body_bytes: u64,
+    pub private_expansion_candidate_body_bytes: u64,
+    pub top_public_expansion: Option<PublicExpansionLead>,
+    pub top_private_expansion: Option<PrivateExpansionLead>,
+    pub runtime_public_replayed_bytes: u64,
+    pub runtime_private_revalidated_saved_body_bytes: u64,
+    pub runtime_total_saved_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CacheStats {
+    pub observed_public_get_captures: u64,
+    pub unique_urls: u64,
+    pub eligible_urls: u64,
+    pub ineligible_urls: u64,
+    pub conflicting_urls: u64,
+    pub eligible_body_bytes: u64,
+    pub replay_supported_urls: u64,
+    pub replay_supported_body_bytes: u64,
+    pub expansion_candidate_urls: u64,
+    pub expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PublicCoverageAggregate {
+    observed_captures: u64,
+    unique_urls: u64,
+    unique_body_bytes: u64,
+    eligible_urls: u64,
+    eligible_body_bytes: u64,
+    replay_supported_urls: u64,
+    replay_supported_body_bytes: u64,
+    expansion_candidate_urls: u64,
+    expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PrivateCoverageAggregate {
+    capture_count: u64,
+    urls: BTreeSet<String>,
+    body_bytes: u64,
+    validator_captures: u64,
+    validator_body_bytes: u64,
+    no_store_captures: u64,
+    current_policy_captures: u64,
+    current_policy_body_bytes: u64,
+    expansion_candidate_captures: u64,
+    expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PrivateReadAggregate {
+    mime_type: String,
+    capture_count: u64,
+    body_hashes: BTreeSet<String>,
+    latest_body_hash: String,
+    latest_body_bytes: u64,
+    latest_captured_at_ms: u64,
+    latest_etag: Option<String>,
+    latest_last_modified: Option<String>,
+    latest_cache_control: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Aggregate {
+    resource_type: String,
+    mime_type: String,
+    body_hash: String,
+    body_bytes: u64,
+    cache_control: Option<String>,
+    capture_count: u64,
+    body_hashes: BTreeSet<String>,
+}
+
+pub fn candidates(raw_root: impl AsRef<Path>, limit: u64) -> Result<Vec<CacheCandidate>> {
+    anyhow::ensure!(limit > 0, "cache candidate limit must be greater than zero");
+    let mut candidates = build_inventory(raw_root)?;
+    candidates.sort_by(|left, right| {
+        right
+            .eligible
+            .cmp(&left.eligible)
+            .then_with(|| left.url.cmp(&right.url))
+    });
+    candidates.truncate(limit.try_into().unwrap_or(usize::MAX));
+    Ok(candidates)
+}
+
+pub fn private_revalidation_stats(
+    raw_root: impl AsRef<Path>,
+) -> Result<PrivateRevalidationStats> {
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
+
+    let table_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'private_revalidation_events'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_count == 0 {
+        return Ok(PrivateRevalidationStats::default());
+    }
+
+    let mut stats = PrivateRevalidationStats::default();
+    let mut statement = connection.prepare(
+        r#"
+        SELECT outcome, COUNT(*), COALESCE(SUM(body_bytes), 0)
+        FROM private_revalidation_events
+        GROUP BY outcome
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (outcome, count, bytes) = row?;
+        let count: u64 = count
+            .try_into()
+            .context("negative private revalidation event count")?;
+        let bytes: u64 = bytes
+            .try_into()
+            .context("negative private revalidation byte count")?;
+        stats.attempts = stats
+            .attempts
+            .checked_add(count)
+            .context("private revalidation attempt count overflow")?;
+        match outcome.as_str() {
+            "not_modified" => {
+                stats.not_modified = count;
+                stats.saved_body_bytes = bytes;
+            }
+            "refreshed" => stats.refreshed = count,
+            "fulfill_error" => stats.fulfill_errors = count,
+            _ => {}
+        }
+    }
+    Ok(stats)
+}
+
+pub fn replay_stats(raw_root: impl AsRef<Path>) -> Result<ReplayStats> {
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
+
+    let table_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cache_replay_events'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_count == 0 {
+        return Ok(ReplayStats::default());
+    }
+
+    let mut stats = ReplayStats::default();
+    let mut statement = connection.prepare(
+        r#"
+        SELECT outcome, COUNT(*), COALESCE(SUM(body_bytes), 0)
+        FROM cache_replay_events
+        GROUP BY outcome
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (outcome, count, bytes) = row?;
+        let count: u64 = count.try_into().context("negative replay event count")?;
+        let bytes: u64 = bytes.try_into().context("negative replay byte count")?;
+        stats.attempts = stats
+            .attempts
+            .checked_add(count)
+            .context("replay attempt count overflow")?;
+        match outcome.as_str() {
+            "hit" => {
+                stats.hits = count;
+                stats.replayed_bytes = bytes;
+            }
+            "miss" => stats.misses = count,
+            "lookup_error" => stats.lookup_errors = count,
+            "timeout" => stats.timeouts = count,
+            "fulfill_error" => stats.fulfill_errors = count,
+            _ => {}
+        }
+    }
+    Ok(stats)
+}
+
+pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
+    let candidates = build_inventory(raw_root)?;
+    let observed_public_get_captures = candidates.iter().map(|item| item.capture_count).sum();
+    let eligible_urls = candidates.iter().filter(|item| item.eligible).count() as u64;
+    let conflicting_urls = candidates
+        .iter()
+        .filter(|item| item.distinct_body_hashes > 1)
+        .count() as u64;
+    let eligible_body_bytes = candidates
+        .iter()
+        .filter(|item| item.eligible)
+        .map(|item| item.body_bytes)
+        .sum();
+    let replay_supported_urls = candidates
+        .iter()
+        .filter(|item| item.replay_supported)
+        .count() as u64;
+    let replay_supported_body_bytes = candidates
+        .iter()
+        .filter(|item| item.replay_supported)
+        .map(|item| item.body_bytes)
+        .sum();
+    let expansion_candidate_urls = candidates
+        .iter()
+        .filter(|item| item.expansion_candidate)
+        .count() as u64;
+    let expansion_candidate_body_bytes = candidates
+        .iter()
+        .filter(|item| item.expansion_candidate)
+        .map(|item| item.body_bytes)
+        .sum();
+    let unique_urls = candidates.len() as u64;
+
+    Ok(CacheStats {
+        observed_public_get_captures,
+        unique_urls,
+        eligible_urls,
+        ineligible_urls: unique_urls.saturating_sub(eligible_urls),
+        conflicting_urls,
+        eligible_body_bytes,
+        replay_supported_urls,
+        replay_supported_body_bytes,
+        expansion_candidate_urls,
+        expansion_candidate_body_bytes,
+    })
+}
+
+pub fn public_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PublicCoverageProfile>> {
+    let candidates = build_inventory(raw_root)?;
+    let mut aggregates: BTreeMap<String, PublicCoverageAggregate> = BTreeMap::new();
+
+    for candidate in candidates {
+        let host = Url::parse(&candidate.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "[invalid]".to_owned());
+        let aggregate = aggregates.entry(host).or_default();
+
+        aggregate.observed_captures = aggregate
+            .observed_captures
+            .checked_add(candidate.capture_count)
+            .context("public coverage capture count overflow")?;
+        aggregate.unique_urls = aggregate
+            .unique_urls
+            .checked_add(1)
+            .context("public coverage URL count overflow")?;
+        aggregate.unique_body_bytes = aggregate
+            .unique_body_bytes
+            .checked_add(candidate.body_bytes)
+            .context("public coverage body bytes overflow")?;
+
+        if candidate.eligible {
+            aggregate.eligible_urls = aggregate
+                .eligible_urls
+                .checked_add(1)
+                .context("public coverage eligible URL count overflow")?;
+            aggregate.eligible_body_bytes = aggregate
+                .eligible_body_bytes
+                .checked_add(candidate.body_bytes)
+                .context("public coverage eligible bytes overflow")?;
+        }
+        if candidate.replay_supported {
+            aggregate.replay_supported_urls = aggregate
+                .replay_supported_urls
+                .checked_add(1)
+                .context("public coverage replay URL count overflow")?;
+            aggregate.replay_supported_body_bytes = aggregate
+                .replay_supported_body_bytes
+                .checked_add(candidate.body_bytes)
+                .context("public coverage replay bytes overflow")?;
+        }
+        if candidate.expansion_candidate {
+            aggregate.expansion_candidate_urls = aggregate
+                .expansion_candidate_urls
+                .checked_add(1)
+                .context("public coverage expansion URL count overflow")?;
+            aggregate.expansion_candidate_body_bytes = aggregate
+                .expansion_candidate_body_bytes
+                .checked_add(candidate.body_bytes)
+                .context("public coverage expansion bytes overflow")?;
+        }
+    }
+
+    let mut profiles: Vec<PublicCoverageProfile> = aggregates
+        .into_iter()
+        .map(|(host, aggregate)| PublicCoverageProfile {
+            host,
+            observed_captures: aggregate.observed_captures,
+            unique_urls: aggregate.unique_urls,
+            unique_body_bytes: aggregate.unique_body_bytes,
+            eligible_urls: aggregate.eligible_urls,
+            eligible_body_bytes: aggregate.eligible_body_bytes,
+            replay_supported_urls: aggregate.replay_supported_urls,
+            replay_supported_body_bytes: aggregate.replay_supported_body_bytes,
+            expansion_candidate_urls: aggregate.expansion_candidate_urls,
+            expansion_candidate_body_bytes: aggregate.expansion_candidate_body_bytes,
+        })
+        .collect();
+
+    profiles.sort_by(|left, right| {
+        right
+            .expansion_candidate_body_bytes
+            .cmp(&left.expansion_candidate_body_bytes)
+            .then_with(|| {
+                right
+                    .replay_supported_body_bytes
+                    .cmp(&left.replay_supported_body_bytes)
+            })
+            .then_with(|| right.unique_body_bytes.cmp(&left.unique_body_bytes))
+            .then_with(|| left.host.cmp(&right.host))
+    });
+
+    Ok(profiles)
+}
+
+pub fn opportunities(raw_root: impl AsRef<Path>) -> Result<CacheOpportunitySummary> {
+    let root = raw_root.as_ref();
+    let public = stats(root)?;
+    let public_coverage = public_coverage(root)?;
+    let private = private_coverage(root)?;
+    let replay = replay_stats(root)?;
+    let revalidation = private_revalidation_stats(root)?;
+
+    let private_observed_captures = private.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.capture_count)
+            .context("private opportunity capture count overflow")
+    })?;
+    let private_observed_body_bytes = private.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.body_bytes)
+            .context("private opportunity body bytes overflow")
+    })?;
+    let private_validator_body_bytes = private.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.validator_body_bytes)
+            .context("private opportunity validator bytes overflow")
+    })?;
+    let private_current_policy_body_bytes =
+        private.iter().try_fold(0_u64, |total, item| {
+            total
+                .checked_add(item.current_policy_body_bytes)
+                .context("private opportunity current-policy bytes overflow")
+        })?;
+    let private_expansion_candidate_body_bytes =
+        private.iter().try_fold(0_u64, |total, item| {
+            total
+                .checked_add(item.expansion_candidate_body_bytes)
+                .context("private opportunity expansion bytes overflow")
+        })?;
+    let top_public_expansion = public_coverage
+        .iter()
+        .find(|item| item.expansion_candidate_body_bytes > 0)
+        .map(|item| PublicExpansionLead {
+            host: item.host.clone(),
+            candidate_urls: item.expansion_candidate_urls,
+            body_bytes: item.expansion_candidate_body_bytes,
+            blocking_gate: "public_scope".to_owned(),
+        });
+    let top_private_expansion = private
+        .iter()
+        .find(|item| item.expansion_candidate_body_bytes > 0)
+        .map(|item| PrivateExpansionLead {
+            resource_type: item.resource_type.clone(),
+            mime_type: item.mime_type.clone(),
+            candidate_captures: item.expansion_candidate_captures,
+            unique_urls: item.unique_urls,
+            body_bytes: item.expansion_candidate_body_bytes,
+            blocking_gate: "private_mime_family".to_owned(),
+        });
+
+    let runtime_total_saved_body_bytes = replay
+        .replayed_bytes
+        .checked_add(revalidation.saved_body_bytes)
+        .context("runtime saved byte total overflow")?;
+
+    Ok(CacheOpportunitySummary {
+        public_observed_captures: public.observed_public_get_captures,
+        public_unique_urls: public.unique_urls,
+        public_eligible_body_bytes: public.eligible_body_bytes,
+        public_replay_supported_body_bytes: public.replay_supported_body_bytes,
+        public_expansion_candidate_body_bytes: public.expansion_candidate_body_bytes,
+        private_observed_captures,
+        private_observed_body_bytes,
+        private_validator_body_bytes,
+        private_current_policy_body_bytes,
+        private_expansion_candidate_body_bytes,
+        top_public_expansion,
+        top_private_expansion,
+        runtime_public_replayed_bytes: replay.replayed_bytes,
+        runtime_private_revalidated_saved_body_bytes: revalidation.saved_body_bytes,
+        runtime_total_saved_body_bytes,
+    })
+}
+
+pub fn private_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PrivateCoverageProfile>> {
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            url,
+            resource_type,
+            mime_type,
+            body_bytes,
+            etag,
+            last_modified,
+            cache_control
+        FROM captures
+        WHERE privacy_class = 'private'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND body_hash IS NOT NULL
+          AND body_error IS NULL
+        ORDER BY rowid
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+
+    let mut aggregates: BTreeMap<(String, String), PrivateCoverageAggregate> =
+        BTreeMap::new();
+
+    for row in rows {
+        let (
+            url,
+            resource_type,
+            mime_type,
+            body_bytes,
+            etag,
+            last_modified,
+            cache_control,
+        ) = row?;
+        let body_bytes: u64 = body_bytes
+            .try_into()
+            .context("negative private coverage body byte count")?;
+        let has_validator = etag.is_some() || last_modified.is_some();
+        let no_store = cache_control_has_no_store(cache_control.as_deref());
+        let safe_shape = private_revalidation_shape_is_safe(&url, &resource_type);
+        let current_mime = private_revalidation_mime_is_supported(&mime_type);
+        let current_policy = has_validator && !no_store && safe_shape && current_mime;
+        let expansion_candidate =
+            has_validator && !no_store && safe_shape && !current_mime;
+
+        let aggregate = aggregates
+            .entry((resource_type.clone(), mime_type.clone()))
+            .or_default();
+        aggregate.capture_count = aggregate
+            .capture_count
+            .checked_add(1)
+            .context("private coverage capture count overflow")?;
+        aggregate.urls.insert(url);
+        aggregate.body_bytes = aggregate
+            .body_bytes
+            .checked_add(body_bytes)
+            .context("private coverage body bytes overflow")?;
+
+        if has_validator {
+            aggregate.validator_captures = aggregate
+                .validator_captures
+                .checked_add(1)
+                .context("private coverage validator count overflow")?;
+            aggregate.validator_body_bytes = aggregate
+                .validator_body_bytes
+                .checked_add(body_bytes)
+                .context("private coverage validator bytes overflow")?;
+        }
+        if no_store {
+            aggregate.no_store_captures = aggregate
+                .no_store_captures
+                .checked_add(1)
+                .context("private coverage no-store count overflow")?;
+        }
+        if current_policy {
+            aggregate.current_policy_captures = aggregate
+                .current_policy_captures
+                .checked_add(1)
+                .context("private coverage current-policy count overflow")?;
+            aggregate.current_policy_body_bytes = aggregate
+                .current_policy_body_bytes
+                .checked_add(body_bytes)
+                .context("private coverage current-policy bytes overflow")?;
+        }
+        if expansion_candidate {
+            aggregate.expansion_candidate_captures = aggregate
+                .expansion_candidate_captures
+                .checked_add(1)
+                .context("private coverage expansion count overflow")?;
+            aggregate.expansion_candidate_body_bytes = aggregate
+                .expansion_candidate_body_bytes
+                .checked_add(body_bytes)
+                .context("private coverage expansion bytes overflow")?;
+        }
+    }
+
+    let mut profiles: Vec<PrivateCoverageProfile> = aggregates
+        .into_iter()
+        .map(|((resource_type, mime_type), aggregate)| PrivateCoverageProfile {
+            resource_type,
+            mime_type,
+            capture_count: aggregate.capture_count,
+            unique_urls: aggregate.urls.len() as u64,
+            body_bytes: aggregate.body_bytes,
+            validator_captures: aggregate.validator_captures,
+            validator_body_bytes: aggregate.validator_body_bytes,
+            no_store_captures: aggregate.no_store_captures,
+            current_policy_captures: aggregate.current_policy_captures,
+            current_policy_body_bytes: aggregate.current_policy_body_bytes,
+            expansion_candidate_captures: aggregate.expansion_candidate_captures,
+            expansion_candidate_body_bytes: aggregate.expansion_candidate_body_bytes,
+        })
+        .collect();
+
+    profiles.sort_by(|left, right| {
+        right
+            .expansion_candidate_body_bytes
+            .cmp(&left.expansion_candidate_body_bytes)
+            .then_with(|| {
+                right
+                    .current_policy_body_bytes
+                    .cmp(&left.current_policy_body_bytes)
+            })
+            .then_with(|| right.body_bytes.cmp(&left.body_bytes))
+            .then_with(|| left.resource_type.cmp(&right.resource_type))
+            .then_with(|| left.mime_type.cmp(&right.mime_type))
+    });
+
+    Ok(profiles)
+}
+
+fn private_revalidation_mime_is_supported(mime_type: &str) -> bool {
+    let mime = mime_type.to_ascii_lowercase();
+    mime.contains("json") || mime.starts_with("text/html")
+}
+
+fn private_revalidation_shape_is_safe(raw_url: &str, resource_type: &str) -> bool {
     let Some(url) = private_revalidation_url(raw_url) else {
         return false;
     };
@@ -215,6 +914,14 @@ fn private_read_profile(
 
 pub fn private_lookup(
     raw_root: impl AsRef<Path>,
+    raw_url: &str,
+) -> Result<Option<PrivateReadEntry>> {
+    CacheReader::open(raw_root)?.private_lookup(raw_url)
+}
+
+fn private_lookup_with_connection(
+    root: &Path,
+    connection: &Connection,
     raw_url: &str,
 ) -> Result<Option<PrivateReadEntry>> {
     let Some(url) = private_revalidation_url(raw_url) else {
