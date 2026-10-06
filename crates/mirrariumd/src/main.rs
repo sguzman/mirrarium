@@ -199,7 +199,8 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         HostRequest::Ping
         | HostRequest::CacheLookup { .. }
         | HostRequest::PrivateReadLookup { .. }
-        | HostRequest::CacheReplayOutcome { .. } => None,
+        | HostRequest::CacheReplayOutcome { .. }
+        | HostRequest::PrivateRevalidationOutcome { .. } => None,
     };
 
     let result = match request {
@@ -228,6 +229,10 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             &outcome,
             body_bytes,
         ),
+        HostRequest::PrivateRevalidationOutcome {
+            outcome,
+            body_bytes,
+        } => store.record_private_revalidation_outcome(&outcome, body_bytes),
         HostRequest::CaptureStart { metadata } => store.begin(metadata),
         HostRequest::CaptureChunk {
             capture_id,

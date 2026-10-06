@@ -209,6 +209,16 @@ impl CaptureStore {
 
             CREATE INDEX IF NOT EXISTS cache_replay_events_outcome_idx
                 ON cache_replay_events(outcome);
+
+            CREATE TABLE IF NOT EXISTS private_revalidation_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at_ms INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                body_bytes INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS private_revalidation_events_outcome_idx
+                ON private_revalidation_events(outcome);
             "#,
         )?;
 
@@ -715,6 +725,33 @@ impl CaptureStore {
                 outcome,
                 body_bytes as i64,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_private_revalidation_outcome(
+        &self,
+        outcome: &str,
+        body_bytes: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(outcome, "not_modified" | "refreshed" | "fulfill_error"),
+            "invalid private revalidation outcome"
+        );
+        anyhow::ensure!(
+            outcome == "not_modified" || body_bytes == 0,
+            "only not_modified private revalidation may report saved bytes"
+        );
+
+        self.connection.execute(
+            r#"
+            INSERT INTO private_revalidation_events (
+                observed_at_ms,
+                outcome,
+                body_bytes
+            ) VALUES (?1, ?2, ?3)
+            "#,
+            params![now_ms()? as i64, outcome, body_bytes as i64],
         )?;
         Ok(())
     }
@@ -1729,6 +1766,40 @@ mod tests {
             .unwrap();
         assert_eq!(count, 3);
         assert_eq!(bytes, 49);
+    }
+
+    #[test]
+    fn private_revalidation_telemetry_is_aggregate_only() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+
+        store
+            .record_private_revalidation_outcome("not_modified", 128)
+            .unwrap();
+        store
+            .record_private_revalidation_outcome("refreshed", 0)
+            .unwrap();
+        store
+            .record_private_revalidation_outcome("fulfill_error", 0)
+            .unwrap();
+
+        assert!(store
+            .record_private_revalidation_outcome("refreshed", 1)
+            .is_err());
+        assert!(store
+            .record_private_revalidation_outcome("unknown", 0)
+            .is_err());
+
+        let (count, bytes): (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*), SUM(body_bytes) FROM private_revalidation_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(bytes, 128);
     }
 
     #[test]

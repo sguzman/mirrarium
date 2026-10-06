@@ -67,6 +67,10 @@ pub enum HostRequest {
         outcome: String,
         body_bytes: u64,
     },
+    PrivateRevalidationOutcome {
+        outcome: String,
+        body_bytes: u64,
+    },
     CaptureStart { metadata: CaptureMetadata },
     CaptureChunk {
         capture_id: String,

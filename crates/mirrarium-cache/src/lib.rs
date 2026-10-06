@@ -73,6 +73,15 @@ pub struct ReplayEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct PrivateRevalidationStats {
+    pub attempts: u64,
+    pub not_modified: u64,
+    pub refreshed: u64,
+    pub fulfill_errors: u64,
+    pub saved_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ReplayStats {
     pub attempts: u64,
     pub hits: u64,
@@ -127,6 +136,70 @@ pub fn candidates(raw_root: impl AsRef<Path>, limit: u64) -> Result<Vec<CacheCan
     });
     candidates.truncate(limit.try_into().unwrap_or(usize::MAX));
     Ok(candidates)
+}
+
+pub fn private_revalidation_stats(
+    raw_root: impl AsRef<Path>,
+) -> Result<PrivateRevalidationStats> {
+    let database = raw_root.as_ref().join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    let table_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'private_revalidation_events'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_count == 0 {
+        return Ok(PrivateRevalidationStats::default());
+    }
+
+    let mut stats = PrivateRevalidationStats::default();
+    let mut statement = connection.prepare(
+        r#"
+        SELECT outcome, COUNT(*), COALESCE(SUM(body_bytes), 0)
+        FROM private_revalidation_events
+        GROUP BY outcome
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (outcome, count, bytes) = row?;
+        let count: u64 = count
+            .try_into()
+            .context("negative private revalidation event count")?;
+        let bytes: u64 = bytes
+            .try_into()
+            .context("negative private revalidation byte count")?;
+        stats.attempts = stats
+            .attempts
+            .checked_add(count)
+            .context("private revalidation attempt count overflow")?;
+        match outcome.as_str() {
+            "not_modified" => {
+                stats.not_modified = count;
+                stats.saved_body_bytes = bytes;
+            }
+            "refreshed" => stats.refreshed = count,
+            "fulfill_error" => stats.fulfill_errors = count,
+            _ => {}
+        }
+    }
+    Ok(stats)
 }
 
 pub fn replay_stats(raw_root: impl AsRef<Path>) -> Result<ReplayStats> {
@@ -978,6 +1051,12 @@ mod tests {
                     outcome TEXT NOT NULL,
                     body_bytes INTEGER NOT NULL
                 );
+                CREATE TABLE private_revalidation_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    observed_at_ms INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    body_bytes INTEGER NOT NULL
+                );
                 CREATE TABLE captures (
                     capture_id TEXT PRIMARY KEY,
                     captured_at_ms INTEGER NOT NULL,
@@ -1065,6 +1144,30 @@ mod tests {
                 replayed_bytes: 200,
             }
         );
+    }
+
+    #[test]
+    fn private_revalidation_stats_aggregate_saved_bytes() {
+        let (directory, connection) = open_fixture();
+        connection
+            .execute(
+                "INSERT INTO private_revalidation_events (observed_at_ms, outcome, body_bytes) VALUES (1, 'not_modified', 80)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO private_revalidation_events (observed_at_ms, outcome, body_bytes) VALUES (2, 'refreshed', 0)",
+                [],
+            )
+            .unwrap();
+
+        let stats = private_revalidation_stats(directory.path()).unwrap();
+        assert_eq!(stats.attempts, 2);
+        assert_eq!(stats.not_modified, 1);
+        assert_eq!(stats.refreshed, 1);
+        assert_eq!(stats.fulfill_errors, 0);
+        assert_eq!(stats.saved_body_bytes, 80);
     }
 
     #[test]
