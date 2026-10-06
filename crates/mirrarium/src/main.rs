@@ -60,6 +60,12 @@ fn run() -> Result<()> {
             );
         }
         Some("cache") => match arguments.get(1).map(String::as_str) {
+            Some("opportunities") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&cache::opportunities(&root)?)?
+                );
+            }
             Some("stats") => {
                 println!(
                     "{}",
@@ -117,10 +123,10 @@ fn run() -> Result<()> {
                 );
             }
             Some(command) => anyhow::bail!(
-                "unknown cache command {command:?}; use stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, or private-coverage"
+                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, or private-coverage"
             ),
             None => anyhow::bail!(
-                "missing cache command; use 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', or 'mirrarium cache private-coverage'"
+                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', or 'mirrarium cache private-coverage'"
             ),
         },
         Some("corpus") => match arguments.get(1).map(String::as_str) {
@@ -401,6 +407,7 @@ USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
   mirrarium verify
+  mirrarium cache opportunities
   mirrarium cache stats
   mirrarium cache replay-stats
   mirrarium cache revalidation-stats

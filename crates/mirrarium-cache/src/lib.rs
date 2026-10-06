@@ -126,6 +126,23 @@ pub struct ReplayStats {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CacheOpportunitySummary {
+    pub public_observed_captures: u64,
+    pub public_unique_urls: u64,
+    pub public_eligible_body_bytes: u64,
+    pub public_replay_supported_body_bytes: u64,
+    pub public_expansion_candidate_body_bytes: u64,
+    pub private_observed_captures: u64,
+    pub private_observed_body_bytes: u64,
+    pub private_validator_body_bytes: u64,
+    pub private_current_policy_body_bytes: u64,
+    pub private_expansion_candidate_body_bytes: u64,
+    pub runtime_public_replayed_bytes: u64,
+    pub runtime_private_revalidated_saved_body_bytes: u64,
+    pub runtime_total_saved_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CacheStats {
     pub observed_public_get_captures: u64,
     pub unique_urls: u64,
@@ -460,6 +477,62 @@ pub fn public_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PublicCoverageP
     });
 
     Ok(profiles)
+}
+
+pub fn opportunities(raw_root: impl AsRef<Path>) -> Result<CacheOpportunitySummary> {
+    let root = raw_root.as_ref();
+    let public = stats(root)?;
+    let private = private_coverage(root)?;
+    let replay = replay_stats(root)?;
+    let revalidation = private_revalidation_stats(root)?;
+
+    let private_observed_captures = private.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.capture_count)
+            .context("private opportunity capture count overflow")
+    })?;
+    let private_observed_body_bytes = private.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.body_bytes)
+            .context("private opportunity body bytes overflow")
+    })?;
+    let private_validator_body_bytes = private.iter().try_fold(0_u64, |total, item| {
+        total
+            .checked_add(item.validator_body_bytes)
+            .context("private opportunity validator bytes overflow")
+    })?;
+    let private_current_policy_body_bytes =
+        private.iter().try_fold(0_u64, |total, item| {
+            total
+                .checked_add(item.current_policy_body_bytes)
+                .context("private opportunity current-policy bytes overflow")
+        })?;
+    let private_expansion_candidate_body_bytes =
+        private.iter().try_fold(0_u64, |total, item| {
+            total
+                .checked_add(item.expansion_candidate_body_bytes)
+                .context("private opportunity expansion bytes overflow")
+        })?;
+    let runtime_total_saved_body_bytes = replay
+        .replayed_bytes
+        .checked_add(revalidation.saved_body_bytes)
+        .context("runtime saved byte total overflow")?;
+
+    Ok(CacheOpportunitySummary {
+        public_observed_captures: public.observed_public_get_captures,
+        public_unique_urls: public.unique_urls,
+        public_eligible_body_bytes: public.eligible_body_bytes,
+        public_replay_supported_body_bytes: public.replay_supported_body_bytes,
+        public_expansion_candidate_body_bytes: public.expansion_candidate_body_bytes,
+        private_observed_captures,
+        private_observed_body_bytes,
+        private_validator_body_bytes,
+        private_current_policy_body_bytes,
+        private_expansion_candidate_body_bytes,
+        runtime_public_replayed_bytes: replay.replayed_bytes,
+        runtime_private_revalidated_saved_body_bytes: revalidation.saved_body_bytes,
+        runtime_total_saved_body_bytes,
+    })
 }
 
 pub fn private_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PrivateCoverageProfile>> {
@@ -1605,6 +1678,90 @@ mod tests {
         assert_eq!(stats.replay_supported_urls, 0);
         assert_eq!(stats.expansion_candidate_urls, 1);
         assert_eq!(stats.expansion_candidate_body_bytes, 12);
+    }
+
+    #[test]
+    fn opportunity_summary_combines_policy_coverage_and_runtime_savings() {
+        let (directory, connection) = open_fixture();
+        insert_capture(
+            &connection,
+            "public-supported",
+            1,
+            "https://chatgpt.com/_next/static/app.js",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("public, max-age=31536000, immutable"),
+        );
+        insert_capture(
+            &connection,
+            "public-expansion",
+            2,
+            "https://static.openai.com/assets/app.js",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            Some("public, max-age=31536000, immutable"),
+        );
+        connection
+            .execute(
+                r#"
+                INSERT INTO captures (
+                    capture_id, captured_at_ms, method, url, status, mime_type,
+                    resource_type, privacy_class, body_hash, body_bytes,
+                    cache_control, etag, last_modified, body_error
+                ) VALUES (
+                    'private-current', 3, 'GET',
+                    'https://chatgpt.com/backend-api/conversation/a', 200,
+                    'application/json', 'Fetch', 'private',
+                    'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                    100, 'private, max-age=0, must-revalidate',
+                    '"private-v1"', NULL, NULL
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO captures (
+                    capture_id, captured_at_ms, method, url, status, mime_type,
+                    resource_type, privacy_class, body_hash, body_bytes,
+                    cache_control, etag, last_modified, body_error
+                ) VALUES (
+                    'private-expansion', 4, 'GET',
+                    'https://chatgpt.com/backend-api/plain', 200,
+                    'text/plain', 'Fetch', 'private',
+                    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                    300, 'private, max-age=0, must-revalidate',
+                    '"plain-v1"', NULL, NULL
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cache_replay_events (observed_at_ms, url, resource_type, outcome, body_bytes) VALUES (5, 'https://chatgpt.com/_next/static/app.js', 'Script', 'hit', 50)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO private_revalidation_events (observed_at_ms, outcome, body_bytes) VALUES (6, 'not_modified', 60)",
+                [],
+            )
+            .unwrap();
+
+        let summary = opportunities(directory.path()).unwrap();
+        assert_eq!(summary.public_eligible_body_bytes, 24);
+        assert_eq!(summary.public_replay_supported_body_bytes, 12);
+        assert_eq!(summary.public_expansion_candidate_body_bytes, 12);
+        assert_eq!(summary.private_observed_captures, 2);
+        assert_eq!(summary.private_observed_body_bytes, 400);
+        assert_eq!(summary.private_validator_body_bytes, 400);
+        assert_eq!(summary.private_current_policy_body_bytes, 100);
+        assert_eq!(summary.private_expansion_candidate_body_bytes, 300);
+        assert_eq!(summary.runtime_public_replayed_bytes, 50);
+        assert_eq!(summary.runtime_private_revalidated_saved_body_bytes, 60);
+        assert_eq!(summary.runtime_total_saved_body_bytes, 110);
     }
 
     #[test]
