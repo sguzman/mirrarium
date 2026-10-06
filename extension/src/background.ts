@@ -105,7 +105,7 @@ const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
 let nativePort: chrome.runtime.Port | undefined;
-let extensionReloadRequested = false;
+let staleInstalledBuildNotice: string | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
   return `${tabId}:${requestId}`;
@@ -185,13 +185,18 @@ function handleNativeMessage(message: unknown): void {
   if (type === "extension_install_state") {
     const installedBuildId =
       typeof record.build_id === "string" ? record.build_id : undefined;
-    if (
-      installedBuildId &&
-      installedBuildId !== RUNNING_BUILD_ID &&
-      !extensionReloadRequested
-    ) {
-      extensionReloadRequested = true;
-      void reloadForInstalledBuild(installedBuildId);
+    if (installedBuildId && installedBuildId !== RUNNING_BUILD_ID) {
+      if (staleInstalledBuildNotice !== installedBuildId) {
+        staleInstalledBuildNotice = installedBuildId;
+        console.info(
+          "Mirrarium extension update installed; reload the unpacked extension in the browser",
+          RUNNING_BUILD_ID,
+          "->",
+          installedBuildId,
+        );
+      }
+    } else {
+      staleInstalledBuildNotice = undefined;
     }
     return;
   }
@@ -1014,30 +1019,6 @@ async function detach(tabId: number): Promise<void> {
   } finally {
     attachedTabs.delete(tabId);
   }
-}
-
-async function reloadForInstalledBuild(installedBuildId: string): Promise<void> {
-  console.info(
-    "Mirrarium extension update detected",
-    RUNNING_BUILD_ID,
-    "->",
-    installedBuildId,
-  );
-
-  await Promise.all(Array.from(attachedTabs, (tabId) => detach(tabId)));
-
-  const port = nativePort;
-  nativePort = undefined;
-  if (port) {
-    try {
-      port.disconnect();
-    } catch {
-      // The native host may already be gone during extension teardown.
-    }
-  }
-  failAllCacheLookups();
-
-  chrome.runtime.reload();
 }
 
 function header(

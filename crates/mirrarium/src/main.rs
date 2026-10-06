@@ -267,6 +267,14 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             let install_path = extension_install_path()?;
             let manifest = install_extension(&source, &install_path)?;
             publish_extension_install_state(&install_path, &manifest)?;
+            let build_id = manifest
+                .get("version_name")
+                .and_then(serde_json::Value::as_str)
+                .context("installed extension manifest is missing version_name")?;
+            let running_build_id = read_extension_runtime_build_id()?;
+            let reload_required = running_build_id
+                .as_deref()
+                .is_some_and(|running| running != build_id);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -275,7 +283,9 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
                     "extension_id": EXTENSION_ID,
                     "manifest_version": manifest["manifest_version"],
                     "version": manifest["version"],
-                    "build_id": manifest["version_name"],
+                    "build_id": build_id,
+                    "running_build_id": running_build_id,
+                    "reload_required": reload_required,
                 }))?
             );
         }
@@ -309,6 +319,12 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
                     serde_json::Value::Null,
                 )
             };
+            let running_build_id = read_extension_runtime_build_id()?;
+            let reload_required = build_id.as_str().is_some_and(|installed_build_id| {
+                running_build_id
+                    .as_deref()
+                    .is_some_and(|running| running != installed_build_id)
+            });
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -318,6 +334,8 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
                     "valid": valid,
                     "version": version,
                     "build_id": build_id,
+                    "running_build_id": running_build_id,
+                    "reload_required": reload_required,
                     "extension_id": EXTENSION_ID,
                     "error": error,
                 }))?
@@ -332,10 +350,11 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             } else {
                 false
             };
-            let state_path = extension_state_path()?;
-            if state_path.is_file() {
-                fs::remove_file(&state_path)
-                    .with_context(|| format!("removing {}", state_path.display()))?;
+            for state_path in [extension_state_path()?, extension_runtime_state_path()?] {
+                if state_path.is_file() {
+                    fs::remove_file(&state_path)
+                        .with_context(|| format!("removing {}", state_path.display()))?;
+                }
             }
             println!(
                 "{}",
@@ -378,6 +397,45 @@ fn extension_state_path() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .context("set HOME, XDG_CONFIG_HOME, or MIRRARIUM_EXTENSION_STATE_FILE")?;
     Ok(PathBuf::from(home).join(".config/mirrarium/extension-install.json"))
+}
+
+fn extension_runtime_state_path() -> Result<PathBuf> {
+    let install_state_path = extension_state_path()?;
+    let parent = install_state_path
+        .parent()
+        .context("extension install-state path has no parent directory")?;
+    Ok(parent.join("extension-runtime.json"))
+}
+
+fn read_extension_runtime_build_id() -> Result<Option<String>> {
+    let state_path = extension_runtime_state_path()?;
+    if !state_path.is_file() {
+        return Ok(None);
+    }
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(&state_path)
+            .with_context(|| format!("reading extension runtime state {}", state_path.display()))?,
+    )
+    .with_context(|| format!("parsing extension runtime state {}", state_path.display()))?;
+
+    if state
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || state
+            .get("extension_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(EXTENSION_ID)
+    {
+        return Ok(None);
+    }
+
+    Ok(state
+        .get("build_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|build_id| !build_id.is_empty())
+        .map(str::to_owned))
 }
 
 fn publish_extension_install_state(
@@ -879,6 +937,9 @@ EXTENSION:
   MIRRARIUM_EXTENSION_SOURCE overrides the source.
   MIRRARIUM_EXTENSION_DIR overrides the stable installed-extension directory.
   MIRRARIUM_EXTENSION_STATE_FILE overrides the public build-state file.
+  Updates preserve the stable directory. If extension status reports
+  reload_required=true, reload Mirrarium once in edge://extensions or restart
+  the browser; the extension does not attempt to hot-reload itself.
 
 NATIVE HOST:
   BROWSER defaults to edge.

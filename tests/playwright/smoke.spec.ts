@@ -188,6 +188,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         MIRRARIUM_DATA_DIR: dataDir,
       },
       args: [
+        "--enable-unsafe-extension-debugging",
         `--disable-extensions-except=${installedExtensionPath}`,
         `--load-extension=${installedExtensionPath}`,
         "--host-resolver-rules=MAP chatgpt.com 127.0.0.1, MAP cdn.oaistatic.com 127.0.0.1",
@@ -1515,11 +1516,15 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         install_path: string;
         extension_id: string;
         build_id: string;
+        running_build_id: string | null;
+        reload_required: boolean;
       };
       expect(updateInstall).toMatchObject({
         install_path: installedExtensionPath,
         extension_id: expectedExtensionId,
         build_id: updatedBuildId,
+        running_build_id: extensionInstall.build_id,
+        reload_required: true,
       });
 
       const workerBeforeUpdateCheck =
@@ -1570,18 +1575,56 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .poll(readRunningExtensionBuildId, { timeout: 10_000 })
         .toBe(extensionInstall.build_id);
 
-      const neutralPage = await context.newPage();
-      await neutralPage.goto("about:blank");
-      await neutralPage.bringToFront();
-      await page.bringToFront();
-      await page.waitForTimeout(500);
-      await neutralPage.bringToFront();
-      await page.bringToFront();
+      const { stdout: staleStatusStdout } = await execFileAsync(
+        cliPath,
+        ["extension", "status"],
+        {
+          env: {
+            ...childEnv,
+            HOME: browserHome,
+            XDG_DATA_HOME: join(browserHome, ".local", "share"),
+          },
+        },
+      );
+      expect(JSON.parse(staleStatusStdout)).toMatchObject({
+        build_id: updatedBuildId,
+        running_build_id: extensionInstall.build_id,
+        reload_required: true,
+      });
+
+      const browser = context.browser();
+      expect(browser).not.toBeNull();
+      const extensionManager = await browser!.newBrowserCDPSession();
+      try {
+        const reloadResult = (await extensionManager.send(
+          "Extensions.loadUnpacked",
+          { path: installedExtensionPath },
+        )) as { id: string };
+        expect(reloadResult.id).toBe(expectedExtensionId);
+      } finally {
+        await extensionManager.detach();
+      }
 
       await expect
         .poll(readRunningExtensionBuildId, { timeout: 10_000 })
         .toBe(updatedBuildId);
-      await neutralPage.close();
+
+      const { stdout: freshStatusStdout } = await execFileAsync(
+        cliPath,
+        ["extension", "status"],
+        {
+          env: {
+            ...childEnv,
+            HOME: browserHome,
+            XDG_DATA_HOME: join(browserHome, ".local", "share"),
+          },
+        },
+      );
+      expect(JSON.parse(freshStatusStdout)).toMatchObject({
+        build_id: updatedBuildId,
+        running_build_id: updatedBuildId,
+        reload_required: false,
+      });
     } finally {
       await context.close();
     }

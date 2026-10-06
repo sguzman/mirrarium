@@ -37,6 +37,8 @@ Every browser automation run gets:
 - a disposable native-host manifest;
 - a disposable Mirrarium data root.
 
+The installed-extension lifecycle test may use Chromium's browser-level unpacked-extension reload inside that disposable profile to apply changed files at the stable install path. It must never use the user's personal Edge instance to perform or validate an extension reload.
+
 The integration fixture runs locally but is resolved inside Chromium as `https://chatgpt.com`. This exercises the production origin gate without granting Mirrarium access to arbitrary localhost pages.
 
 The fixture deliberately includes:

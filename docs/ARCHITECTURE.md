@@ -58,7 +58,7 @@ Classification is intentionally conservative:
 - non-static ChatGPT-origin traffic becomes private;
 - traffic outside understood ChatGPT/static origins remains unknown.
 
-On Unix the data root, private store, incoming area, database, and private objects are permission-hardened. Encryption at rest is not implemented yet and remains required before treating the private store as cryptographically protected.
+On Unix the data root, private store, incoming area, database, and private objects are permission-hardened. Private CAS payloads and in-flight private response staging use authenticated XChaCha20-Poly1305 envelopes, while the authoritative raw ledger and rebuildable derived corpus use SQLCipher with domain-separated keys derived from Mirrarium's master key.
 
 ## Replay boundary
 
@@ -147,8 +147,8 @@ Implemented:
 - aggregate-only private revalidation telemetry with not-modified/refresh/fulfillment-error counts and avoided private body bytes, without a second private-URL ledger;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing;
 - stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, atomic initial installation, live-safe staged per-file replacement with the manifest committed last, and Chromium e2e execution from the installed copy rather than the build tree.
-- deterministic compiled-extension build IDs, atomically published install state, native-host verification of installed state, and self-reload of stale service workers on subsequent ChatGPT activity;
-- Chromium hot-update proof: replace the stable installed extension while the browser remains open, preserve the extension ID/path, and observe the service worker reload into the new build.
+- deterministic compiled-extension build IDs, atomically published install state, native-host reporting of the running build, and CLI `reload_required` detection when installed files are newer than the active unpacked extension;
+- Chromium hot-update proof: replace the stable installed extension while the browser remains open, preserve the extension ID/path, observe the old worker remain active until a browser-level unpacked-extension reload, then observe the new build become active without re-adding the extension.
 
 Next:
 

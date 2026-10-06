@@ -81,6 +81,9 @@ mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
 mirrarium corpus attachments [conversation-id] [limit]
 mirrarium corpus stream-revisions <conversation-id> [limit]
+mirrarium extension install [source-dir]
+mirrarium extension status
+mirrarium extension uninstall
 mirrarium native-host install
 mirrarium native-host status
 ```
@@ -138,7 +141,9 @@ The default source is `./extension/dist`. The installed copy lives at `$XDG_DATA
 
 Use `mirrarium extension status` to inspect the installed copy and `mirrarium extension uninstall` to remove it. For unpacked Edge/Chromium development installs, load this **stable installed directory** once. Future `mirrarium extension install` runs update that same path rather than requiring a different build-tree location.
 
-Each build carries a deterministic manifest `version_name` derived from the compiled worker. Installation publishes that build ID atomically under the user's Mirrarium config. The running service worker asks the native host for the verified installed build ID on startup and normal ChatGPT tab activity; when the installed build changes, it calls `chrome.runtime.reload()` once and reloads from the same stable directory. This makes normal unpacked updates effectively one command after the initial one-time browser load.
+Each build carries a deterministic manifest `version_name` derived from the compiled worker. Installation publishes that build ID atomically under the user's Mirrarium config, and the running service worker reports its own build ID through the native host. `mirrarium extension install` and `mirrarium extension status` compare the installed and observed running builds and report `reload_required`.
+
+The install directory and extension ID stay stable across updates, so the extension never needs to be removed and re-added. Unpacked Chromium/Edge still requires a browser-level extension reload to import changed files from disk: when `reload_required` is true, click **Reload** for Mirrarium in `edge://extensions` (or restart Edge). Mirrarium deliberately does not loop on `chrome.runtime.reload()` trying to hot-swap its own unpacked package. Automated QA performs the equivalent browser-level reload only inside the disposable Chromium profile.
 
 ## Linux native-host install
 
