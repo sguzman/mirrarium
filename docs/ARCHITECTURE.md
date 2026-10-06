@@ -97,8 +97,10 @@ Implemented:
 - Rust native host framing and typed protocol;
 - SHA-256 content-addressed storage;
 - privacy-scoped deduplication;
-- versioned XChaCha20-Poly1305 encryption for newly persisted private CAS response/request-body payloads while preserving plaintext SHA-256 object identity;
-- transparent legacy-plaintext compatibility plus idempotent verified in-place private-CAS migration;
+- versioned XChaCha20-Poly1305 encryption for private CAS payloads while preserving plaintext SHA-256 object identity;
+- `MIRRPV02` framed XChaCha20-Poly1305 staging for private response bodies, encrypting every body chunk before disk write and allowing unchanged private responses to move from encrypted staging directly into CAS;
+- structured private JSON/SSE sanitization by in-memory V2 decryption followed by encrypted V2 rewrite only when redaction changes logical bytes;
+- transparent `MIRRPV01`/legacy-plaintext compatibility plus idempotent verified in-place private-CAS migration;
 - private encryption status/key-location CLI and isolated Chromium proof that raw private CAS files contain no known fixture plaintext;
 - SQLite request ledger;
 - body-read failure recording;
@@ -148,4 +150,4 @@ Next:
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
-- eliminate plaintext in-flight private capture files without weakening response sanitization or crash recovery semantics.
+- explicit stale/incomplete-capture maintenance and recovery tooling for `.incoming` without ever treating incomplete ciphertext as archive evidence.
