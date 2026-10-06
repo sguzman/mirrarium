@@ -970,6 +970,44 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         replayStats.replayed_bytes + revalidationStats.saved_body_bytes,
       );
 
+      const websocketRoundTrip = await page.evaluate(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            const socket = new WebSocket(
+              "wss://chatgpt.com:43117/backend-api/ws-fixture?token=fixture-ws-query-secret&keep=yes",
+            );
+            const timeout = setTimeout(() => {
+              socket.close();
+              reject(new Error("websocket fixture timed out"));
+            }, 5_000);
+            socket.addEventListener("open", () => {
+              socket.send(
+                JSON.stringify({
+                  message: "client websocket fixture",
+                  access_token: "fixture-ws-client-secret",
+                }),
+              );
+            });
+            socket.addEventListener("message", (event) => {
+              clearTimeout(timeout);
+              if (typeof event.data !== "string") {
+                socket.close();
+                reject(new Error("unexpected binary websocket fixture response"));
+                return;
+              }
+              socket.close();
+              resolve(event.data);
+            });
+            socket.addEventListener("error", () => {
+              clearTimeout(timeout);
+              reject(new Error("websocket fixture failed"));
+            });
+          }),
+      );
+      expect(JSON.parse(websocketRoundTrip)).toMatchObject({
+        message: "server websocket fixture",
+      });
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "100"],

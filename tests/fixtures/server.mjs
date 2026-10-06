@@ -71,32 +71,7 @@ const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
 const redirectPostSecret = ["fixture", "redirect", "post", "secret"].join("-");
 const abortPostSecret = ["fixture", "abort", "post", "secret"].join("-");
-const websocketFixture = new Promise((resolve, reject) => {
-  const socket = new WebSocket(
-    "wss://chatgpt.com:43117/backend-api/ws-fixture?token=fixture-ws-query-secret&keep=yes",
-  );
-  socket.addEventListener("open", () => {
-    socket.send(
-      JSON.stringify({
-        message: "client websocket fixture",
-        access_token: "fixture-ws-client-secret",
-      }),
-    );
-  });
-  socket.addEventListener("message", (event) => {
-    if (typeof event.data !== "string") {
-      reject(new Error("unexpected binary websocket fixture response"));
-      return;
-    }
-    socket.close();
-    resolve(event.data);
-  });
-  socket.addEventListener("error", () => {
-    reject(new Error("websocket fixture failed"));
-  });
-});
 Promise.all([
-  websocketFixture,
   fetch("/backend-api/conversation/test").then((response) => response.json()),
   fetch("/backend-api/conversations?offset=0&limit=2").then((response) =>
     response.json(),
