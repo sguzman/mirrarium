@@ -557,6 +557,38 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(replayStats.timeouts).toBe(0);
       expect(replayStats.fulfill_errors).toBe(0);
 
+      type RevalidationStats = {
+        attempts: number;
+        not_modified: number;
+        refreshed: number;
+        fulfill_errors: number;
+        saved_body_bytes: number;
+      };
+      const readRevalidationStats = async (): Promise<RevalidationStats> => {
+        const { stdout } = await execFileAsync(
+          cliPath,
+          ["cache", "revalidation-stats"],
+          {
+            env: {
+              ...process.env,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+        return JSON.parse(stdout) as RevalidationStats;
+      };
+
+      await expect
+        .poll(async () => (await readRevalidationStats()).attempts, {
+          timeout: 10_000,
+        })
+        .toBeGreaterThanOrEqual(4);
+      const revalidationStats = await readRevalidationStats();
+      expect(revalidationStats.not_modified).toBeGreaterThanOrEqual(3);
+      expect(revalidationStats.refreshed).toBeGreaterThanOrEqual(1);
+      expect(revalidationStats.fulfill_errors).toBe(0);
+      expect(revalidationStats.saved_body_bytes).toBeGreaterThan(0);
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "100"],
