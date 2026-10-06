@@ -33,34 +33,99 @@ fn run_native_host() -> Result<()> {
     let mut input = stdin.lock();
     let mut output = stdout.lock();
     let root = default_data_root()?;
-    let mut store = CaptureStore::open(&root)?;
-    let cache_reader = cache::CacheReader::open(&root)?;
+    let mut store: Option<CaptureStore> = None;
+    let mut cache_reader: Option<cache::CacheReader> = None;
 
     while let Some(payload) = read_native_message(&mut input)? {
         match serde_json::from_slice::<HostRequest>(&payload) {
+            Ok(HostRequest::Ping) => {
+                write_native_response(&mut output, &HostResponse::Pong)?;
+            }
+            Ok(HostRequest::ExtensionInstallState) => {
+                let response = match installed_extension_build_id() {
+                    Ok(build_id) => HostResponse::ExtensionInstallState { build_id },
+                    Err(error) => HostResponse::Error {
+                        capture_id: None,
+                        message: format!("extension install state unavailable: {error:#}"),
+                    },
+                };
+                write_native_response(&mut output, &response)?;
+            }
             Ok(HostRequest::CacheLookup {
                 lookup_id,
                 url,
                 resource_type,
             }) => {
+                if cache_reader.is_none() {
+                    match cache::CacheReader::open(&root) {
+                        Ok(reader) => cache_reader = Some(reader),
+                        Err(error) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::CacheLookupError {
+                                    lookup_id,
+                                    message: format!("{error:#}"),
+                                },
+                            )?;
+                            continue;
+                        }
+                    }
+                }
                 write_cache_lookup_responses(
                     &mut output,
-                    &cache_reader,
+                    cache_reader
+                        .as_ref()
+                        .expect("cache reader initialized above"),
                     lookup_id,
                     &url,
                     &resource_type,
                 )?;
             }
             Ok(HostRequest::PrivateReadLookup { lookup_id, url }) => {
+                if cache_reader.is_none() {
+                    match cache::CacheReader::open(&root) {
+                        Ok(reader) => cache_reader = Some(reader),
+                        Err(error) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::PrivateReadLookupError {
+                                    lookup_id,
+                                    message: format!("{error:#}"),
+                                },
+                            )?;
+                            continue;
+                        }
+                    }
+                }
                 write_private_read_lookup_responses(
                     &mut output,
-                    &cache_reader,
+                    cache_reader
+                        .as_ref()
+                        .expect("cache reader initialized above"),
                     lookup_id,
                     &url,
                 )?;
             }
             Ok(request) => {
-                let response = handle_request(&mut store, request);
+                if store.is_none() {
+                    match CaptureStore::open(&root) {
+                        Ok(opened) => store = Some(opened),
+                        Err(error) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::Error {
+                                    capture_id: request_capture_id(&request),
+                                    message: format!("opening writable capture store failed: {error:#}"),
+                                },
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+                let response = handle_request(
+                    store.as_mut().expect("capture store initialized above"),
+                    request,
+                );
                 write_native_response(&mut output, &response)?;
             }
             Err(error) => {
@@ -194,8 +259,8 @@ fn write_native_response(writer: &mut impl Write, response: &HostResponse) -> Re
     write_native_message(writer, &serde_json::to_vec(response)?)
 }
 
-fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostResponse {
-    let capture_id = match &request {
+fn request_capture_id(request: &HostRequest) -> Option<String> {
+    match request {
         HostRequest::CaptureStart { metadata } => Some(metadata.capture_id.clone()),
         HostRequest::CaptureChunk { capture_id, .. }
         | HostRequest::RequestBodyStart { capture_id, .. }
@@ -208,7 +273,11 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         | HostRequest::PrivateReadLookup { .. }
         | HostRequest::CacheReplayOutcome { .. }
         | HostRequest::PrivateRevalidationOutcome { .. } => None,
-    };
+    }
+}
+
+fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostResponse {
+    let capture_id = request_capture_id(&request);
 
     let result = match request {
         HostRequest::Ping => return HostResponse::Pong,
@@ -532,6 +601,27 @@ mod tests {
             }
         }
         assert_eq!(reconstructed, body);
+    }
+
+    #[test]
+    fn read_only_native_requests_do_not_require_writer_ownership() {
+        let directory = tempdir().unwrap();
+        let writer = CaptureStore::open(directory.path()).unwrap();
+
+        let state = directory.path().join("missing-extension-state.json");
+        assert!(read_extension_build_id_from_state(&state).unwrap().is_none());
+
+        let reader = cache::CacheReader::open(directory.path()).unwrap();
+        assert!(reader
+            .lookup(
+                "https://chatgpt.com/_next/static/missing.js",
+                "Script",
+            )
+            .unwrap()
+            .is_none());
+
+        drop(reader);
+        drop(writer);
     }
 
     #[test]
