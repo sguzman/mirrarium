@@ -325,6 +325,63 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         documentCountsBefore.conditional_304 + 1,
       );
 
+      const { stdout: privateCoverageStdout } = await execFileAsync(
+        cliPath,
+        ["cache", "private-coverage"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const privateCoverage = JSON.parse(privateCoverageStdout) as Array<{
+        resource_type: string;
+        mime_type: string;
+        capture_count: number;
+        unique_urls: number;
+        body_bytes: number;
+        validator_captures: number;
+        validator_body_bytes: number;
+        no_store_captures: number;
+        current_policy_captures: number;
+        current_policy_body_bytes: number;
+        expansion_candidate_captures: number;
+        expansion_candidate_body_bytes: number;
+      }>;
+
+      const jsonCoverage = privateCoverage.find(
+        (item) =>
+          item.resource_type.toLowerCase() === "fetch" &&
+          item.mime_type.toLowerCase().includes("json"),
+      );
+      expect(jsonCoverage).toBeTruthy();
+      expect(jsonCoverage?.capture_count).toBeGreaterThanOrEqual(1);
+      expect(jsonCoverage?.validator_captures).toBeGreaterThanOrEqual(1);
+      expect(jsonCoverage?.current_policy_captures).toBeGreaterThanOrEqual(1);
+      expect(jsonCoverage?.current_policy_body_bytes).toBeGreaterThan(0);
+
+      const htmlCoverage = privateCoverage.find(
+        (item) =>
+          item.resource_type.toLowerCase() === "document" &&
+          item.mime_type.toLowerCase().startsWith("text/html"),
+      );
+      expect(htmlCoverage).toBeTruthy();
+      expect(htmlCoverage?.validator_captures).toBeGreaterThanOrEqual(1);
+      expect(htmlCoverage?.current_policy_captures).toBeGreaterThanOrEqual(1);
+      expect(htmlCoverage?.current_policy_body_bytes).toBeGreaterThan(0);
+
+      const plainCoverage = privateCoverage.find(
+        (item) =>
+          item.resource_type.toLowerCase() === "fetch" &&
+          item.mime_type.toLowerCase() === "text/plain",
+      );
+      expect(plainCoverage).toBeTruthy();
+      expect(plainCoverage?.capture_count).toBeGreaterThanOrEqual(1);
+      expect(plainCoverage?.validator_captures).toBe(0);
+      expect(plainCoverage?.current_policy_captures).toBe(0);
+      expect(plainCoverage?.expansion_candidate_captures).toBe(0);
+
       const replayCountsBefore = (await fetch(
         "http://127.0.0.1:43118/replay-counts",
       ).then((response) => response.json())) as {
