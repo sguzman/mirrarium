@@ -75,6 +75,10 @@ pub struct StoreStats {
     pub captured_body_bytes: u64,
     pub body_errors: u64,
     pub suppressed_bodies: u64,
+    pub websocket_frames: u64,
+    pub websocket_frame_body_bytes: u64,
+    pub websocket_frame_errors: u64,
+    pub suppressed_websocket_frames: u64,
     pub request_bodies: u64,
     pub request_body_bytes: u64,
     pub request_body_errors: u64,
@@ -937,6 +941,22 @@ impl CaptureStore {
             suppressed_bodies: scalar_u64(
                 &self.connection,
                 "SELECT COUNT(*) FROM captures WHERE body_error LIKE 'suppressed:%'",
+            )?,
+            websocket_frames: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE resource_type = 'WebSocketFrame'",
+            )?,
+            websocket_frame_body_bytes: scalar_u64(
+                &self.connection,
+                "SELECT COALESCE(SUM(body_bytes), 0) FROM captures WHERE resource_type = 'WebSocketFrame'",
+            )?,
+            websocket_frame_errors: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE resource_type = 'WebSocketFrame' AND body_error IS NOT NULL AND body_error NOT LIKE 'suppressed:%'",
+            )?,
+            suppressed_websocket_frames: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE resource_type = 'WebSocketFrame' AND body_error LIKE 'suppressed:%'",
             )?,
             request_bodies: scalar_u64(
                 &self.connection,
@@ -3206,6 +3226,51 @@ mod tests {
         assert_eq!(report.corrupt_objects, 0);
     }
 
+    #[test]
+    fn websocket_stats_separate_archived_and_suppressed_frames() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+
+        let mut archived = metadata(
+            "ws-archived",
+            "wss://chatgpt.com/backend-api/ws?token=secret",
+            "WebSocketFrame",
+        );
+        archived.method = "WS_RECV".to_owned();
+        archived.mime_type = "application/json".to_owned();
+        store.begin(archived).unwrap();
+        let body = br#"{\"message\":\"hello\"}"#;
+        store
+            .append_chunk("ws-archived", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish("ws-archived", Some(body.len() as u64), None)
+            .unwrap();
+
+        let mut suppressed = metadata(
+            "ws-suppressed",
+            "wss://chatgpt.com/backend-api/ws",
+            "WebSocketFrame",
+        );
+        suppressed.method = "WS_SEND".to_owned();
+        suppressed.mime_type = "application/octet-stream".to_owned();
+        store.begin(suppressed).unwrap();
+        store
+            .finish(
+                "ws-suppressed",
+                None,
+                Some("suppressed:websocket_binary_frame_not_archived"),
+            )
+            .unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.websocket_frames, 2);
+        assert_eq!(stats.websocket_frame_body_bytes, body.len() as u64);
+        assert_eq!(stats.websocket_frame_errors, 0);
+        assert_eq!(stats.suppressed_websocket_frames, 1);
+        assert_eq!(stats.private_captures, 2);
+        assert_eq!(stats.private_objects, 1);
+    }
     #[test]
     fn missing_master_key_is_not_replaced_when_encrypted_private_objects_exist() {
         let directory = tempdir().unwrap();
