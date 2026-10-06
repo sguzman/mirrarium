@@ -18,6 +18,8 @@ let cdnJsHits = 0;
 let privateConversationHits = 0;
 let privateConversationConditional304s = 0;
 let privateConversationVersion = 1;
+let privateQueryHits = 0;
+let privateQueryConditional304s = 0;
 
 execFileSync("openssl", [
   "req",
@@ -50,6 +52,9 @@ const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
 Promise.all([
   fetch("/backend-api/conversation/test").then((response) => response.json()),
+  fetch("/backend-api/conversations?offset=0&limit=2").then((response) =>
+    response.json(),
+  ),
   fetch("/backend-api/conversation/branch-fixture").then((response) => response.json()),
   fetch("/backend-api/conversation/attachment-fixture")
     .then((response) => response.json())
@@ -213,6 +218,31 @@ const fixtureServer = https.createServer(
         title: "Private fixture",
         version: privateConversationVersion,
         messages: [{ role: "user", content: "private corpus material" }],
+      }));
+      return;
+    }
+
+    if (request.url === "/backend-api/conversations?offset=0&limit=2") {
+      privateQueryHits += 1;
+      const etag = "\"fixture-conversations-page-v1\"";
+      if (request.headers["if-none-match"] === etag) {
+        privateQueryConditional304s += 1;
+        response.writeHead(304, {
+          etag,
+          "cache-control": "private, max-age=0, must-revalidate",
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "application/json",
+        etag,
+        "cache-control": "private, max-age=0, must-revalidate",
+      });
+      response.end(JSON.stringify({
+        items: ["conversation-a", "conversation-b"],
+        offset: 0,
+        limit: 2,
       }));
       return;
     }
@@ -432,6 +462,15 @@ const healthServer = http.createServer((request, response) => {
     privateConversationVersion += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ version: privateConversationVersion }));
+    return;
+  }
+
+  if (request.url === "/private-query-counts") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      total: privateQueryHits,
+      conditional_304: privateQueryConditional304s,
+    }));
     return;
   }
 

@@ -251,6 +251,19 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         revalidation_candidate: boolean;
         reasons: string[];
       }>;
+      const fixtureQueryRead = privateReads.find((item) =>
+        item.url.includes("/backend-api/conversations?offset=0&limit=2"),
+      );
+      expect(fixtureQueryRead).toBeTruthy();
+      expect(fixtureQueryRead).toMatchObject({
+        mime_type: "application/json",
+        has_validator: true,
+        stable_so_far: true,
+        revalidation_candidate: true,
+        latest_etag: "\"fixture-conversations-page-v1\"",
+        reasons: [],
+      });
+
       const fixtureConversationRead = privateReads.find((item) =>
         item.url.includes("/backend-api/conversation/test"),
       );
@@ -285,6 +298,47 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         await replaySession.send("Network.setCacheDisabled", {
           cacheDisabled: true,
         });
+
+        const privateQueryCountsBefore = (await fetch(
+          "http://127.0.0.1:43118/private-query-counts",
+        ).then((response) => response.json())) as {
+          total: number;
+          conditional_304: number;
+        };
+
+        const queryRevalidation = await page.evaluate(async () => {
+          const response = await fetch(
+            "/backend-api/conversations?offset=0&limit=2",
+            { cache: "no-store" },
+          );
+          return {
+            status: response.status,
+            marker: response.headers.get("x-mirrarium-revalidated"),
+            body: await response.json(),
+          };
+        });
+        expect(queryRevalidation).toEqual({
+          status: 200,
+          marker: "hit",
+          body: {
+            items: ["conversation-a", "conversation-b"],
+            offset: 0,
+            limit: 2,
+          },
+        });
+
+        const privateQueryCountsAfter = (await fetch(
+          "http://127.0.0.1:43118/private-query-counts",
+        ).then((response) => response.json())) as {
+          total: number;
+          conditional_304: number;
+        };
+        expect(privateQueryCountsAfter.total).toBe(
+          privateQueryCountsBefore.total + 1,
+        );
+        expect(privateQueryCountsAfter.conditional_304).toBe(
+          privateQueryCountsBefore.conditional_304 + 1,
+        );
 
         const privateCountsBefore = (await fetch(
           "http://127.0.0.1:43118/private-revalidation-counts",
