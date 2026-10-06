@@ -58,6 +58,8 @@ Reusable authentication secrets are not archival data and must not be persisted.
 
 Mirrarium also distinguishes protocol-level absence from capture failure. HEAD responses and 1xx/204/205/304 statuses are recorded as `suppressed:no_response_body_expected` without calling `Network.getResponseBody`, so legitimate no-body responses do not inflate body-read error telemetry. A response that genuinely fails after headers is kept as failure evidence instead: request evidence and response metadata are retained, but incomplete response bytes never become a CAS object.
 
+WebSocket JSON text frames on ChatGPT hosts are captured as private raw evidence through the same encrypted CAS pipeline. Sent and received frames use `WS_SEND` / `WS_RECV`, share a stable socket lifecycle ID, preserve sanitized handshake provenance when Chromium exposes it, and redact credential-like JSON fields before persistence. Non-JSON text, binary, auth-endpoint, continuation/control-frame payloads are not archived as trusted content. WebSocket evidence is capture-only and is never replayed. `mirrarium stats` reports WebSocket frame count, archived frame bytes, errors, and suppressed frames separately.
+
 ## Inspection CLI
 
 The Rust CLI reads the same local store as the native host:
