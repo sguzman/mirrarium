@@ -913,6 +913,56 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ).toBe(false);
       }
 
+      const { stdout: privacyStatusStdout } = await execFileAsync(
+        cliPath,
+        ["privacy", "status"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const privacyStatus = JSON.parse(privacyStatusStdout) as {
+        key_path: string;
+        key_exists: boolean;
+        private_objects: number;
+        encrypted_private_objects: number;
+        legacy_plaintext_private_objects: number;
+        missing_or_invalid_private_objects: number;
+        migration_needed: boolean;
+      };
+      expect(privacyStatus.key_exists).toBe(true);
+      expect(privacyStatus.private_objects).toBeGreaterThanOrEqual(1);
+      expect(privacyStatus.encrypted_private_objects).toBe(
+        privacyStatus.private_objects,
+      );
+      expect(privacyStatus.legacy_plaintext_private_objects).toBe(0);
+      expect(privacyStatus.missing_or_invalid_private_objects).toBe(0);
+      expect(privacyStatus.migration_needed).toBe(false);
+      expect(privacyStatus.key_path).toContain(dataDir);
+
+      const { stdout: privacyMigrationStdout } = await execFileAsync(
+        cliPath,
+        ["privacy", "migrate"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const privacyMigration = JSON.parse(privacyMigrationStdout) as {
+        migrated_objects: number;
+        migrated_body_bytes: number;
+        already_encrypted_objects: number;
+      };
+      expect(privacyMigration.migrated_objects).toBe(0);
+      expect(privacyMigration.migrated_body_bytes).toBe(0);
+      expect(privacyMigration.already_encrypted_objects).toBe(
+        privacyStatus.private_objects,
+      );
+
       const { stdout: corpusStdout } = await execFileAsync(
         cliPath,
         ["corpus", "rebuild"],
