@@ -46,10 +46,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   const dataDir = join(root, "data");
   const privateKeyFile = join(root, "private.key");
   const installedExtensionPath = join(root, "installed-extension");
+  const extensionStateFile = join(root, "extension-install.json");
   const childEnv = {
     ...process.env,
     MIRRARIUM_PRIVATE_KEY_FILE: privateKeyFile,
     MIRRARIUM_EXTENSION_DIR: installedExtensionPath,
+    MIRRARIUM_EXTENSION_STATE_FILE: extensionStateFile,
   };
   const extensionSourcePath = resolve("extension/dist");
   const daemonPath = resolve("target/debug/mirrariumd");
