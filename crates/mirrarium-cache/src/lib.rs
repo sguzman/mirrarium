@@ -933,7 +933,7 @@ mod tests {
             1,
             "https://chatgpt.com/backend-api/conversation/a",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Some(""v1""),
+            Some("\"v1\""),
             Some("private, max-age=0, must-revalidate"),
         );
         insert_private_json_capture(
@@ -942,7 +942,7 @@ mod tests {
             2,
             "https://chatgpt.com/backend-api/conversation/a",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            Some(""v2""),
+            Some("\"v2\""),
             Some("private, max-age=0, must-revalidate"),
         );
 
@@ -954,7 +954,7 @@ mod tests {
         assert!(!profile.stable_so_far);
         assert_eq!(profile.capture_count, 2);
         assert_eq!(profile.distinct_body_hashes, 2);
-        assert_eq!(profile.latest_etag.as_deref(), Some(""v2""));
+        assert_eq!(profile.latest_etag.as_deref(), Some("\"v2\""));
         assert!(profile.reasons.is_empty());
     }
 
@@ -967,7 +967,7 @@ mod tests {
             1,
             "https://chatgpt.com/backend-api/items?token=%5BREDACTED%5D",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Some(""v1""),
+            Some("\"v1\""),
             Some("no-store"),
         );
 
