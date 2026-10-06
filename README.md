@@ -138,6 +138,8 @@ The default source is `./extension/dist`. The installed copy lives at `$XDG_DATA
 
 Use `mirrarium extension status` to inspect the installed copy and `mirrarium extension uninstall` to remove it. For unpacked Edge/Chromium development installs, load this **stable installed directory** once. Future `mirrarium extension install` runs update that same path rather than requiring a different build-tree location.
 
+Each build carries a deterministic manifest `version_name` derived from the compiled worker. Installation publishes that build ID atomically under the user's Mirrarium config. The running service worker asks the native host for the verified installed build ID on startup and normal ChatGPT tab activity; when the installed build changes, it calls `chrome.runtime.reload()` once and reloads from the same stable directory. This makes normal unpacked updates effectively one command after the initial one-time browser load.
+
 ## Linux native-host install
 
 For normal Edge use, build or install `mirrarium` and `mirrariumd` side by side, then run:

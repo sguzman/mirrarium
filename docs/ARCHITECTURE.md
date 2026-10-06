@@ -147,11 +147,13 @@ Implemented:
 - aggregate-only private revalidation telemetry with not-modified/refresh/fulfillment-error counts and avoided private body bytes, without a second private-URL ledger;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing;
 - stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, atomic replacement, and Chromium e2e execution from the installed copy rather than the build tree.
+- deterministic compiled-extension build IDs, atomically published install state, native-host verification of installed state, and self-reload of stale service workers on subsequent ChatGPT activity;
+- Chromium hot-update proof: replace the stable installed extension while the browser remains open, preserve the extension ID/path, and observe the service worker reload into the new build.
 
 Next:
 
 - cautiously expand conditional revalidation to additional private MIME/route families only when `cache private-coverage` shows meaningful validator-backed bytes and stable semantics;
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
-- browser-facing update notification/reload ergonomics for the stable unpacked Edge deployment;
+- optional signed/package distribution if a future browser deployment path can preserve the current stable extension identity and native-host contract without adding service dependencies;
 - explicit stale/incomplete-capture maintenance visibility for `.incoming` without ever treating incomplete ciphertext as archive evidence.

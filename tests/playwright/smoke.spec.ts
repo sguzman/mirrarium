@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -86,6 +86,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       extension_id: string;
       manifest_version: number;
       version: string;
+      build_id: string;
     };
     expect(extensionInstall).toMatchObject({
       install_path: installedExtensionPath,
@@ -93,6 +94,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       manifest_version: 3,
       version: "0.1.0",
     });
+    expect(extensionInstall.build_id).toMatch(/^0\.1\.0\+[0-9a-f]{16}$/);
     expect(extensionInstall.source_path).toBe(extensionSourcePath);
 
     const { stdout: extensionStatusStdout } = await execFileAsync(
@@ -111,6 +113,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       installed: boolean;
       valid: boolean;
       version: string;
+      build_id: string;
       extension_id: string;
     };
     expect(extensionStatus).toMatchObject({
@@ -118,6 +121,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       installed: true,
       valid: true,
       version: "0.1.0",
+      build_id: extensionInstall.build_id,
       extension_id: expectedExtensionId,
     });
 
@@ -1441,6 +1445,68 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           }),
         ]),
       );
+
+      const updateSourcePath = join(root, "extension-update-source");
+      await cp(extensionSourcePath, updateSourcePath, { recursive: true });
+      const updateManifestPath = join(updateSourcePath, "manifest.json");
+      const updateManifest = JSON.parse(
+        await readFile(updateManifestPath, "utf8"),
+      ) as {
+        version: string;
+        version_name: string;
+      };
+      const updatedBuildId = `${updateManifest.version}+fixture-update`;
+      expect(updatedBuildId).not.toBe(extensionInstall.build_id);
+      updateManifest.version_name = updatedBuildId;
+      await writeFile(
+        updateManifestPath,
+        JSON.stringify(updateManifest, null, 2) + "\n",
+      );
+
+      const { stdout: updateInstallStdout } = await execFileAsync(
+        cliPath,
+        ["extension", "install", updateSourcePath],
+        {
+          env: {
+            ...childEnv,
+            HOME: browserHome,
+            XDG_DATA_HOME: join(browserHome, ".local", "share"),
+          },
+        },
+      );
+      const updateInstall = JSON.parse(updateInstallStdout) as {
+        install_path: string;
+        extension_id: string;
+        build_id: string;
+      };
+      expect(updateInstall).toMatchObject({
+        install_path: installedExtensionPath,
+        extension_id: expectedExtensionId,
+        build_id: updatedBuildId,
+      });
+
+      const updateTriggerPage = await context.newPage();
+      await updateTriggerPage.goto("https://chatgpt.com:43117/");
+      await expect
+        .poll(
+          async () => {
+            for (const candidate of context.serviceWorkers()) {
+              try {
+                const buildId = await candidate.evaluate(() => {
+                  const manifest = chrome.runtime.getManifest();
+                  return manifest.version_name ?? manifest.version;
+                });
+                if (buildId === updatedBuildId) return buildId;
+              } catch {
+                // The old worker may disappear while runtime.reload() replaces it.
+              }
+            }
+            return null;
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(updatedBuildId);
+      await updateTriggerPage.close();
     } finally {
       await context.close();
     }
