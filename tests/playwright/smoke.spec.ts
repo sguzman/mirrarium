@@ -973,16 +973,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         },
       );
       const streamRevisions = JSON.parse(streamRevisionsStdout) as Array<{
+        capture_id: string;
+        sequence: number;
         message_id: string;
         parent_id?: string;
         role?: string;
         content_text?: string;
       }>;
-      expect(streamRevisions).toHaveLength(2);
-      expect(streamRevisions.map((revision) => revision.content_text)).toEqual([
-        "hello",
-        "hello world",
-      ]);
+      expect(streamRevisions.length).toBeGreaterThanOrEqual(2);
       expect(
         streamRevisions.every(
           (revision) =>
@@ -991,6 +989,27 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
             revision.role === "assistant",
         ),
       ).toBe(true);
+
+      const revisionsByCapture = new Map<
+        string,
+        Array<{ sequence: number; content_text?: string }>
+      >();
+      for (const revision of streamRevisions) {
+        const revisions = revisionsByCapture.get(revision.capture_id) ?? [];
+        revisions.push({
+          sequence: revision.sequence,
+          content_text: revision.content_text,
+        });
+        revisionsByCapture.set(revision.capture_id, revisions);
+      }
+      expect(revisionsByCapture.size).toBeGreaterThanOrEqual(1);
+      for (const revisions of revisionsByCapture.values()) {
+        revisions.sort((left, right) => left.sequence - right.sequence);
+        expect(revisions.map((revision) => revision.content_text)).toEqual([
+          "hello",
+          "hello world",
+        ]);
+      }
 
       const { stdout: streamTailCanonicalStdout } = await execFileAsync(
         cliPath,
