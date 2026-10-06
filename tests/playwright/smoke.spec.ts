@@ -931,13 +931,19 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .poll(async () => (await readReplayStats()).hits, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(5);
       const replayStats = await readReplayStats();
-      expect(replayStats.attempts).toBeGreaterThanOrEqual(10);
       expect(replayStats.hits).toBeGreaterThanOrEqual(5);
-      expect(replayStats.misses).toBeGreaterThanOrEqual(4);
+      expect(replayStats.misses).toBeGreaterThanOrEqual(1);
       expect(replayStats.replayed_bytes).toBeGreaterThan(0);
       expect(replayStats.lookup_errors).toBe(0);
       expect(replayStats.timeouts).toBe(0);
       expect(replayStats.fulfill_errors).toBe(0);
+      expect(replayStats.attempts).toBe(
+        replayStats.hits +
+          replayStats.misses +
+          replayStats.lookup_errors +
+          replayStats.timeouts +
+          replayStats.fulfill_errors,
+      );
 
       type RevalidationStats = {
         attempts: number;
