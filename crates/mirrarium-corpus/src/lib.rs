@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use mirrarium_store::read_verified_object;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 use serde_json::Value;
@@ -751,11 +752,10 @@ pub fn canonical(
         return Ok(None);
     };
 
-    let source_path = object_path(raw_root, &privacy_class, &source_body_hash)?;
-    let bytes = fs::read(&source_path)
-        .with_context(|| format!("reading canonical snapshot {}", source_path.display()))?;
+    let bytes = read_verified_object(raw_root, &privacy_class, &source_body_hash)
+        .context("reading canonical snapshot object")?;
     let value: Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("canonical snapshot is not JSON: {}", source_path.display()))?;
+        .context("canonical snapshot is not JSON")?;
 
     let (basis_kind, current_node, mut messages, mut warnings) =
         canonical_messages_from_snapshot(&value);
@@ -1486,11 +1486,10 @@ fn derive_stream_capture(
     privacy_class: &str,
     body_hash: &str,
 ) -> Result<()> {
-    let source_path = object_path(raw_root, privacy_class, body_hash)?;
-    let bytes = fs::read(&source_path)
-        .with_context(|| format!("reading stream body {}", source_path.display()))?;
+    let bytes = read_verified_object(raw_root, privacy_class, body_hash)
+        .context("reading stream body object")?;
     let text = std::str::from_utf8(&bytes)
-        .with_context(|| format!("stream body is not UTF-8: {}", source_path.display()))?;
+        .context("stream body is not UTF-8")?;
     let events = parse_sse(text);
 
     transaction.execute(
@@ -1674,9 +1673,8 @@ fn derive_json_capture(
     privacy_class: &str,
     body_hash: &str,
 ) -> Result<()> {
-    let source_path = object_path(raw_root, privacy_class, body_hash)?;
-    let bytes = fs::read(&source_path)
-        .with_context(|| format!("reading JSON body {}", source_path.display()))?;
+    let bytes = read_verified_object(raw_root, privacy_class, body_hash)
+        .context("reading JSON body object")?;
     let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(());
     };

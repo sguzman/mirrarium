@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use mirrarium_store::read_verified_object;
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -1057,17 +1058,10 @@ pub fn private_lookup(
         "invalid private revalidation object path"
     );
 
-    let object_path = root.join(&expected_relative_path);
-    let body = fs::read(&object_path)
-        .with_context(|| format!("reading private revalidation object {}", object_path.display()))?;
+    let body = read_verified_object(root, "private", &body_hash)?;
     anyhow::ensure!(
         body.len() as u64 == body_bytes,
         "private revalidation object length verification failed"
-    );
-    let actual_hash = format!("{:x}", Sha256::digest(&body));
-    anyhow::ensure!(
-        actual_hash == body_hash,
-        "private revalidation object hash verification failed"
     );
 
     Ok(Some(PrivateReadEntry {
@@ -1297,17 +1291,10 @@ pub fn lookup(
         "invalid public replay object path"
     );
 
-    let object_path = root.join(&expected_relative_path);
-    let body = fs::read(&object_path)
-        .with_context(|| format!("reading replay object {}", object_path.display()))?;
+    let body = read_verified_object(root, "public", &body_hash)?;
     anyhow::ensure!(
         body.len() as u64 == body_bytes,
         "public replay object length verification failed"
-    );
-    let actual_hash = format!("{:x}", Sha256::digest(&body));
-    anyhow::ensure!(
-        actual_hash == body_hash,
-        "public replay object hash verification failed"
     );
 
     Ok(Some(ReplayEntry {

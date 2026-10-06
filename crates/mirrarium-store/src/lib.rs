@@ -1629,6 +1629,30 @@ fn is_chatgpt_host(host: &str) -> bool {
         || host == "chat.openai.com"
 }
 
+pub fn read_verified_object(
+    root: impl AsRef<Path>,
+    storage_class: &str,
+    hash: &str,
+) -> Result<Vec<u8>> {
+    let class = PrivacyClass::parse(storage_class)
+        .with_context(|| format!("invalid storage class {storage_class:?}"))?;
+    anyhow::ensure!(
+        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid SHA-256 object key {hash:?}"
+    );
+
+    let relative_path = object_relative_path(class, hash);
+    let path = root.as_ref().join(&relative_path);
+    let bytes = fs::read(&path)
+        .with_context(|| format!("reading stored object {}", path.display()))?;
+    let actual_hash = sha256_hex(&bytes);
+    anyhow::ensure!(
+        actual_hash == hash,
+        "stored object hash verification failed for {storage_class}/{hash}"
+    );
+    Ok(bytes)
+}
+
 fn object_relative_path(class: PrivacyClass, hash: &str) -> PathBuf {
     PathBuf::from(class.as_str())
         .join("objects")
@@ -1846,6 +1870,35 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn verified_object_reader_rejects_corruption() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let body = BASE64.encode(b"verified object");
+        let mut item = metadata(
+            "verified-object",
+            "https://chatgpt.com/backend-api/test",
+            "Fetch",
+        );
+        item.mime_type = "text/plain".to_owned();
+        store.begin(item).unwrap();
+        store.append_chunk("verified-object", 0, &body).unwrap();
+        store.finish("verified-object", Some(15), None).unwrap();
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        let hash = capture.body_hash.unwrap();
+        assert_eq!(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+            b"verified object"
+        );
+
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        fs::write(path, b"tampered").unwrap();
+        assert!(read_verified_object(directory.path(), "private", &hash).is_err());
     }
 
     #[test]
