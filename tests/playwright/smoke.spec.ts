@@ -931,6 +931,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const privacyStatus = JSON.parse(privacyStatusStdout) as {
         key_path: string;
         key_exists: boolean;
+        ledger_exists: boolean;
+        ledger_encrypted: boolean;
+        ledger_plaintext_legacy: boolean;
         private_objects: number;
         encrypted_private_objects: number;
         legacy_plaintext_private_objects: number;
@@ -938,6 +941,13 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         migration_needed: boolean;
       };
       expect(privacyStatus.key_exists).toBe(true);
+      expect(privacyStatus.ledger_exists).toBe(true);
+      expect(privacyStatus.ledger_encrypted).toBe(true);
+      expect(privacyStatus.ledger_plaintext_legacy).toBe(false);
+      const ledgerBytes = await readFile(join(dataDir, "ledger.sqlite3"));
+      expect(ledgerBytes.subarray(0, 16).toString("ascii")).not.toBe(
+        "SQLite format 3\u0000",
+      );
       expect(privacyStatus.private_objects).toBeGreaterThanOrEqual(1);
       expect(privacyStatus.encrypted_private_objects).toBe(
         privacyStatus.private_objects,
@@ -961,12 +971,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         migrated_objects: number;
         migrated_body_bytes: number;
         already_encrypted_objects: number;
+        ledger_migrated: boolean;
+        ledger_already_encrypted: boolean;
+        ledger_plaintext_bytes: number;
       };
       expect(privacyMigration.migrated_objects).toBe(0);
       expect(privacyMigration.migrated_body_bytes).toBe(0);
       expect(privacyMigration.already_encrypted_objects).toBe(
         privacyStatus.private_objects,
       );
+      expect(privacyMigration.ledger_migrated).toBe(false);
+      expect(privacyMigration.ledger_already_encrypted).toBe(true);
+      expect(privacyMigration.ledger_plaintext_bytes).toBe(0);
 
       const { stdout: corpusStdout } = await execFileAsync(
         cliPath,
