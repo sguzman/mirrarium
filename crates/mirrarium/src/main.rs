@@ -264,6 +264,7 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             let source = resolve_extension_source(arguments.get(1).map(String::as_str))?;
             let install_path = extension_install_path()?;
             let manifest = install_extension(&source, &install_path)?;
+            publish_extension_install_state(&install_path, &manifest)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -272,6 +273,7 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
                     "extension_id": EXTENSION_ID,
                     "manifest_version": manifest["manifest_version"],
                     "version": manifest["version"],
+                    "build_id": manifest["version_name"],
                 }))?
             );
         }
@@ -279,21 +281,31 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             let install_path = extension_install_path()?;
             let manifest_path = install_path.join("manifest.json");
             let installed = install_path.is_dir();
-            let (valid, version, error) = if installed {
+            let (valid, version, build_id, error) = if installed {
                 match validate_extension_directory(&install_path) {
                     Ok(manifest) => (
                         true,
                         manifest.get("version").cloned().unwrap_or(serde_json::Value::Null),
+                        manifest
+                            .get("version_name")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
                         serde_json::Value::Null,
                     ),
                     Err(error) => (
                         false,
                         serde_json::Value::Null,
+                        serde_json::Value::Null,
                         serde_json::Value::String(format!("{error:#}")),
                     ),
                 }
             } else {
-                (false, serde_json::Value::Null, serde_json::Value::Null)
+                (
+                    false,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                )
             };
             println!(
                 "{}",
@@ -303,6 +315,7 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
                     "installed": installed,
                     "valid": valid,
                     "version": version,
+                    "build_id": build_id,
                     "extension_id": EXTENSION_ID,
                     "error": error,
                 }))?
@@ -317,6 +330,11 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             } else {
                 false
             };
+            let state_path = extension_state_path()?;
+            if state_path.is_file() {
+                fs::remove_file(&state_path)
+                    .with_context(|| format!("removing {}", state_path.display()))?;
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -346,6 +364,57 @@ fn extension_install_path() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .context("set HOME, XDG_DATA_HOME, or MIRRARIUM_EXTENSION_DIR")?;
     Ok(PathBuf::from(home).join(".local/share/mirrarium/extension"))
+}
+
+fn extension_state_path() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("MIRRARIUM_EXTENSION_STATE_FILE") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(path).join("mirrarium/extension-install.json"));
+    }
+    let home = env::var_os("HOME")
+        .context("set HOME, XDG_CONFIG_HOME, or MIRRARIUM_EXTENSION_STATE_FILE")?;
+    Ok(PathBuf::from(home).join(".config/mirrarium/extension-install.json"))
+}
+
+fn publish_extension_install_state(
+    install_path: &Path,
+    manifest: &serde_json::Value,
+) -> Result<PathBuf> {
+    let state_path = extension_state_path()?;
+    let parent = state_path
+        .parent()
+        .context("extension state path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating extension state directory {}", parent.display()))?;
+
+    let canonical_install = fs::canonicalize(install_path)
+        .with_context(|| format!("resolving installed extension {}", install_path.display()))?;
+    let build_id = manifest
+        .get("version_name")
+        .and_then(serde_json::Value::as_str)
+        .context("installed extension manifest is missing version_name")?;
+    let state = serde_json::json!({
+        "schema_version": 1,
+        "extension_id": EXTENSION_ID,
+        "build_id": build_id,
+        "install_path": canonical_install,
+    });
+    let temp = parent.join(format!(
+        ".extension-install.{}.tmp",
+        std::process::id()
+    ));
+    fs::write(&temp, serde_json::to_vec_pretty(&state)?)
+        .with_context(|| format!("writing extension state {}", temp.display()))?;
+    fs::rename(&temp, &state_path).with_context(|| {
+        format!(
+            "installing extension state {} to {}",
+            temp.display(),
+            state_path.display()
+        )
+    })?;
+    Ok(state_path)
 }
 
 fn resolve_extension_source(explicit: Option<&str>) -> Result<PathBuf> {
@@ -399,6 +468,13 @@ fn validate_extension_directory(path: &Path) -> Result<serde_json::Value> {
     anyhow::ensure!(
         manifest.get("version").and_then(serde_json::Value::as_str).is_some(),
         "extension manifest is missing version"
+    );
+    anyhow::ensure!(
+        manifest
+            .get("version_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|build_id| !build_id.is_empty()),
+        "extension manifest is missing deterministic version_name build id"
     );
     Ok(manifest)
 }
@@ -716,6 +792,7 @@ EXTENSION:
   SOURCE_DIR defaults to ./extension/dist.
   MIRRARIUM_EXTENSION_SOURCE overrides the source.
   MIRRARIUM_EXTENSION_DIR overrides the stable installed-extension directory.
+  MIRRARIUM_EXTENSION_STATE_FILE overrides the public build-state file.
 
 NATIVE HOST:
   BROWSER defaults to edge.
@@ -756,6 +833,7 @@ mod tests {
                     "manifest_version": 3,
                     "name": "Mirrarium",
                     "version": version,
+                    "version_name": format!("{version}+fixture"),
                     "key": "fixture-key"
                 }))
                 .unwrap(),
@@ -793,6 +871,7 @@ mod tests {
                 "manifest_version": 3,
                 "name": "Mirrarium",
                 "version": "0.1.0",
+                "version_name": "0.1.0+fixture",
                 "key": "fixture-key"
             }))
             .unwrap(),
