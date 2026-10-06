@@ -24,8 +24,12 @@ use url::Url;
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
+const PRIVATE_STREAM_MAGIC: &[u8; 8] = b"MIRRPV02";
 const PRIVATE_KEY_BYTES: usize = 32;
 const PRIVATE_NONCE_BYTES: usize = 24;
+const PRIVATE_STREAM_NONCE_PREFIX_BYTES: usize = 16;
+const PRIVATE_STREAM_TAG_BYTES: usize = 16;
+const PRIVATE_STREAM_REWRITE_CHUNK_BYTES: usize = 256 * 1024;
 const SQLITE_PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
 const LEDGER_KEY_PURPOSE: &str = "ledger-sqlcipher-v1";
 
@@ -714,7 +718,7 @@ impl CaptureStore {
             }
 
             match fs::read(self.root.join(&expected_relative_path)) {
-                Ok(bytes) if bytes.starts_with(PRIVATE_OBJECT_MAGIC) => {
+                Ok(bytes) if is_encrypted_private_object(&bytes) => {
                     encrypted_private_objects += 1;
                 }
                 Ok(_) => {
@@ -774,7 +778,7 @@ impl CaptureStore {
             let plaintext = fs::read(&final_path)
                 .with_context(|| format!("reading legacy private object {}", final_path.display()))?;
 
-            if plaintext.starts_with(PRIVATE_OBJECT_MAGIC) {
+            if is_encrypted_private_object(&plaintext) {
                 already_encrypted_objects = already_encrypted_objects
                     .checked_add(1)
                     .context("encrypted private object count overflow")?;
@@ -2281,7 +2285,7 @@ fn encrypted_private_objects_exist(root: &Path) -> Result<bool> {
             let mut file = File::open(entry.path())?;
             let mut prefix = [0_u8; PRIVATE_OBJECT_MAGIC.len()];
             match file.read_exact(&mut prefix) {
-                Ok(()) if &prefix == PRIVATE_OBJECT_MAGIC => return Ok(true),
+                Ok(()) if is_encrypted_private_object(&prefix) => return Ok(true),
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::UnexpectedEof => {}
                 Err(error) => return Err(error.into()),
@@ -2367,6 +2371,173 @@ fn private_object_aad(hash: &str) -> Vec<u8> {
     let mut aad = b"mirrarium-private-object-v1\0".to_vec();
     aad.extend_from_slice(hash.as_bytes());
     aad
+}
+
+struct PrivateStreamWriter {
+    writer: BufWriter<File>,
+    key: [u8; PRIVATE_KEY_BYTES],
+    nonce_prefix: [u8; PRIVATE_STREAM_NONCE_PREFIX_BYTES],
+    next_frame: u64,
+}
+
+impl PrivateStreamWriter {
+    fn new(
+        mut writer: BufWriter<File>,
+        key: [u8; PRIVATE_KEY_BYTES],
+    ) -> Result<Self> {
+        let mut nonce_prefix = [0_u8; PRIVATE_STREAM_NONCE_PREFIX_BYTES];
+        OsRng.fill_bytes(&mut nonce_prefix);
+        writer.write_all(PRIVATE_STREAM_MAGIC)?;
+        writer.write_all(&nonce_prefix)?;
+        writer.flush()?;
+        Ok(Self {
+            writer,
+            key,
+            nonce_prefix,
+            next_frame: 0,
+        })
+    }
+
+    fn write_chunk(&mut self, plaintext: &[u8]) -> Result<()> {
+        let sequence = self.next_frame;
+        let nonce = private_stream_nonce(&self.nonce_prefix, sequence);
+        let aad = private_stream_aad(&self.nonce_prefix, sequence);
+        let cipher = XChaCha20Poly1305::new((&self.key).into());
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("encrypting private stream frame failed"))?;
+        let frame_len: u32 = ciphertext
+            .len()
+            .try_into()
+            .context("private stream frame exceeds u32 length")?;
+        self.writer.write_all(&frame_len.to_be_bytes())?;
+        self.writer.write_all(&ciphertext)?;
+        self.next_frame = self
+            .next_frame
+            .checked_add(1)
+            .context("private stream frame sequence overflow")?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.writer.flush().context("flushing private stream writer")
+    }
+}
+
+fn private_stream_nonce(
+    prefix: &[u8; PRIVATE_STREAM_NONCE_PREFIX_BYTES],
+    sequence: u64,
+) -> [u8; PRIVATE_NONCE_BYTES] {
+    let mut nonce = [0_u8; PRIVATE_NONCE_BYTES];
+    nonce[..PRIVATE_STREAM_NONCE_PREFIX_BYTES].copy_from_slice(prefix);
+    nonce[PRIVATE_STREAM_NONCE_PREFIX_BYTES..].copy_from_slice(&sequence.to_be_bytes());
+    nonce
+}
+
+fn private_stream_aad(
+    prefix: &[u8; PRIVATE_STREAM_NONCE_PREFIX_BYTES],
+    sequence: u64,
+) -> Vec<u8> {
+    let mut aad = b"mirrarium-private-stream-v2\0".to_vec();
+    aad.extend_from_slice(prefix);
+    aad.extend_from_slice(&sequence.to_be_bytes());
+    aad
+}
+
+fn decrypt_private_stream_bytes(
+    key: &[u8; PRIVATE_KEY_BYTES],
+    envelope: &[u8],
+) -> Result<Vec<u8>> {
+    let header_len = PRIVATE_STREAM_MAGIC.len() + PRIVATE_STREAM_NONCE_PREFIX_BYTES;
+    anyhow::ensure!(
+        envelope.len() >= header_len,
+        "encrypted private stream envelope is truncated"
+    );
+    anyhow::ensure!(
+        envelope.starts_with(PRIVATE_STREAM_MAGIC),
+        "private stream envelope magic mismatch"
+    );
+
+    let mut nonce_prefix = [0_u8; PRIVATE_STREAM_NONCE_PREFIX_BYTES];
+    nonce_prefix.copy_from_slice(
+        &envelope[PRIVATE_STREAM_MAGIC.len()..header_len],
+    );
+
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let mut plaintext = Vec::new();
+    let mut cursor = header_len;
+    let mut sequence = 0_u64;
+
+    while cursor < envelope.len() {
+        anyhow::ensure!(
+            envelope.len() - cursor >= 4,
+            "encrypted private stream frame length is truncated"
+        );
+        let frame_len = u32::from_be_bytes(
+            envelope[cursor..cursor + 4]
+                .try_into()
+                .expect("four-byte frame length slice"),
+        ) as usize;
+        cursor += 4;
+        anyhow::ensure!(
+            frame_len >= PRIVATE_STREAM_TAG_BYTES,
+            "encrypted private stream frame is too short"
+        );
+        let frame_end = cursor
+            .checked_add(frame_len)
+            .context("private stream frame length overflow")?;
+        anyhow::ensure!(
+            frame_end <= envelope.len(),
+            "encrypted private stream frame is truncated"
+        );
+
+        let nonce = private_stream_nonce(&nonce_prefix, sequence);
+        let aad = private_stream_aad(&nonce_prefix, sequence);
+        let frame = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &envelope[cursor..frame_end],
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("decrypting private stream frame failed"))?;
+        plaintext.extend_from_slice(&frame);
+        cursor = frame_end;
+        sequence = sequence
+            .checked_add(1)
+            .context("private stream frame sequence overflow")?;
+    }
+
+    Ok(plaintext)
+}
+
+fn rewrite_private_stream_file(
+    path: &Path,
+    key: [u8; PRIVATE_KEY_BYTES],
+    plaintext: &[u8],
+) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("opening private stream rewrite {}", path.display()))?;
+    let mut writer = PrivateStreamWriter::new(BufWriter::new(file), key)?;
+    for chunk in plaintext.chunks(PRIVATE_STREAM_REWRITE_CHUNK_BYTES) {
+        writer.write_chunk(chunk)?;
+    }
+    writer.flush()?;
+    harden_file(path)
+}
+
+fn is_encrypted_private_object(bytes: &[u8]) -> bool {
+    bytes.starts_with(PRIVATE_OBJECT_MAGIC) || bytes.starts_with(PRIVATE_STREAM_MAGIC)
 }
 
 fn encrypt_private_object_bytes(
@@ -2782,6 +2953,51 @@ mod tests {
         assert_ne!(one, other);
         assert!(private_database_key(directory.path(), "", false).is_err());
         assert!(private_database_key(directory.path(), "bad purpose", false).is_err());
+    }
+
+    #[test]
+    fn private_stream_envelope_round_trips_multiple_frames() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("stream-v2");
+        let file = File::create(&path).unwrap();
+        let key = [0x5a_u8; PRIVATE_KEY_BYTES];
+        let mut writer = PrivateStreamWriter::new(BufWriter::new(file), key).unwrap();
+        writer.write_chunk(b"alpha-").unwrap();
+        writer.write_chunk(b"beta-").unwrap();
+        writer.write_chunk(b"gamma").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.starts_with(PRIVATE_STREAM_MAGIC));
+        assert!(!String::from_utf8_lossy(&raw).contains("alpha-beta-gamma"));
+        assert_eq!(
+            decrypt_private_stream_bytes(&key, &raw).unwrap(),
+            b"alpha-beta-gamma"
+        );
+    }
+
+    #[test]
+    fn private_stream_envelope_rejects_wrong_key_tamper_and_truncation() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("stream-v2-errors");
+        let file = File::create(&path).unwrap();
+        let key = [0x31_u8; PRIVATE_KEY_BYTES];
+        let mut writer = PrivateStreamWriter::new(BufWriter::new(file), key).unwrap();
+        writer.write_chunk(b"first").unwrap();
+        writer.write_chunk(b"second").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let raw = fs::read(&path).unwrap();
+        assert!(decrypt_private_stream_bytes(&[0x32_u8; PRIVATE_KEY_BYTES], &raw).is_err());
+
+        let mut tampered = raw.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(decrypt_private_stream_bytes(&key, &tampered).is_err());
+
+        assert!(decrypt_private_stream_bytes(&key, &raw[..raw.len() - 1]).is_err());
     }
 
     #[test]
