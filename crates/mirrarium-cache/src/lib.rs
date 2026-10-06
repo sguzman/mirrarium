@@ -1264,7 +1264,7 @@ mod tests {
         .unwrap();
         assert_eq!(entry.body, body);
         assert_eq!(entry.body_hash, hash);
-        assert_eq!(entry.etag.as_deref(), Some(""fixture-v1""));
+        assert_eq!(entry.etag.as_deref(), Some("\"fixture-v1\""));
         assert_eq!(entry.captured_at_ms, 10);
     }
 
@@ -1277,7 +1277,7 @@ mod tests {
             1,
             "https://chatgpt.com/backend-api/conversation/no-store",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Some(""v1""),
+            Some("\"v1\""),
             Some("no-store"),
         );
         insert_private_json_capture(
