@@ -396,7 +396,7 @@ mod tests {
             status: 200,
             mime_type: "application/json".to_owned(),
             resource_type: "Fetch".to_owned(),
-            etag: Some(""private-v1"".to_owned()),
+            etag: Some("\"private-v1\"".to_owned()),
             last_modified: None,
             cache_control: Some("private, max-age=0, must-revalidate".to_owned()),
             provenance: CaptureProvenance::default(),
@@ -430,7 +430,7 @@ mod tests {
                 lookup_id,
                 etag: Some(etag),
                 ..
-            }) if lookup_id == "private-lookup-1" && etag == ""private-v1""
+            }) if lookup_id == "private-lookup-1" && etag == "\"private-v1\""
         ));
         assert!(matches!(
             responses.last(),
