@@ -67,6 +67,7 @@ mirrarium verify
 mirrarium cache stats
 mirrarium cache replay-stats
 mirrarium cache candidates [limit]
+mirrarium cache private-reads [limit]
 mirrarium corpus rebuild
 mirrarium corpus stats
 mirrarium corpus conversations 50
@@ -80,11 +81,13 @@ mirrarium native-host status
 
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
 
-`cache stats` and `cache candidates` audit the public replay surface. A candidate must be a successful public GET with a stored body, a static resource type, explicit `Cache-Control: immutable`, and exactly one observed body hash for its URL. Replay is stricter still: v1 only fulfills exact query-free ChatGPT `/_next/static/` script, stylesheet, image, and font URLs, caps bodies at 16 MiB, re-verifies the public CAS path, byte count, and SHA-256 before serving, and fails open to the network on any miss, timeout, corruption, ambiguity, or native-host error.
+`cache stats` and `cache candidates` audit the public replay surface. A candidate must be a successful public GET with a stored body, a static resource type, explicit `Cache-Control: immutable`, and exactly one observed body hash for its URL. Replay is stricter still: v1 fulfills exact query-free ChatGPT `/_next/static/` script, stylesheet, image, and font URLs plus exact query-free `cdn.oaistatic.com` static resources. Bodies are capped at 16 MiB, the public CAS path, byte count, and SHA-256 are re-verified before serving, and every miss, timeout, corruption, ambiguity, or native-host error fails open to the network.
 
-Verified hits are streamed from the native host in sub-1-MiB messages and fulfilled through CDP Fetch. The Chromium integration test disables the browser's ordinary cache and verifies Mirrarium's replay marker while proving the origin receives no additional JS/CSS requests.
+Verified hits are streamed from the native host in sub-1-MiB messages and fulfilled through CDP Fetch. The Chromium integration test disables the browser's ordinary cache and verifies Mirrarium's replay marker while proving the ChatGPT and `cdn.oaistatic.com` origins receive no additional requests for replayed static resources.
 
-`cache replay-stats` reports the durable cold/warm replay lifecycle: attempts, successful hits, misses, lookup errors, local lookup timeouts, fulfillment failures, and bytes actually replayed. Telemetry accepts only query-free ChatGPT `/_next/static/` script/stylesheet/image/font URLs, so it cannot become a ledger for private or dynamic request URLs.
+`cache replay-stats` reports the durable cold/warm replay lifecycle: attempts, successful hits, misses, lookup errors, local lookup timeouts, fulfillment failures, and bytes actually replayed. Telemetry accepts only the same public static replay scope, so it cannot become a ledger for private or dynamic request URLs.
+
+`cache private-reads` audits captured private JSON GETs without replaying them. It reports observation count, body-hash volatility, latest validator metadata, cache-control, and whether the latest representation is suitable for future conditional revalidation. Missing validators, `no-store`, redacted query identity, or unsupported origins keep a read out of that candidate set. This is evidence for a later revalidation layer, not permission to serve stale private data.
 
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
 

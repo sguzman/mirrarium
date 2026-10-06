@@ -117,14 +117,17 @@ Implemented:
 - verified public-CAS replay lookup with URL/type restrictions, 16 MiB ceiling, path/length/SHA-256 validation;
 - chunked native-host replay transport kept below Chrome's per-message host-to-extension limit;
 - fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts, stylesheets, images, and fonts;
+- exact-host immutable replay for query-free `cdn.oaistatic.com` static resources with matching Rust/extension/telemetry policy gates;
 - Chromium end-to-end proof that replay still works with browser cache disabled and avoids origin requests;
 - privacy-bounded durable replay outcome telemetry with hit/miss/error/timeout/fulfillment buckets and replayed-byte totals;
 - Chromium cold-to-warm lifecycle proof covering initial misses, warm hits, saved bytes, and zero healthy-path replay errors;
+- private JSON read inventory with volatility, ETag/Last-Modified, cache-control, redacted-identity detection, and conservative revalidation-candidate classification;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
-- cautiously expand verified immutable replay to already-classified public static asset hosts, starting with cdn.oaistatic.com;
+- build verified private-read lookup plumbing and conditional network revalidation before considering any private replay;
+- cautiously evaluate additional already-classified exact public static hosts only when observed evidence justifies them;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.
