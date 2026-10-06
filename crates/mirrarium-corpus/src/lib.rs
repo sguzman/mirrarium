@@ -1313,6 +1313,8 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening {}", database.display()))?;
+    apply_corpus_database_key(&connection, raw_root.as_ref(), false)
+        .context("opening encrypted derived corpus; restore the Mirrarium private key or run 'mirrarium corpus rebuild'")?;
     validate_corpus_schema(&connection)?;
 
     for table in [
