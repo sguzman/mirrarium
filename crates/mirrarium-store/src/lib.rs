@@ -176,6 +176,16 @@ pub struct CaptureStore {
 }
 
 impl CaptureStore {
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        let connection = open_raw_ledger_connection(&root, true)?;
+        Ok(Self {
+            root,
+            connection,
+            in_flight: HashMap::new(),
+        })
+    }
+
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
@@ -2682,6 +2692,38 @@ mod tests {
         let error = load_or_create_private_key(directory.path()).unwrap_err();
         assert!(error.to_string().contains("restore that key"));
         assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn read_only_capture_store_does_not_mutate_live_ledger() {
+        let directory = tempdir().unwrap();
+        let mut writer = CaptureStore::open(directory.path()).unwrap();
+        let metadata = metadata(
+            "read-only-live",
+            "https://chatgpt.com/backend-api/read-only",
+            "Fetch",
+        );
+        writer.begin(metadata).unwrap();
+        writer
+            .append_chunk("read-only-live", 0, &BASE64.encode(b"{\"version\":1}"))
+            .unwrap();
+        writer.finish("read-only-live", None, None).unwrap();
+
+        let reader = CaptureStore::open_read_only(directory.path()).unwrap();
+        assert_eq!(reader.recent_captures(10).unwrap().len(), 1);
+
+        let metadata = metadata(
+            "read-only-live-2",
+            "https://chatgpt.com/backend-api/read-only",
+            "Fetch",
+        );
+        writer.begin(metadata).unwrap();
+        writer
+            .append_chunk("read-only-live-2", 0, &BASE64.encode(b"{\"version\":2}"))
+            .unwrap();
+        writer.finish("read-only-live-2", None, None).unwrap();
+
+        assert_eq!(CaptureStore::open_read_only(directory.path()).unwrap().recent_captures(10).unwrap().len(), 2);
     }
 
     #[test]

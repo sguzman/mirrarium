@@ -102,7 +102,6 @@ const responses = new Map<string, ResponseMetadata>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
-const fetchCapturedNetworkRequests = new Set<string>();
 let nativePort: chrome.runtime.Port | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -136,10 +135,6 @@ function clearTabState(tabId: number): void {
 
   for (const key of privateRevalidations.keys()) {
     if (key.startsWith(prefix)) privateRevalidations.delete(key);
-  }
-
-  for (const key of fetchCapturedNetworkRequests) {
-    if (key.startsWith(prefix)) fetchCapturedNetworkRequests.delete(key);
   }
 }
 
@@ -722,122 +717,12 @@ function privateRevalidationResponseHeaders(
   return responseHeaders;
 }
 
-function fetchResponseHeadersToRecord(
-  headers: Array<{ name: string; value: string }> | undefined,
-): Record<string, string> {
-  const record: Record<string, string> = {};
-  for (const item of headers ?? []) {
-    record[item.name] = item.value;
-  }
-  return record;
-}
-
-function normalizedMimeType(contentType: string | undefined): string {
-  return contentType?.split(";", 1)[0]?.trim() ?? "";
-}
-
-async function capturePausedPrivateRefresh(
-  tabId: number,
-  event: {
-    requestId: string;
-    networkId?: string;
-    resourceType?: string;
-    responseStatusCode?: number;
-    responseHeaders?: Array<{ name: string; value: string }>;
-    request: {
-      method: string;
-      url: string;
-      headers?: Record<string, string>;
-    };
-  },
-): Promise<void> {
-  if (event.responseStatusCode !== 200) return;
-
-  const networkKey = event.networkId
-    ? requestKey(tabId, event.networkId)
-    : undefined;
-  const networkRequest = networkKey ? requests.get(networkKey) : undefined;
-  const request: RequestMetadata =
-    networkRequest ?? {
-      method: event.request.method,
-      url: event.request.url,
-      headers: sanitizeHeaders(event.request.headers),
-      servedFromCache: false,
-      lifecycleId: crypto.randomUUID(),
-      redirectHop: 0,
-      resourceType: event.resourceType,
-    };
-
-  const rawHeaders = fetchResponseHeadersToRecord(event.responseHeaders);
-  const response: ResponseMetadata = {
-    url: event.request.url,
-    status: 200,
-    mimeType: normalizedMimeType(header(rawHeaders, "content-type")),
-    resourceType: event.resourceType ?? request.resourceType ?? "Fetch",
-    etag: header(rawHeaders, "etag"),
-    lastModified: header(rawHeaders, "last-modified"),
-    cacheControl: header(rawHeaders, "cache-control"),
-    headers: sanitizeHeaders(rawHeaders),
-    fromDiskCache: false,
-    fromServiceWorker: false,
-    fromPrefetchCache: false,
-  };
-
-  const captureId = crypto.randomUUID();
-  postCaptureStart(
-    tabId,
-    event.networkId ?? event.requestId,
-    captureId,
-    request,
-    response,
-  );
-
-  try {
-    const result = (await chrome.debugger.sendCommand(
-      { tabId },
-      "Fetch.getResponseBody",
-      { requestId: event.requestId },
-    )) as { body: string; base64Encoded: boolean };
-
-    if (result.base64Encoded) {
-      postBase64Body(captureId, result.body);
-    } else {
-      postUtf8Body(captureId, result.body);
-    }
-
-    postNative({
-      type: "capture_finish",
-      capture_id: captureId,
-      body_error: null,
-    });
-
-    if (networkKey) {
-      fetchCapturedNetworkRequests.add(networkKey);
-      requests.delete(networkKey);
-      responses.delete(networkKey);
-    }
-  } catch (error) {
-    postNative({
-      type: "capture_finish",
-      capture_id: captureId,
-      body_error: String(error),
-    });
-  }
-}
-
 async function finishPrivateRevalidation(
   tabId: number,
   event: {
     requestId: string;
-    networkId?: string;
-    resourceType?: string;
     responseStatusCode?: number;
     responseHeaders?: Array<{ name: string; value: string }>;
-    request: {
-      method: string;
-      url: string;
-      headers?: Record<string, string>;
-    };
   },
 ): Promise<void> {
   const key = requestKey(tabId, event.requestId);
@@ -851,7 +736,6 @@ async function finishPrivateRevalidation(
 
   if (event.responseStatusCode !== 304) {
     if (event.responseStatusCode === 200) {
-      await capturePausedPrivateRefresh(tabId, event);
       recordPrivateRevalidationOutcome("refreshed");
     }
     await continuePausedResponse(tabId, event.requestId);
@@ -887,7 +771,6 @@ async function handlePausedRequest(
     responseStatusCode?: number;
     responseErrorReason?: string;
     responseHeaders?: Array<{ name: string; value: string }>;
-    networkId?: string;
     request: {
       method: string;
       url: string;
@@ -1672,15 +1555,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     if (!attachedTabs.has(tabId) && !fetchSetupTabs.has(tabId)) return;
     const event = params as {
       requestId: string;
-      networkId?: string;
       resourceType?: string;
-      responseStatusCode?: number;
-      responseErrorReason?: string;
-      responseHeaders?: Array<{ name: string; value: string }>;
       request: {
         method: string;
         url: string;
-        headers?: Record<string, string>;
       };
     };
     void handlePausedRequest(tabId, event);
@@ -1765,12 +1643,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       type: string;
       response: CdpResponse;
     };
-    const key = requestKey(tabId, event.requestId);
-    if (fetchCapturedNetworkRequests.has(key)) {
-      return;
-    }
     responses.set(
-      key,
+      requestKey(tabId, event.requestId),
       responseMetadataFromCdp(event.response, event.type),
     );
     return;
@@ -1781,12 +1655,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       requestId: string;
       encodedDataLength?: number;
     };
-    const key = requestKey(tabId, event.requestId);
-    if (fetchCapturedNetworkRequests.delete(key)) {
-      requests.delete(key);
-      responses.delete(key);
-      return;
-    }
     void captureBody(tabId, event.requestId, event.encodedDataLength);
     return;
   }
@@ -1796,12 +1664,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       requestId: string;
       errorText?: string;
     };
-    const key = requestKey(tabId, event.requestId);
-    if (fetchCapturedNetworkRequests.delete(key)) {
-      requests.delete(key);
-      responses.delete(key);
-      return;
-    }
     void captureBody(
       tabId,
       event.requestId,

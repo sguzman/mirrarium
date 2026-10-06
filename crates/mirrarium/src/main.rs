@@ -42,13 +42,13 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let store = CaptureStore::open(&root)?;
-
     match arguments.first().map(String::as_str) {
         Some("stats") => {
+            let store = CaptureStore::open_read_only(&root)?;
             println!("{}", serde_json::to_string_pretty(&store.stats()?)?);
         }
         Some("captures") => {
+            let store = CaptureStore::open_read_only(&root)?;
             let limit = arguments
                 .get(1)
                 .map(|value| value.parse::<u64>())
@@ -62,6 +62,7 @@ fn run() -> Result<()> {
             );
         }
         Some("verify") => {
+            let store = CaptureStore::open_read_only(&root)?;
             let report = store.verify()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             anyhow::ensure!(
@@ -72,6 +73,7 @@ fn run() -> Result<()> {
         }
         Some("privacy") => match arguments.get(1).map(String::as_str) {
             Some("status") => {
+                let store = CaptureStore::open_read_only(&root)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&store.private_storage_status()?)?
