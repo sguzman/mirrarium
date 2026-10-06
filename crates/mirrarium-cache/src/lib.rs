@@ -45,6 +45,20 @@ pub struct PrivateReadProfile {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateReadEntry {
+    pub url: String,
+    pub mime_type: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    pub captured_at_ms: u64,
+    pub cache_control: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    #[serde(skip)]
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReplayEntry {
     pub url: String,
     pub resource_type: String,
@@ -370,6 +384,191 @@ fn private_read_profile(
     }
 }
 
+pub fn private_lookup(
+    raw_root: impl AsRef<Path>,
+    raw_url: &str,
+) -> Result<Option<PrivateReadEntry>> {
+    let Some(url) = private_revalidation_url(raw_url) else {
+        return Ok(None);
+    };
+    let root = raw_root.as_ref();
+    let database = root.join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    let row = connection
+        .query_row(
+            r#"
+            SELECT
+                captured_at_ms,
+                mime_type,
+                body_hash,
+                body_bytes,
+                cache_control,
+                etag,
+                last_modified
+            FROM captures
+            WHERE url = ?1
+              AND privacy_class = 'private'
+              AND lower(method) = 'get'
+              AND status = 200
+              AND body_hash IS NOT NULL
+              AND body_error IS NULL
+              AND lower(mime_type) LIKE '%json%'
+            ORDER BY captured_at_ms DESC, rowid DESC
+            LIMIT 1
+            "#,
+            [url.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        captured_at_ms,
+        mime_type,
+        body_hash,
+        body_bytes,
+        cache_control,
+        etag,
+        last_modified,
+    )) = row
+    else {
+        return Ok(None);
+    };
+
+    if etag.is_none() && last_modified.is_none() {
+        return Ok(None);
+    }
+    if cache_control_has_no_store(cache_control.as_deref()) {
+        return Ok(None);
+    }
+
+    let captured_at_ms: u64 = captured_at_ms
+        .try_into()
+        .context("negative private-read capture timestamp")?;
+    let body_bytes: u64 = body_bytes
+        .try_into()
+        .context("negative private-read body byte count")?;
+    if body_bytes > MAX_REPLAY_BODY_BYTES {
+        return Ok(None);
+    }
+    if body_hash.len() != 64 || !body_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid private CAS hash for revalidation candidate");
+    }
+
+    let expected_relative_path = private_object_relative_path(&body_hash);
+    let indexed_object = connection
+        .query_row(
+            r#"
+            SELECT bytes, relative_path
+            FROM objects
+            WHERE storage_class = 'private'
+              AND hash = ?1
+            "#,
+            [&body_hash],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((indexed_bytes, indexed_relative_path)) = indexed_object else {
+        anyhow::bail!("private revalidation object is missing from object index");
+    };
+    let indexed_bytes: u64 = indexed_bytes
+        .try_into()
+        .context("negative indexed private object byte count")?;
+    anyhow::ensure!(
+        indexed_bytes == body_bytes,
+        "private revalidation object byte count disagrees with capture"
+    );
+    anyhow::ensure!(
+        Path::new(&indexed_relative_path) == expected_relative_path,
+        "private revalidation object path disagrees with CAS layout"
+    );
+    anyhow::ensure!(
+        expected_relative_path
+            .components()
+            .all(|component| !matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))),
+        "invalid private revalidation object path"
+    );
+
+    let object_path = root.join(&expected_relative_path);
+    let body = fs::read(&object_path)
+        .with_context(|| format!("reading private revalidation object {}", object_path.display()))?;
+    anyhow::ensure!(
+        body.len() as u64 == body_bytes,
+        "private revalidation object length verification failed"
+    );
+    let actual_hash = format!("{:x}", Sha256::digest(&body));
+    anyhow::ensure!(
+        actual_hash == body_hash,
+        "private revalidation object hash verification failed"
+    );
+
+    Ok(Some(PrivateReadEntry {
+        url: url.to_string(),
+        mime_type,
+        body_hash,
+        body_bytes,
+        captured_at_ms,
+        cache_control,
+        etag,
+        last_modified,
+        body,
+    }))
+}
+
+fn private_revalidation_url(raw_url: &str) -> Option<Url> {
+    let url = Url::parse(raw_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+
+    if url.scheme() != "https"
+        || !matches!(host.as_str(), "chatgpt.com" | "chat.openai.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || path == "/api/auth"
+        || path.starts_with("/api/auth/")
+        || path == "/auth"
+        || path.starts_with("/auth/")
+        || path.starts_with("/backend-api/auth/")
+        || path.contains("/oauth/")
+        || path.ends_with("/oauth")
+        || path.contains("/login")
+    {
+        return None;
+    }
+
+    Some(url)
+}
+
+fn cache_control_has_no_store(cache_control: Option<&str>) -> bool {
+    cache_control
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .split(',')
+        .map(|directive| directive.trim().to_owned())
+        .any(|directive| directive == "no-store")
+}
+
 pub fn lookup(
     raw_root: impl AsRef<Path>,
     raw_url: &str,
@@ -576,6 +775,13 @@ fn cache_control_allows_replay(cache_control: Option<&str>) -> bool {
         .iter()
         .any(|directive| *directive == "no-store" || directive.starts_with("private"))
         && directives.iter().any(|directive| *directive == "immutable")
+}
+
+fn private_object_relative_path(hash: &str) -> PathBuf {
+    PathBuf::from("private")
+        .join("objects")
+        .join(&hash[..2])
+        .join(hash)
 }
 
 fn public_object_relative_path(hash: &str) -> PathBuf {
@@ -994,6 +1200,120 @@ mod tests {
         assert!(replayable_url("http://chatgpt.com/_next/static/replay.js").is_none());
         assert!(replayable_url("https://chatgpt.com/_next/static/replay.js?v=1").is_none());
         assert!(replayable_url("https://cdn.oaistatic.com/assets/replay.js?v=1").is_none());
+    }
+
+    #[test]
+    fn private_lookup_reads_verified_validator_backed_json() {
+        let (directory, connection) = open_fixture();
+        let body = br#"{"id":"conversation-a"}"#;
+        let hash = format!("{:x}", Sha256::digest(body));
+        let relative_path = private_object_relative_path(&hash);
+        let object_path = directory.path().join(&relative_path);
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::write(&object_path, body).unwrap();
+        connection
+            .execute(
+                "INSERT INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('private', ?1, ?2, ?3, 1)",
+                params![hash, body.len() as i64, relative_path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO captures (
+                    capture_id,
+                    captured_at_ms,
+                    method,
+                    url,
+                    status,
+                    mime_type,
+                    resource_type,
+                    privacy_class,
+                    body_hash,
+                    body_bytes,
+                    cache_control,
+                    etag,
+                    last_modified,
+                    body_error
+                ) VALUES (
+                    'private-lookup',
+                    10,
+                    'GET',
+                    'https://chatgpt.com/backend-api/conversation/a',
+                    200,
+                    'application/json',
+                    'Fetch',
+                    'private',
+                    ?1,
+                    ?2,
+                    'private, max-age=0, must-revalidate',
+                    '"fixture-v1"',
+                    NULL,
+                    NULL
+                )
+                "#,
+                params![hash, body.len() as i64],
+            )
+            .unwrap();
+
+        let entry = private_lookup(
+            directory.path(),
+            "https://chatgpt.com/backend-api/conversation/a",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(entry.body, body);
+        assert_eq!(entry.body_hash, hash);
+        assert_eq!(entry.etag.as_deref(), Some(""fixture-v1""));
+        assert_eq!(entry.captured_at_ms, 10);
+    }
+
+    #[test]
+    fn private_lookup_rejects_no_store_missing_validator_and_query_identity() {
+        let (directory, connection) = open_fixture();
+        insert_private_json_capture(
+            &connection,
+            "private-no-store",
+            1,
+            "https://chatgpt.com/backend-api/conversation/no-store",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some(""v1""),
+            Some("no-store"),
+        );
+        insert_private_json_capture(
+            &connection,
+            "private-no-validator",
+            2,
+            "https://chatgpt.com/backend-api/conversation/no-validator",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+            Some("private, max-age=0"),
+        );
+
+        assert!(private_lookup(
+            directory.path(),
+            "https://chatgpt.com/backend-api/conversation/no-store"
+        )
+        .unwrap()
+        .is_none());
+        assert!(private_lookup(
+            directory.path(),
+            "https://chatgpt.com/backend-api/conversation/no-validator"
+        )
+        .unwrap()
+        .is_none());
+        assert!(private_lookup(
+            directory.path(),
+            "https://chatgpt.com/backend-api/conversation/a?cursor=1"
+        )
+        .unwrap()
+        .is_none());
+        assert!(private_lookup(
+            directory.path(),
+            "https://chatgpt.com/api/auth/session"
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
