@@ -134,7 +134,7 @@ pnpm build:extension
 mirrarium extension install
 ```
 
-The default source is `./extension/dist`. The installed copy lives at `$XDG_DATA_HOME/mirrarium/extension` or `~/.local/share/mirrarium/extension`; `MIRRARIUM_EXTENSION_SOURCE` and `MIRRARIUM_EXTENSION_DIR` override those paths. Installation validates the MV3 manifest/background worker, rejects symlinks, stages a self-contained copy beside the destination, and atomically replaces the previous installed tree.
+The default source is `./extension/dist`. The installed copy lives at `$XDG_DATA_HOME/mirrarium/extension` or `~/.local/share/mirrarium/extension`; `MIRRARIUM_EXTENSION_SOURCE` and `MIRRARIUM_EXTENSION_DIR` override those paths. Installation validates the MV3 manifest/background worker, rejects symlinks, and stages a self-contained copy beside the destination. Initial install atomically moves that tree into place. Updates keep the already-loaded root directory continuously present, atomically replace staged files inside it, commit `manifest.json` last, and then remove obsolete files; Chromium never sees its unpacked-extension root disappear.
 
 Use `mirrarium extension status` to inspect the installed copy and `mirrarium extension uninstall` to remove it. For unpacked Edge/Chromium development installs, load this **stable installed directory** once. Future `mirrarium extension install` runs update that same path rather than requiring a different build-tree location.
 

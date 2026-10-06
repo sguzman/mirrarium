@@ -1,5 +1,7 @@
 use std::{
+    collections::BTreeSet,
     env,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -499,49 +501,133 @@ fn install_extension(source: &Path, destination: &Path) -> Result<serde_json::Va
         .with_context(|| format!("creating extension install parent {}", parent.display()))?;
 
     let temp = parent.join(format!(".extension.install.{}.tmp", std::process::id()));
-    let backup = parent.join(format!(".extension.backup.{}", std::process::id()));
     if temp.exists() {
         fs::remove_dir_all(&temp)
             .with_context(|| format!("removing stale extension staging {}", temp.display()))?;
-    }
-    if backup.exists() {
-        fs::remove_dir_all(&backup)
-            .with_context(|| format!("removing stale extension backup {}", backup.display()))?;
     }
 
     copy_extension_tree(&source, &temp)?;
     let installed_manifest = validate_extension_directory(&temp)?;
 
-    let had_destination = destination.exists();
-    if had_destination {
-        fs::rename(destination, &backup).with_context(|| {
-            format!(
-                "moving existing extension {} to {}",
-                destination.display(),
-                backup.display()
-            )
-        })?;
-    }
-
-    if let Err(error) = fs::rename(&temp, destination) {
-        if had_destination && backup.exists() && !destination.exists() {
-            let _ = fs::rename(&backup, destination);
-        }
-        return Err(error).with_context(|| {
+    if destination.exists() {
+        anyhow::ensure!(
+            destination.is_dir(),
+            "extension install destination is not a directory: {}",
+            destination.display()
+        );
+        activate_staged_extension_directory(&temp, destination, true)?;
+    } else {
+        fs::rename(&temp, destination).with_context(|| {
             format!(
                 "installing extension {} to {}",
                 temp.display(),
                 destination.display()
             )
-        });
-    }
-
-    if backup.exists() {
-        fs::remove_dir_all(&backup)
-            .with_context(|| format!("removing replaced extension {}", backup.display()))?;
+        })?;
     }
 
     Ok(installed_manifest)
+}
+
+fn activate_staged_extension_directory(
+    staging: &Path,
+    destination: &Path,
+    manifest_last: bool,
+) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("creating extension destination {}", destination.display()))?;
+
+    let mut entries = Vec::new();
+    let mut expected_names = BTreeSet::<OsString>::new();
+    for entry in fs::read_dir(staging)
+        .with_context(|| format!("reading extension staging {}", staging.display()))?
+    {
+        let entry = entry?;
+        expected_names.insert(entry.file_name());
+        entries.push(entry);
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in &entries {
+        if manifest_last && entry.file_name() == OsString::from("manifest.json") {
+            continue;
+        }
+        activate_staged_extension_entry(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+
+    if manifest_last {
+        let manifest = staging.join("manifest.json");
+        anyhow::ensure!(
+            manifest.is_file(),
+            "validated extension staging lost manifest.json before activation"
+        );
+        activate_staged_extension_entry(&manifest, &destination.join("manifest.json"))?;
+    }
+
+    for entry in fs::read_dir(destination)
+        .with_context(|| format!("reading extension destination {}", destination.display()))?
+    {
+        let entry = entry?;
+        if expected_names.contains(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("removing obsolete extension directory {}", path.display()))?;
+        } else {
+            fs::remove_file(&path)
+                .with_context(|| format!("removing obsolete extension file {}", path.display()))?;
+        }
+    }
+
+    fs::remove_dir(staging)
+        .with_context(|| format!("removing empty extension staging {}", staging.display()))?;
+    Ok(())
+}
+
+fn activate_staged_extension_entry(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink(),
+        "extension staging contains unsupported symlink: {}",
+        source.display()
+    );
+
+    if metadata.is_dir() {
+        if destination.exists() && !destination.is_dir() {
+            fs::remove_file(destination).with_context(|| {
+                format!(
+                    "removing file replaced by extension directory {}",
+                    destination.display()
+                )
+            })?;
+        }
+        activate_staged_extension_directory(source, destination, false)?;
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        metadata.is_file(),
+        "extension staging contains unsupported entry: {}",
+        source.display()
+    );
+    if destination.is_dir() {
+        fs::remove_dir_all(destination).with_context(|| {
+            format!(
+                "removing directory replaced by extension file {}",
+                destination.display()
+            )
+        })?;
+    }
+    fs::rename(source, destination).with_context(|| {
+        format!(
+            "atomically replacing extension file {} with {}",
+            destination.display(),
+            source.display()
+        )
+    })
 }
 
 fn copy_extension_tree(source: &Path, destination: &Path) -> Result<()> {

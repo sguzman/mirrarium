@@ -146,7 +146,7 @@ Implemented:
 - Chromium proof with browser cache disabled covering unchanged JSON v1, changed v2, capture of v2, subsequent v2 revalidation, exact query-bearing revalidation, and top-level private HTML document revalidation;
 - aggregate-only private revalidation telemetry with not-modified/refresh/fulfillment-error counts and avoided private body bytes, without a second private-URL ledger;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing;
-- stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, atomic replacement, and Chromium e2e execution from the installed copy rather than the build tree.
+- stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, atomic initial installation, live-safe staged per-file replacement with the manifest committed last, and Chromium e2e execution from the installed copy rather than the build tree.
 - deterministic compiled-extension build IDs, atomically published install state, native-host verification of installed state, and self-reload of stale service workers on subsequent ChatGPT activity;
 - Chromium hot-update proof: replace the stable installed extension while the browser remains open, preserve the extension ID/path, and observe the service worker reload into the new build.
 
