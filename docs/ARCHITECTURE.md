@@ -88,6 +88,7 @@ Implemented:
 - MV3 extension loading and stable unpacked extension identity;
 - CDP attachment restricted to ChatGPT origins;
 - request/response metadata observation;
+- private WebSocket JSON-frame observation using CDP socket creation/handshake/frame events, with sanitized socket URLs and headers, stable per-socket lifecycle identity, `WS_SEND` / `WS_RECV` direction, encrypted CAS persistence, credential-key redaction, and no replay path;
 - sanitized transport provenance: request/response headers, frame and loader identity, initiator, wall-clock timing, response protocol, and browser-cache/service-worker/prefetch signals;
 - redirect-chain preservation with stable lifecycle IDs, hop numbers, and sanitized previous-URL provenance, including Chromium proof that POST→307→POST keeps the sanitized request body associated with both hops while POST→303→GET does not leak the prior body onto the GET hop;
 - outbound JSON/form request-body capture with extension + daemon secret filtering;
@@ -157,5 +158,5 @@ Next:
 
 - cautiously expand conditional revalidation to additional private MIME/route families only when `cache private-coverage` shows meaningful validator-backed bytes and stable semantics;
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
-- capture additional browser transport classes only where Chromium exposes stable payload/provenance evidence that can be sanitized and encrypted without weakening the raw-evidence boundary;
+- evaluate additional browser transport classes only where Chromium exposes stable payload/provenance evidence that can be sanitized and encrypted without weakening the raw-evidence boundary; WebTransport currently exposes lifecycle events but no comparable frame-payload event in the CDP Network surface used here;
 - optional signed/package distribution if a future browser deployment path can preserve the current stable extension identity and native-host contract without adding service dependencies.
