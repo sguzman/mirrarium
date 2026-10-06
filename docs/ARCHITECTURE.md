@@ -122,11 +122,14 @@ Implemented:
 - privacy-bounded durable replay outcome telemetry with hit/miss/error/timeout/fulfillment buckets and replayed-byte totals;
 - Chromium cold-to-warm lifecycle proof covering initial misses, warm hits, saved bytes, and zero healthy-path replay errors;
 - private JSON read inventory with volatility, ETag/Last-Modified, cache-control, redacted-identity detection, and conservative revalidation-candidate classification;
+- verified private-CAS lookup with auth/no-store/query-free safety gates, 16 MiB ceiling, path/length/SHA-256 validation, and dedicated chunked native messaging;
+- response-stage conditional revalidation for exact query-free ChatGPT `/backend-api/` GETs: validators go to the real origin, verified local bytes are substituted only on origin `304`, and changed `200` bodies pass through and replace the next revalidation basis;
+- Chromium proof with browser cache disabled covering unchanged v1, changed v2, capture of v2, and subsequent v2 revalidation;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
 
 Next:
 
-- build verified private-read lookup plumbing and conditional network revalidation before considering any private replay;
+- extend conditional revalidation to exact non-sensitive query-bearing private GET identities without ever reusing redacted/tokenized query identities;
 - cautiously evaluate additional already-classified exact public static hosts only when observed evidence justifies them;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
