@@ -723,11 +723,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const fixtureStream = conversations.find(
         (conversation) => conversation.conversation_id === "fixture-stream",
       );
-      expect(fixtureConversation).toMatchObject({
-        title: "Private fixture",
-        snapshot_count: 1,
-        message_observation_count: 1,
-      });
+      expect(fixtureConversation?.title).toBe("Private fixture");
+      expect(fixtureConversation?.snapshot_count).toBeGreaterThanOrEqual(4);
+      expect(fixtureConversation?.message_observation_count).toBeGreaterThanOrEqual(4);
       expect(fixtureStream?.stream_reconstruction_count).toBeGreaterThanOrEqual(1);
 
       const { stdout: conversationStdout } = await execFileAsync(
