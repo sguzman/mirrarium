@@ -27,6 +27,24 @@ pub struct CacheCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateReadProfile {
+    pub url: String,
+    pub mime_type: String,
+    pub capture_count: u64,
+    pub distinct_body_hashes: u64,
+    pub latest_body_hash: String,
+    pub latest_body_bytes: u64,
+    pub latest_captured_at_ms: u64,
+    pub latest_etag: Option<String>,
+    pub latest_last_modified: Option<String>,
+    pub latest_cache_control: Option<String>,
+    pub has_validator: bool,
+    pub stable_so_far: bool,
+    pub revalidation_candidate: bool,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReplayEntry {
     pub url: String,
     pub resource_type: String,
@@ -58,6 +76,19 @@ pub struct CacheStats {
     pub eligible_urls: u64,
     pub ineligible_urls: u64,
     pub conflicting_urls: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PrivateReadAggregate {
+    mime_type: String,
+    capture_count: u64,
+    body_hashes: BTreeSet<String>,
+    latest_body_hash: String,
+    latest_body_bytes: u64,
+    latest_captured_at_ms: u64,
+    latest_etag: Option<String>,
+    latest_last_modified: Option<String>,
+    latest_cache_control: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +192,182 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
         ineligible_urls: unique_urls.saturating_sub(eligible_urls),
         conflicting_urls,
     })
+}
+
+pub fn private_reads(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<PrivateReadProfile>> {
+    anyhow::ensure!(limit > 0, "private-read limit must be greater than zero");
+    let database = raw_root.as_ref().join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+
+    let connection = Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            captured_at_ms,
+            url,
+            mime_type,
+            body_hash,
+            body_bytes,
+            etag,
+            last_modified,
+            cache_control
+        FROM captures
+        WHERE privacy_class = 'private'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND body_hash IS NOT NULL
+          AND body_error IS NULL
+          AND lower(mime_type) LIKE '%json%'
+        ORDER BY url, captured_at_ms, rowid
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+
+    let mut aggregates: BTreeMap<String, PrivateReadAggregate> = BTreeMap::new();
+    for row in rows {
+        let (
+            captured_at_ms,
+            url,
+            mime_type,
+            body_hash,
+            body_bytes,
+            etag,
+            last_modified,
+            cache_control,
+        ) = row?;
+        let captured_at_ms: u64 = captured_at_ms
+            .try_into()
+            .context("negative private-read timestamp")?;
+        let body_bytes: u64 = body_bytes
+            .try_into()
+            .context("negative private-read body byte count")?;
+
+        let aggregate = aggregates.entry(url).or_insert_with(|| PrivateReadAggregate {
+            mime_type: mime_type.clone(),
+            capture_count: 0,
+            body_hashes: BTreeSet::new(),
+            latest_body_hash: body_hash.clone(),
+            latest_body_bytes: body_bytes,
+            latest_captured_at_ms: captured_at_ms,
+            latest_etag: etag.clone(),
+            latest_last_modified: last_modified.clone(),
+            latest_cache_control: cache_control.clone(),
+        });
+        aggregate.capture_count = aggregate
+            .capture_count
+            .checked_add(1)
+            .context("private-read capture count overflow")?;
+        aggregate.body_hashes.insert(body_hash.clone());
+
+        if captured_at_ms >= aggregate.latest_captured_at_ms {
+            aggregate.mime_type = mime_type;
+            aggregate.latest_body_hash = body_hash;
+            aggregate.latest_body_bytes = body_bytes;
+            aggregate.latest_captured_at_ms = captured_at_ms;
+            aggregate.latest_etag = etag;
+            aggregate.latest_last_modified = last_modified;
+            aggregate.latest_cache_control = cache_control;
+        }
+    }
+
+    let mut profiles: Vec<PrivateReadProfile> = aggregates
+        .into_iter()
+        .map(|(url, aggregate)| private_read_profile(url, aggregate))
+        .collect();
+    profiles.sort_by(|left, right| {
+        right
+            .revalidation_candidate
+            .cmp(&left.revalidation_candidate)
+            .then_with(|| right.capture_count.cmp(&left.capture_count))
+            .then_with(|| left.url.cmp(&right.url))
+    });
+    profiles.truncate(limit.try_into().unwrap_or(usize::MAX));
+    Ok(profiles)
+}
+
+fn private_read_profile(
+    url: String,
+    aggregate: PrivateReadAggregate,
+) -> PrivateReadProfile {
+    let has_validator =
+        aggregate.latest_etag.is_some() || aggregate.latest_last_modified.is_some();
+    let mut reasons = Vec::new();
+
+    if !has_validator {
+        reasons.push("missing_http_validator".to_owned());
+    }
+
+    let cache_control = aggregate
+        .latest_cache_control
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if cache_control
+        .split(',')
+        .map(str::trim)
+        .any(|directive| directive == "no-store")
+    {
+        reasons.push("cache_control_no_store".to_owned());
+    }
+
+    match Url::parse(&url) {
+        Ok(parsed) => {
+            if parsed.scheme() != "https"
+                || !matches!(parsed.host_str(), Some("chatgpt.com" | "chat.openai.com"))
+            {
+                reasons.push("unsupported_private_origin".to_owned());
+            }
+            if parsed
+                .query_pairs()
+                .any(|(_, value)| value.as_ref() == "[REDACTED]")
+            {
+                reasons.push("redacted_query_identity".to_owned());
+            }
+        }
+        Err(_) => reasons.push("invalid_url".to_owned()),
+    }
+
+    let distinct_body_hashes = aggregate.body_hashes.len() as u64;
+    PrivateReadProfile {
+        url,
+        mime_type: aggregate.mime_type,
+        capture_count: aggregate.capture_count,
+        distinct_body_hashes,
+        latest_body_hash: aggregate.latest_body_hash,
+        latest_body_bytes: aggregate.latest_body_bytes,
+        latest_captured_at_ms: aggregate.latest_captured_at_ms,
+        latest_etag: aggregate.latest_etag,
+        latest_last_modified: aggregate.latest_last_modified,
+        latest_cache_control: aggregate.latest_cache_control,
+        has_validator,
+        stable_so_far: distinct_body_hashes == 1,
+        revalidation_candidate: reasons.is_empty(),
+        reasons,
+    }
 }
 
 pub fn lookup(
@@ -678,6 +885,102 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "url_observed_with_multiple_body_hashes"));
+    }
+
+    fn insert_private_json_capture(
+        connection: &Connection,
+        id: &str,
+        timestamp: i64,
+        url: &str,
+        hash: &str,
+        etag: Option<&str>,
+        cache_control: Option<&str>,
+    ) {
+        connection
+            .execute(
+                r#"
+                INSERT INTO captures (
+                    capture_id,
+                    captured_at_ms,
+                    method,
+                    url,
+                    status,
+                    mime_type,
+                    resource_type,
+                    privacy_class,
+                    body_hash,
+                    body_bytes,
+                    cache_control,
+                    etag,
+                    last_modified,
+                    body_error
+                ) VALUES (
+                    ?1, ?2, 'GET', ?3, 200, 'application/json', 'Fetch',
+                    'private', ?4, 24, ?5, ?6, NULL, NULL
+                )
+                "#,
+                params![id, timestamp, url, hash, cache_control, etag],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn private_read_inventory_identifies_revalidation_candidates() {
+        let (directory, connection) = open_fixture();
+        insert_private_json_capture(
+            &connection,
+            "private-one",
+            1,
+            "https://chatgpt.com/backend-api/conversation/a",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some(""v1""),
+            Some("private, max-age=0, must-revalidate"),
+        );
+        insert_private_json_capture(
+            &connection,
+            "private-two",
+            2,
+            "https://chatgpt.com/backend-api/conversation/a",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            Some(""v2""),
+            Some("private, max-age=0, must-revalidate"),
+        );
+
+        let profiles = private_reads(directory.path(), 20).unwrap();
+        assert_eq!(profiles.len(), 1);
+        let profile = &profiles[0];
+        assert!(profile.revalidation_candidate);
+        assert!(profile.has_validator);
+        assert!(!profile.stable_so_far);
+        assert_eq!(profile.capture_count, 2);
+        assert_eq!(profile.distinct_body_hashes, 2);
+        assert_eq!(profile.latest_etag.as_deref(), Some(""v2""));
+        assert!(profile.reasons.is_empty());
+    }
+
+    #[test]
+    fn private_read_inventory_rejects_no_store_and_redacted_identity() {
+        let (directory, connection) = open_fixture();
+        insert_private_json_capture(
+            &connection,
+            "private-no-store",
+            1,
+            "https://chatgpt.com/backend-api/items?token=%5BREDACTED%5D",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some(""v1""),
+            Some("no-store"),
+        );
+
+        let profile = private_reads(directory.path(), 20).unwrap().pop().unwrap();
+        assert!(!profile.revalidation_candidate);
+        assert!(profile
+            .reasons
+            .iter()
+            .any(|reason| reason == "cache_control_no_store"));
+        assert!(profile
+            .reasons
+            .iter()
+            .any(|reason| reason == "redacted_query_identity"));
     }
 
     #[test]
