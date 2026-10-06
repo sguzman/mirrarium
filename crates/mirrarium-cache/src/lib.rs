@@ -23,7 +23,10 @@ pub struct CacheCandidate {
     pub capture_count: u64,
     pub distinct_body_hashes: u64,
     pub eligible: bool,
+    pub replay_supported: bool,
+    pub expansion_candidate: bool,
     pub reasons: Vec<String>,
+    pub policy_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -115,6 +118,11 @@ pub struct CacheStats {
     pub eligible_urls: u64,
     pub ineligible_urls: u64,
     pub conflicting_urls: u64,
+    pub eligible_body_bytes: u64,
+    pub replay_supported_urls: u64,
+    pub replay_supported_body_bytes: u64,
+    pub expansion_candidate_urls: u64,
+    pub expansion_candidate_body_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -300,6 +308,29 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
         .iter()
         .filter(|item| item.distinct_body_hashes > 1)
         .count() as u64;
+    let eligible_body_bytes = candidates
+        .iter()
+        .filter(|item| item.eligible)
+        .map(|item| item.body_bytes)
+        .sum();
+    let replay_supported_urls = candidates
+        .iter()
+        .filter(|item| item.replay_supported)
+        .count() as u64;
+    let replay_supported_body_bytes = candidates
+        .iter()
+        .filter(|item| item.replay_supported)
+        .map(|item| item.body_bytes)
+        .sum();
+    let expansion_candidate_urls = candidates
+        .iter()
+        .filter(|item| item.expansion_candidate)
+        .count() as u64;
+    let expansion_candidate_body_bytes = candidates
+        .iter()
+        .filter(|item| item.expansion_candidate)
+        .map(|item| item.body_bytes)
+        .sum();
     let unique_urls = candidates.len() as u64;
 
     Ok(CacheStats {
@@ -308,6 +339,11 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
         eligible_urls,
         ineligible_urls: unique_urls.saturating_sub(eligible_urls),
         conflicting_urls,
+        eligible_body_bytes,
+        replay_supported_urls,
+        replay_supported_body_bytes,
+        expansion_candidate_urls,
+        expansion_candidate_body_bytes,
     })
 }
 
@@ -1215,6 +1251,22 @@ fn candidate_from_aggregate(url: String, aggregate: Aggregate) -> CacheCandidate
         reasons.push("url_observed_with_multiple_body_hashes".to_owned());
     }
 
+    let eligible = reasons.is_empty();
+    let mut policy_reasons = Vec::new();
+    if eligible {
+        if aggregate.body_bytes > MAX_REPLAY_BODY_BYTES {
+            policy_reasons.push("body_exceeds_replay_limit".to_owned());
+        }
+        if replayable_url(&url).is_none() {
+            policy_reasons.push("outside_current_replay_scope".to_owned());
+        }
+    }
+    let replay_supported = eligible && policy_reasons.is_empty();
+    let expansion_candidate = eligible
+        && aggregate.body_bytes <= MAX_REPLAY_BODY_BYTES
+        && policy_reasons.len() == 1
+        && policy_reasons[0] == "outside_current_replay_scope";
+
     CacheCandidate {
         url,
         resource_type: aggregate.resource_type,
@@ -1224,8 +1276,11 @@ fn candidate_from_aggregate(url: String, aggregate: Aggregate) -> CacheCandidate
         cache_control: aggregate.cache_control,
         capture_count: aggregate.capture_count,
         distinct_body_hashes,
-        eligible: reasons.is_empty(),
+        eligible,
+        replay_supported,
+        expansion_candidate,
         reasons,
+        policy_reasons,
     }
 }
 
@@ -1401,9 +1456,40 @@ mod tests {
         let items = candidates(directory.path(), 20).unwrap();
         assert_eq!(items.len(), 1);
         assert!(items[0].eligible);
+        assert!(items[0].replay_supported);
+        assert!(!items[0].expansion_candidate);
         assert_eq!(items[0].capture_count, 2);
         assert_eq!(items[0].distinct_body_hashes, 1);
         assert!(items[0].reasons.is_empty());
+        assert!(items[0].policy_reasons.is_empty());
+    }
+
+    #[test]
+    fn immutable_static_asset_outside_current_scope_is_an_expansion_candidate() {
+        let (directory, connection) = open_fixture();
+        insert_capture(
+            &connection,
+            "outside-scope",
+            1,
+            "https://static.openai.com/assets/app.js",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("public, max-age=31536000, immutable"),
+        );
+
+        let item = candidates(directory.path(), 20).unwrap().pop().unwrap();
+        assert!(item.eligible);
+        assert!(!item.replay_supported);
+        assert!(item.expansion_candidate);
+        assert_eq!(
+            item.policy_reasons,
+            vec!["outside_current_replay_scope".to_owned()]
+        );
+
+        let stats = stats(directory.path()).unwrap();
+        assert_eq!(stats.eligible_urls, 1);
+        assert_eq!(stats.replay_supported_urls, 0);
+        assert_eq!(stats.expansion_candidate_urls, 1);
+        assert_eq!(stats.expansion_candidate_body_bytes, 12);
     }
 
     #[test]
