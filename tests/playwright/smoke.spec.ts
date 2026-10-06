@@ -978,6 +978,25 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           },
         },
       );
+      const corpusDatabaseBytes = await readFile(
+        join(dataDir, "derived", "corpus.sqlite3"),
+      );
+      expect(
+        corpusDatabaseBytes.subarray(0, 16).toString("ascii"),
+      ).not.toBe("SQLite format 3\u0000");
+      const derivedFiles = await readFilesRecursively(join(dataDir, "derived"));
+      for (const plaintext of [
+        "private corpus material",
+        "fixture-conversation",
+        "hello world",
+      ]) {
+        const needle = Buffer.from(plaintext, "utf8");
+        expect(
+          derivedFiles.some((body) => body.includes(needle)),
+          `derived corpus leaked plaintext: ${plaintext}`,
+        ).toBe(false);
+      }
+
       const corpusStats = JSON.parse(corpusStdout) as {
         stream_captures: number;
         stream_events: number;
