@@ -1025,6 +1025,22 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         message: "server websocket fixture",
       });
 
+      await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(cliPath, ["stats"], {
+              env: {
+                ...childEnv,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            });
+            return (JSON.parse(stdout) as { websocket_frames: number })
+              .websocket_frames;
+          },
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThanOrEqual(5);
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "100"],
