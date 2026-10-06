@@ -102,6 +102,25 @@ pub struct VerifyReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateStorageStatus {
+    pub key_path: String,
+    pub key_exists: bool,
+    pub private_objects: u64,
+    pub encrypted_private_objects: u64,
+    pub legacy_plaintext_private_objects: u64,
+    pub missing_or_invalid_private_objects: u64,
+    pub migration_needed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateMigrationReport {
+    pub key_path: String,
+    pub migrated_objects: u64,
+    pub migrated_body_bytes: u64,
+    pub already_encrypted_objects: u64,
+}
+
 struct RequestBodyCapture {
     metadata: RequestBodyMetadata,
     bytes: Vec<u8>,
@@ -624,6 +643,154 @@ impl CaptureStore {
         )?;
 
         Ok(())
+    }
+
+    pub fn private_storage_status(&self) -> Result<PrivateStorageStatus> {
+        let key_path = private_key_path(&self.root)?;
+        let mut statement = self.connection.prepare(
+            "SELECT hash, relative_path FROM objects WHERE storage_class = 'private' ORDER BY hash",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut private_objects = 0_u64;
+        let mut encrypted_private_objects = 0_u64;
+        let mut legacy_plaintext_private_objects = 0_u64;
+        let mut missing_or_invalid_private_objects = 0_u64;
+
+        for row in rows {
+            let (hash, indexed_relative_path) = row?;
+            private_objects = private_objects
+                .checked_add(1)
+                .context("private object count overflow")?;
+
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                missing_or_invalid_private_objects += 1;
+                continue;
+            }
+
+            let expected_relative_path = object_relative_path(PrivacyClass::Private, &hash);
+            if Path::new(&indexed_relative_path) != expected_relative_path {
+                missing_or_invalid_private_objects += 1;
+                continue;
+            }
+
+            match fs::read(self.root.join(&expected_relative_path)) {
+                Ok(bytes) if bytes.starts_with(PRIVATE_OBJECT_MAGIC) => {
+                    encrypted_private_objects += 1;
+                }
+                Ok(_) => {
+                    legacy_plaintext_private_objects += 1;
+                }
+                Err(_) => {
+                    missing_or_invalid_private_objects += 1;
+                }
+            }
+        }
+
+        Ok(PrivateStorageStatus {
+            key_path: key_path.to_string_lossy().into_owned(),
+            key_exists: key_path.is_file(),
+            private_objects,
+            encrypted_private_objects,
+            legacy_plaintext_private_objects,
+            missing_or_invalid_private_objects,
+            migration_needed: legacy_plaintext_private_objects > 0,
+        })
+    }
+
+    pub fn migrate_private_storage(&self) -> Result<PrivateMigrationReport> {
+        let key_path = private_key_path(&self.root)?;
+        let mut statement = self.connection.prepare(
+            "SELECT hash, bytes, relative_path FROM objects WHERE storage_class = 'private' ORDER BY hash",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut migrated_objects = 0_u64;
+        let mut migrated_body_bytes = 0_u64;
+        let mut already_encrypted_objects = 0_u64;
+        let mut key: Option<[u8; PRIVATE_KEY_BYTES]> = None;
+
+        for row in rows {
+            let (hash, expected_bytes, indexed_relative_path) = row?;
+            anyhow::ensure!(
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "invalid private object hash {hash:?}"
+            );
+            anyhow::ensure!(expected_bytes >= 0, "negative private object byte count");
+
+            let relative_path = object_relative_path(PrivacyClass::Private, &hash);
+            anyhow::ensure!(
+                Path::new(&indexed_relative_path) == relative_path,
+                "private object path mismatch for {hash}"
+            );
+            let final_path = self.root.join(&relative_path);
+            let plaintext = fs::read(&final_path)
+                .with_context(|| format!("reading legacy private object {}", final_path.display()))?;
+
+            if plaintext.starts_with(PRIVATE_OBJECT_MAGIC) {
+                already_encrypted_objects = already_encrypted_objects
+                    .checked_add(1)
+                    .context("encrypted private object count overflow")?;
+                continue;
+            }
+
+            anyhow::ensure!(
+                plaintext.len() as i64 == expected_bytes,
+                "legacy private object {hash} has unexpected byte count"
+            );
+            anyhow::ensure!(
+                sha256_hex(&plaintext) == hash,
+                "legacy private object {hash} failed SHA-256 verification"
+            );
+
+            let key_ref = if let Some(existing) = key.as_ref() {
+                existing
+            } else {
+                key.insert(load_or_create_private_key(&self.root)?)
+            };
+            let envelope = encrypt_private_object_bytes(key_ref, &hash, &plaintext)?;
+
+            let temp_path = self
+                .root
+                .join(".incoming")
+                .join(format!("{hash}.private-migration.part"));
+            if temp_path.exists() {
+                fs::remove_file(&temp_path)
+                    .with_context(|| format!("removing stale migration file {}", temp_path.display()))?;
+            }
+            fs::write(&temp_path, &envelope)
+                .with_context(|| format!("writing private migration file {}", temp_path.display()))?;
+            harden_file(&temp_path)?;
+            fs::rename(&temp_path, &final_path).with_context(|| {
+                format!(
+                    "replacing legacy private object {} with encrypted envelope",
+                    final_path.display()
+                )
+            })?;
+            harden_file(&final_path)?;
+
+            migrated_objects = migrated_objects
+                .checked_add(1)
+                .context("migrated private object count overflow")?;
+            migrated_body_bytes = migrated_body_bytes
+                .checked_add(plaintext.len() as u64)
+                .context("migrated private byte count overflow")?;
+        }
+
+        Ok(PrivateMigrationReport {
+            key_path: key_path.to_string_lossy().into_owned(),
+            migrated_objects,
+            migrated_body_bytes,
+            already_encrypted_objects,
+        })
     }
 
     pub fn stats(&self) -> Result<StoreStats> {
@@ -2097,6 +2264,54 @@ mod tests {
             .join(object_relative_path(PrivacyClass::Private, &hash));
         fs::write(path, b"tampered").unwrap();
         assert!(read_verified_object(directory.path(), "private", &hash).is_err());
+    }
+
+    #[test]
+    fn private_storage_migration_encrypts_legacy_objects_idempotently() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+        let plaintext = b"legacy migration bytes";
+        let hash = sha256_hex(plaintext);
+        let relative_path = object_relative_path(PrivacyClass::Private, &hash);
+        let path = directory.path().join(&relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, plaintext).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('private', ?1, ?2, ?3, 1)",
+                params![
+                    hash,
+                    plaintext.len() as i64,
+                    relative_path.to_string_lossy().to_string()
+                ],
+            )
+            .unwrap();
+
+        let before = store.private_storage_status().unwrap();
+        assert_eq!(before.private_objects, 1);
+        assert_eq!(before.legacy_plaintext_private_objects, 1);
+        assert!(before.migration_needed);
+
+        let report = store.migrate_private_storage().unwrap();
+        assert_eq!(report.migrated_objects, 1);
+        assert_eq!(report.migrated_body_bytes, plaintext.len() as u64);
+
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.starts_with(PRIVATE_OBJECT_MAGIC));
+        assert_eq!(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+            plaintext
+        );
+
+        let after = store.private_storage_status().unwrap();
+        assert_eq!(after.encrypted_private_objects, 1);
+        assert_eq!(after.legacy_plaintext_private_objects, 0);
+        assert!(!after.migration_needed);
+
+        let second = store.migrate_private_storage().unwrap();
+        assert_eq!(second.migrated_objects, 0);
+        assert_eq!(second.already_encrypted_objects, 1);
     }
 
     #[test]

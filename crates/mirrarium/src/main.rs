@@ -59,6 +59,26 @@ fn run() -> Result<()> {
                 report.corrupt_objects
             );
         }
+        Some("privacy") => match arguments.get(1).map(String::as_str) {
+            Some("status") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.private_storage_status()?)?
+                );
+            }
+            Some("migrate") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.migrate_private_storage()?)?
+                );
+            }
+            Some(command) => anyhow::bail!(
+                "unknown privacy command {command:?}; use status or migrate"
+            ),
+            None => anyhow::bail!(
+                "missing privacy command; use 'mirrarium privacy status' or 'mirrarium privacy migrate'"
+            ),
+        },
         Some("cache") => match arguments.get(1).map(String::as_str) {
             Some("opportunities") => {
                 println!(
@@ -407,6 +427,8 @@ USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
   mirrarium verify
+  mirrarium privacy status
+  mirrarium privacy migrate
   mirrarium cache opportunities
   mirrarium cache stats
   mirrarium cache replay-stats
@@ -432,7 +454,13 @@ NATIVE HOST:
 
 DATA ROOT:
   MIRRARIUM_DATA_DIR, then XDG_DATA_HOME/mirrarium,
-  then ~/.local/share/mirrarium"
+  then ~/.local/share/mirrarium
+
+PRIVATE KEY:
+  MIRRARIUM_PRIVATE_KEY_FILE overrides the key path.
+  Explicit MIRRARIUM_DATA_DIR instances keep a key under .keys/private.key;
+  zero-config installs use XDG_CONFIG_HOME/mirrarium/private.key or
+  ~/.config/mirrarium/private.key."
     );
 }
 
