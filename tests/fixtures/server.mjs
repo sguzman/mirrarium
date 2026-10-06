@@ -20,6 +20,8 @@ let privateConversationConditional304s = 0;
 let privateConversationVersion = 1;
 let privateQueryHits = 0;
 let privateQueryConditional304s = 0;
+let privateDocumentHits = 0;
+let privateDocumentConditional304s = 0;
 
 execFileSync("openssl", [
   "req",
@@ -454,7 +456,32 @@ const fixtureServer = https.createServer(
       return;
     }
 
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (request.url === "/") {
+      privateDocumentHits += 1;
+      const etag = "\"fixture-document-v1\"";
+      if (request.headers["if-none-match"] === etag) {
+        privateDocumentConditional304s += 1;
+        response.writeHead(304, {
+          etag,
+          "cache-control": "private, max-age=0, must-revalidate",
+          "x-mirrarium-origin-304": "preserved",
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        etag,
+        "cache-control": "private, max-age=0, must-revalidate",
+      });
+      response.end(page);
+      return;
+    }
+
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
     response.end(page);
   },
 );
@@ -464,6 +491,15 @@ const healthServer = http.createServer((request, response) => {
     privateConversationVersion += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ version: privateConversationVersion }));
+    return;
+  }
+
+  if (request.url === "/private-document-counts") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      total: privateDocumentHits,
+      conditional_304: privateDocumentConditional304s,
+    }));
     return;
   }
 

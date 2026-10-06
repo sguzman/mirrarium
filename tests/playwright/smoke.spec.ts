@@ -277,6 +277,54 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         reasons: [],
       });
 
+      const fixtureDocumentRead = privateReads.find(
+        (item) => item.url === "https://chatgpt.com:43117/",
+      );
+      expect(fixtureDocumentRead).toBeTruthy();
+      expect(fixtureDocumentRead).toMatchObject({
+        mime_type: "text/html; charset=utf-8",
+        has_validator: true,
+        stable_so_far: true,
+        revalidation_candidate: true,
+        latest_etag: "\"fixture-document-v1\"",
+        reasons: [],
+      });
+
+      const documentCountsBefore = (await fetch(
+        "http://127.0.0.1:43118/private-document-counts",
+      ).then((response) => response.json())) as {
+        total: number;
+        conditional_304: number;
+      };
+      const documentSession = await context.newCDPSession(page);
+      try {
+        await documentSession.send("Network.enable");
+        await documentSession.send("Network.setCacheDisabled", {
+          cacheDisabled: true,
+        });
+        const reloaded = await page.reload({ waitUntil: "load" });
+        expect(reloaded?.status()).toBe(200);
+        expect(reloaded?.headers()["x-mirrarium-revalidated"]).toBe("hit");
+        expect(reloaded?.headers()["x-mirrarium-origin-304"]).toBe("preserved");
+        await expect(page).toHaveTitle("Mirrarium fixture");
+        await expect
+          .poll(() => page.locator("body").getAttribute("data-ready"))
+          .toBe("yes");
+      } finally {
+        await documentSession.detach();
+      }
+
+      const documentCountsAfter = (await fetch(
+        "http://127.0.0.1:43118/private-document-counts",
+      ).then((response) => response.json())) as {
+        total: number;
+        conditional_304: number;
+      };
+      expect(documentCountsAfter.total).toBe(documentCountsBefore.total + 1);
+      expect(documentCountsAfter.conditional_304).toBe(
+        documentCountsBefore.conditional_304 + 1,
+      );
+
       const replayCountsBefore = (await fetch(
         "http://127.0.0.1:43118/replay-counts",
       ).then((response) => response.json())) as {
