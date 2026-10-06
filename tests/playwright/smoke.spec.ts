@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { chromium, expect, test, type BrowserContext } from "@playwright/test";
+import { chromium, expect, test, type BrowserContext, type Page } from "@playwright/test";
 
 const execFileAsync = promisify(execFile);
 const nativeHostName = "com.sguzman.mirrarium";
@@ -41,17 +41,23 @@ async function readFilesRecursively(directory: string): Promise<Buffer[]> {
 
 async function extensionWorkerBuildIdsViaCdp(
   context: BrowserContext,
+  page: Page,
 ): Promise<string[]> {
   const browser = context.browser();
   if (!browser) return [];
 
-  const cdp = await browser.newBrowserCDPSession();
+  const serviceWorkerCdp = await context.newCDPSession(page);
   try {
-    await cdp.send("ServiceWorker.enable");
-    await cdp.send("ServiceWorker.startWorker", {
+    await serviceWorkerCdp.send("ServiceWorker.enable");
+    await serviceWorkerCdp.send("ServiceWorker.startWorker", {
       scopeURL: `chrome-extension://${expectedExtensionId}/`,
     });
+  } finally {
+    await serviceWorkerCdp.detach();
+  }
 
+  const cdp = await browser.newBrowserCDPSession();
+  try {
     const { targetInfos } = (await cdp.send("Target.getTargets")) as {
       targetInfos: Array<{
         targetId: string;
@@ -1650,7 +1656,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       await expect
         .poll(
-          async () => (await extensionWorkerBuildIdsViaCdp(context)).join(","),
+          async () => (await extensionWorkerBuildIdsViaCdp(context, page)).join(","),
           { timeout: 10_000 },
         )
         .toContain(updatedBuildId);
