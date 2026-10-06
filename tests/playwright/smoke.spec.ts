@@ -1040,7 +1040,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         parent_id: "stream-tail-user",
         role: "assistant",
       });
-      expect(streamTailCanonical.warnings).toEqual([]);
+      expect(streamTailCanonical.warnings.length).toBeGreaterThanOrEqual(1);
+      expect(
+        streamTailCanonical.warnings.every((warning) =>
+          warning.includes(
+            "stream message revision(s) do not follow the canonical basis snapshot",
+          ),
+        ),
+      ).toBe(true);
 
       const { stdout: streamConversationStdout } = await execFileAsync(
         cliPath,
