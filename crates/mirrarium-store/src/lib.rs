@@ -1439,7 +1439,7 @@ fn database_user_table_counts(connection: &Connection) -> Result<BTreeMap<String
 
     let mut counts = BTreeMap::new();
     for table in tables {
-        let quoted = table.replace('"', """");
+        let quoted = table.replace('"', "\"\"");
         let count: i64 = connection.query_row(
             &format!("SELECT COUNT(*) FROM \"{quoted}\""),
             [],
@@ -1453,7 +1453,9 @@ fn database_user_table_counts(connection: &Connection) -> Result<BTreeMap<String
     Ok(counts)
 }
 
-fn database_schema_fingerprint(connection: &Connection) -> Result<Vec<(String, String, String, Option<String>)>> {
+fn database_schema_fingerprint(
+    connection: &Connection,
+) -> Result<Vec<(String, String, String, Option<String>)>> {
     let mut statement = connection.prepare(
         r#"
         SELECT type, name, tbl_name, sql
@@ -1462,18 +1464,17 @@ fn database_schema_fingerprint(connection: &Connection) -> Result<Vec<(String, S
         ORDER BY type, name
         "#,
     )?;
-    Ok(statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let fingerprint = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(fingerprint)
 }
-
 fn verify_database_integrity(connection: &Connection) -> Result<()> {
     let result: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
