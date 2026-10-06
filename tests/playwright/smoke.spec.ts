@@ -102,7 +102,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       args: [
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
-        "--host-resolver-rules=MAP chatgpt.com 127.0.0.1",
+        "--host-resolver-rules=MAP chatgpt.com 127.0.0.1, MAP cdn.oaistatic.com 127.0.0.1",
         "--no-proxy-server",
       ],
     });
@@ -218,6 +218,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         "/_next/static/app.css",
         "/_next/static/pixel.svg",
         "/_next/static/fixture.woff2",
+        "/assets/cdn-app.js",
       ]) {
         const candidate = cacheCandidates.find((item) => item.url.endsWith(suffix));
         expect(candidate, `missing cache candidate for ${suffix}`).toBeTruthy();
@@ -235,11 +236,13 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         js: number;
         image: number;
         font: number;
+        cdn_js: number;
       };
       expect(replayCountsBefore.css).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.js).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.image).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.font).toBeGreaterThanOrEqual(1);
+      expect(replayCountsBefore.cdn_js).toBeGreaterThanOrEqual(1);
 
       const replaySession = await context.newCDPSession(page);
       try {
@@ -273,23 +276,33 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           { timeout: 10_000 },
         );
 
+        const cdnScriptHit = page.waitForResponse(
+          (response) =>
+            response.url().includes("cdn.oaistatic.com:43117/assets/cdn-app.js") &&
+            response.headers()["x-mirrarium-cache"] === "hit",
+          { timeout: 10_000 },
+        );
+
         const [
           ,
           scriptResponse,
           stylesheetResponse,
           imageResponse,
           fontResponse,
+          cdnScriptResponse,
         ] = await Promise.all([
           page.goto("https://chatgpt.com:43117/replay-probe"),
           scriptHit,
           stylesheetHit,
           imageHit,
           fontHit,
+          cdnScriptHit,
         ]);
         expect(scriptResponse.status()).toBe(200);
         expect(stylesheetResponse.status()).toBe(200);
         expect(imageResponse.status()).toBe(200);
         expect(fontResponse.status()).toBe(200);
+        expect(cdnScriptResponse.status()).toBe(200);
       } finally {
         await replaySession.detach();
       }
@@ -301,6 +314,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         js: number;
         image: number;
         font: number;
+        cdn_js: number;
       };
       expect(replayCountsAfter).toEqual(replayCountsBefore);
 
@@ -329,10 +343,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       await expect
         .poll(async () => (await readReplayStats()).hits, { timeout: 10_000 })
-        .toBeGreaterThanOrEqual(4);
+        .toBeGreaterThanOrEqual(5);
       const replayStats = await readReplayStats();
-      expect(replayStats.attempts).toBeGreaterThanOrEqual(8);
-      expect(replayStats.hits).toBeGreaterThanOrEqual(4);
+      expect(replayStats.attempts).toBeGreaterThanOrEqual(10);
+      expect(replayStats.hits).toBeGreaterThanOrEqual(5);
       expect(replayStats.misses).toBeGreaterThanOrEqual(4);
       expect(replayStats.replayed_bytes).toBeGreaterThan(0);
       expect(replayStats.lookup_errors).toBe(0);

@@ -14,6 +14,7 @@ let staticCssHits = 0;
 let staticJsHits = 0;
 let staticImageHits = 0;
 let staticFontHits = 0;
+let cdnJsHits = 0;
 
 execFileSync("openssl", [
   "req",
@@ -30,7 +31,7 @@ execFileSync("openssl", [
   "-subj",
   "/CN=chatgpt.com",
   "-addext",
-  "subjectAltName=DNS:chatgpt.com",
+  "subjectAltName=DNS:chatgpt.com,DNS:cdn.oaistatic.com",
 ], { stdio: "ignore" });
 
 const page = `<!doctype html>
@@ -40,6 +41,7 @@ const page = `<!doctype html>
 <h1>fixture</h1>
 <img alt="fixture pixel" src="/_next/static/pixel.svg">
 <script src="/_next/static/app.js"></script>
+<script src="https://cdn.oaistatic.com:43117/assets/cdn-app.js"></script>
 <script>
 const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
@@ -104,6 +106,7 @@ const replayProbe = `<!doctype html>
 <link rel="stylesheet" href="/_next/static/app.css">
 <img alt="replay pixel" src="/_next/static/pixel.svg">
 <script src="/_next/static/app.js"></script>
+<script src="https://cdn.oaistatic.com:43117/assets/cdn-app.js"></script>
 <h1>replay probe</h1>`;
 
 const fixtureServer = https.createServer(
@@ -158,6 +161,19 @@ const fixtureServer = https.createServer(
       response.end(
         '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>',
       );
+      return;
+    }
+
+    if (
+      request.url === "/assets/cdn-app.js" &&
+      request.headers.host?.startsWith("cdn.oaistatic.com:")
+    ) {
+      cdnJsHits += 1;
+      response.writeHead(200, {
+        "content-type": "application/javascript",
+        "cache-control": "public, max-age=31536000, immutable",
+      });
+      response.end("globalThis.__mirrariumCdnFixtureLoaded = true;");
       return;
     }
 
@@ -402,6 +418,7 @@ const healthServer = http.createServer((request, response) => {
       js: staticJsHits,
       image: staticImageHits,
       font: staticFontHits,
+      cdn_js: cdnJsHits,
     }));
     return;
   }
