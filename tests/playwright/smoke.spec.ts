@@ -1220,7 +1220,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           capture.url.includes("/backend-api/ws-fixture"),
       );
       const websocketReceivedJson = websocketReceived.find(
-        (capture) => capture.mime_type === "application/json",
+        (capture) =>
+          capture.mime_type === "application/json" &&
+          !capture.body_error &&
+          !!capture.body_hash,
       );
       const websocketReceivedPlain = websocketReceived.find(
         (capture) => capture.mime_type === "text/plain; charset=utf-8",
