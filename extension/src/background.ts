@@ -3,6 +3,8 @@ const CDP_VERSION = "1.3";
 const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
+const RUNNING_BUILD_ID =
+  chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version;
 
 type RequestMetadata = {
   method: string;
@@ -103,6 +105,7 @@ const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
 let nativePort: chrome.runtime.Port | undefined;
+let extensionReloadRequested = false;
 
 function requestKey(tabId: number, requestId: string): string {
   return `${tabId}:${requestId}`;
@@ -176,6 +179,26 @@ function handleNativeMessage(message: unknown): void {
 
   if (type === "error") {
     console.error("Mirrarium native host error", message);
+    return;
+  }
+
+  if (type === "extension_install_state") {
+    const installedBuildId =
+      typeof record.build_id === "string" ? record.build_id : undefined;
+    if (
+      installedBuildId &&
+      installedBuildId !== RUNNING_BUILD_ID &&
+      !extensionReloadRequested
+    ) {
+      extensionReloadRequested = true;
+      console.info(
+        "Mirrarium extension update detected",
+        RUNNING_BUILD_ID,
+        "->",
+        installedBuildId,
+      );
+      chrome.runtime.reload();
+    }
     return;
   }
 
@@ -409,6 +432,10 @@ function postNative(message: unknown): void {
     if (nativePort === port) nativePort = undefined;
     console.warn("Mirrarium could not send to native host", error);
   }
+}
+
+function checkInstalledExtensionVersion(): void {
+  postNative({ type: "extension_install_state" });
 }
 
 function recordReplayOutcome(
@@ -850,7 +877,9 @@ async function handlePausedRequest(
 }
 
 async function attach(tabId: number, url: string | undefined): Promise<void> {
-  if (!isSupportedChatGptUrl(url) || attachedTabs.has(tabId)) return;
+  if (!isSupportedChatGptUrl(url)) return;
+  checkInstalledExtensionVersion();
+  if (attachedTabs.has(tabId)) return;
 
   let debuggerAttached = false;
   try {
