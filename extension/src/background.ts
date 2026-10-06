@@ -62,6 +62,26 @@ type PendingCacheLookup = {
   nextSequence: number;
 };
 
+type PrivateReadHit = {
+  mimeType: string;
+  bodyHash: string;
+  bodyBytes: number;
+  capturedAtMs: number;
+  cacheControl?: string;
+  etag?: string;
+  lastModified?: string;
+  bodyBase64: string;
+};
+
+type PendingPrivateReadLookup = {
+  resolve: (hit: PrivateReadHit | null) => void;
+  timeoutId: number;
+  url: string;
+  metadata?: Omit<PrivateReadHit, "bodyBase64">;
+  chunks: string[];
+  nextSequence: number;
+};
+
 type CdpResponse = {
   url: string;
   status: number;
@@ -80,6 +100,7 @@ const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
+const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 let nativePort: chrome.runtime.Port | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -123,9 +144,23 @@ function finishCacheLookup(
   pending.resolve(hit);
 }
 
+function finishPrivateReadLookup(
+  lookupId: string,
+  hit: PrivateReadHit | null,
+): void {
+  const pending = pendingPrivateReadLookups.get(lookupId);
+  if (!pending) return;
+  clearTimeout(pending.timeoutId);
+  pendingPrivateReadLookups.delete(lookupId);
+  pending.resolve(hit);
+}
+
 function failAllCacheLookups(): void {
   for (const lookupId of Array.from(pendingCacheLookups.keys())) {
     finishCacheLookup(lookupId, null);
+  }
+  for (const lookupId of Array.from(pendingPrivateReadLookups.keys())) {
+    finishPrivateReadLookup(lookupId, null);
   }
 }
 
@@ -142,6 +177,111 @@ function handleNativeMessage(message: unknown): void {
   const lookupId =
     typeof record.lookup_id === "string" ? record.lookup_id : undefined;
   if (!lookupId) return;
+  const privatePending = pendingPrivateReadLookups.get(lookupId);
+  if (privatePending) {
+    if (type === "private_read_miss") {
+      finishPrivateReadLookup(lookupId, null);
+      return;
+    }
+
+    if (type === "private_read_lookup_error") {
+      console.warn("Mirrarium private-read lookup failed", record.message);
+      finishPrivateReadLookup(lookupId, null);
+      return;
+    }
+
+    if (type === "private_read_hit_start") {
+      const mimeType =
+        typeof record.mime_type === "string" ? record.mime_type : undefined;
+      const bodyHash =
+        typeof record.body_hash === "string" ? record.body_hash : undefined;
+      const bodyBytes =
+        typeof record.body_bytes === "number" &&
+        Number.isSafeInteger(record.body_bytes) &&
+        record.body_bytes >= 0
+          ? record.body_bytes
+          : undefined;
+      const capturedAtMs =
+        typeof record.captured_at_ms === "number" &&
+        Number.isSafeInteger(record.captured_at_ms) &&
+        record.captured_at_ms >= 0
+          ? record.captured_at_ms
+          : undefined;
+      if (
+        !mimeType ||
+        !bodyHash ||
+        bodyBytes === undefined ||
+        capturedAtMs === undefined
+      ) {
+        finishPrivateReadLookup(lookupId, null);
+        return;
+      }
+      privatePending.metadata = {
+        mimeType,
+        bodyHash,
+        bodyBytes,
+        capturedAtMs,
+        cacheControl:
+          typeof record.cache_control === "string"
+            ? record.cache_control
+            : undefined,
+        etag: typeof record.etag === "string" ? record.etag : undefined,
+        lastModified:
+          typeof record.last_modified === "string"
+            ? record.last_modified
+            : undefined,
+      };
+      privatePending.chunks = [];
+      privatePending.nextSequence = 0;
+      return;
+    }
+
+    if (type === "private_read_hit_chunk") {
+      const sequence =
+        typeof record.sequence === "number" &&
+        Number.isSafeInteger(record.sequence) &&
+        record.sequence >= 0
+          ? record.sequence
+          : undefined;
+      const dataBase64 =
+        typeof record.data_base64 === "string" ? record.data_base64 : undefined;
+      if (
+        !privatePending.metadata ||
+        sequence === undefined ||
+        sequence !== privatePending.nextSequence ||
+        dataBase64 === undefined
+      ) {
+        finishPrivateReadLookup(lookupId, null);
+        return;
+      }
+      privatePending.chunks.push(dataBase64);
+      privatePending.nextSequence += 1;
+      return;
+    }
+
+    if (type === "private_read_hit_finish") {
+      if (!privatePending.metadata) {
+        finishPrivateReadLookup(lookupId, null);
+        return;
+      }
+      const bodyBase64 = privatePending.chunks.join("");
+      const expectedBase64Length =
+        Math.ceil(privatePending.metadata.bodyBytes / 3) * 4;
+      if (bodyBase64.length !== expectedBase64Length) {
+        console.warn("Mirrarium private-read chunk length mismatch", lookupId);
+        finishPrivateReadLookup(lookupId, null);
+        return;
+      }
+      finishPrivateReadLookup(lookupId, {
+        ...privatePending.metadata,
+        bodyBase64,
+      });
+      return;
+    }
+
+    return;
+  }
+
   const pending = pendingCacheLookups.get(lookupId);
   if (!pending) return;
 
@@ -314,6 +454,37 @@ function lookupCachedResponse(
       if (nativePort === port) nativePort = undefined;
       console.warn("Mirrarium could not query local cache", error);
       finishCacheLookup(lookupId, null);
+    }
+  });
+}
+
+function lookupPrivateRead(url: string): Promise<PrivateReadHit | null> {
+  const port = getNativePort();
+  if (!port) return Promise.resolve(null);
+
+  const lookupId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      finishPrivateReadLookup(lookupId, null);
+    }, CACHE_LOOKUP_TIMEOUT_MS);
+    pendingPrivateReadLookups.set(lookupId, {
+      resolve,
+      timeoutId,
+      url,
+      chunks: [],
+      nextSequence: 0,
+    });
+
+    try {
+      port.postMessage({
+        type: "private_read_lookup",
+        lookup_id: lookupId,
+        url,
+      });
+    } catch (error) {
+      if (nativePort === port) nativePort = undefined;
+      console.warn("Mirrarium could not query private read cache", error);
+      finishPrivateReadLookup(lookupId, null);
     }
   });
 }
