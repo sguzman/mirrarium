@@ -25,6 +25,7 @@ use url::Url;
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES: u64 = 1024 * 1024;
+const MAX_EVENTSOURCE_MESSAGE_BYTES: u64 = 1024 * 1024;
 const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
 const PRIVATE_STREAM_MAGIC: &[u8; 8] = b"MIRRPV02";
 const PRIVATE_KEY_BYTES: usize = 32;
@@ -80,6 +81,10 @@ pub struct StoreStats {
     pub websocket_frame_body_bytes: u64,
     pub websocket_frame_errors: u64,
     pub suppressed_websocket_frames: u64,
+    pub eventsource_messages: u64,
+    pub eventsource_message_body_bytes: u64,
+    pub eventsource_message_errors: u64,
+    pub suppressed_eventsource_messages: u64,
     pub request_bodies: u64,
     pub request_body_bytes: u64,
     pub request_body_errors: u64,
@@ -458,10 +463,17 @@ impl CaptureStore {
             .bytes
             .checked_add(bytes.len() as u64)
             .context("capture byte count overflow")?;
-        if capture.metadata.resource_type == "WebSocketFrame"
-            && next_bytes > MAX_WEBSOCKET_FRAME_BYTES
-        {
-            capture.suppressed_reason = Some("websocket_text_frame_too_large".to_owned());
+        let oversized_reason = match capture.metadata.resource_type.as_str() {
+            "WebSocketFrame" if next_bytes > MAX_WEBSOCKET_FRAME_BYTES => {
+                Some("websocket_text_frame_too_large")
+            }
+            "EventSourceMessage" if next_bytes > MAX_EVENTSOURCE_MESSAGE_BYTES => {
+                Some("eventsource_message_too_large")
+            }
+            _ => None,
+        };
+        if let Some(reason) = oversized_reason {
+            capture.suppressed_reason = Some(reason.to_owned());
             capture.next_sequence = capture
                 .next_sequence
                 .checked_add(1)
@@ -972,6 +984,22 @@ impl CaptureStore {
                 &self.connection,
                 "SELECT COUNT(*) FROM captures WHERE resource_type = 'WebSocketFrame' AND body_error LIKE 'suppressed:%'",
             )?,
+            eventsource_messages: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE resource_type = 'EventSourceMessage'",
+            )?,
+            eventsource_message_body_bytes: scalar_u64(
+                &self.connection,
+                "SELECT COALESCE(SUM(body_bytes), 0) FROM captures WHERE resource_type = 'EventSourceMessage'",
+            )?,
+            eventsource_message_errors: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE resource_type = 'EventSourceMessage' AND body_error IS NOT NULL AND body_error NOT LIKE 'suppressed:%'",
+            )?,
+            suppressed_eventsource_messages: scalar_u64(
+                &self.connection,
+                "SELECT COUNT(*) FROM captures WHERE resource_type = 'EventSourceMessage' AND body_error LIKE 'suppressed:%'",
+            )?,
             request_bodies: scalar_u64(
                 &self.connection,
                 "SELECT COUNT(*) FROM request_bodies",
@@ -1267,6 +1295,62 @@ impl CaptureStore {
                     }
                 }
                 Err(_) => violations.push(format!("WebSocketFrame URL is invalid: {url:?}")),
+            }
+
+            if !violations.is_empty() {
+                report.invalid_captures = report
+                    .invalid_captures
+                    .checked_add(1)
+                    .context("invalid capture count overflow")?;
+                report.errors.push(format!(
+                    "capture {capture_id}: {}",
+                    violations.join("; ")
+                ));
+            }
+        }
+
+        let mut eventsource_statement = self.connection.prepare(
+            "SELECT capture_id, method, url, privacy_class FROM captures WHERE resource_type = 'EventSourceMessage' ORDER BY capture_id",
+        )?;
+        let eventsource_rows = eventsource_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        for row in eventsource_rows {
+            let (capture_id, method, url, privacy_class) = row?;
+            report.checked_capture_invariants = report
+                .checked_capture_invariants
+                .checked_add(1)
+                .context("capture invariant count overflow")?;
+            let mut violations = Vec::new();
+
+            if privacy_class != "private" {
+                violations.push(format!("EventSourceMessage has privacy class {privacy_class:?}"));
+            }
+            if method != "SSE_RECV" {
+                violations.push(format!("EventSourceMessage has invalid method {method:?}"));
+            }
+
+            match Url::parse(&url) {
+                Ok(parsed) => {
+                    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+                    if parsed.scheme() != "https" || !is_chatgpt_host(&host) {
+                        violations.push(format!("EventSourceMessage has invalid URL identity {url:?}"));
+                    }
+                    for (key, value) in parsed.query_pairs() {
+                        if is_sensitive_query_key(&key) && value != "[REDACTED]" {
+                            violations.push(format!(
+                                "EventSourceMessage sensitive query key {key:?} is not redacted"
+                            ));
+                        }
+                    }
+                }
+                Err(_) => violations.push(format!("EventSourceMessage URL is invalid: {url:?}")),
             }
 
             if !violations.is_empty() {
@@ -3335,6 +3419,62 @@ mod tests {
     }
 
     #[test]
+    fn eventsource_messages_are_counted_and_bounded() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+
+        let mut archived = metadata(
+            "sse-message",
+            "https://chatgpt.com/backend-api/events?token=secret",
+            "EventSourceMessage",
+        );
+        archived.method = "SSE_RECV".to_owned();
+        archived.mime_type = "text/event-stream; charset=utf-8".to_owned();
+        store.begin(archived).unwrap();
+        let body = b"event: delta\nid: 1\ndata: {\"message\":\"hello\"}\n\n";
+        store
+            .append_chunk("sse-message", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish("sse-message", Some(body.len() as u64), None)
+            .unwrap();
+
+        let mut oversized = metadata(
+            "sse-too-large",
+            "https://chatgpt.com/backend-api/events",
+            "EventSourceMessage",
+        );
+        oversized.method = "SSE_RECV".to_owned();
+        oversized.mime_type = "text/event-stream; charset=utf-8".to_owned();
+        store.begin(oversized).unwrap();
+        let chunk = vec![b'x'; 384 * 1024];
+        for sequence in 0..3 {
+            store
+                .append_chunk(
+                    "sse-too-large",
+                    sequence,
+                    &BASE64.encode(&chunk),
+                )
+                .unwrap();
+        }
+        store.finish("sse-too-large", None, None).unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.eventsource_messages, 2);
+        assert_eq!(stats.eventsource_message_body_bytes, body.len() as u64);
+        assert_eq!(stats.eventsource_message_errors, 0);
+        assert_eq!(stats.suppressed_eventsource_messages, 1);
+
+        let captures = store.recent_captures(10).unwrap();
+        let too_large = captures
+            .iter()
+            .find(|capture| capture.body_error.as_deref() == Some("suppressed:eventsource_message_too_large"))
+            .unwrap();
+        assert!(too_large.body_hash.is_none());
+        assert_eq!(too_large.body_bytes, 0);
+    }
+
+    #[test]
     fn websocket_stats_separate_archived_and_suppressed_frames() {
         let directory = tempdir().unwrap();
         let mut store = CaptureStore::open(directory.path()).unwrap();
@@ -3408,6 +3548,60 @@ mod tests {
             .connection
             .execute(
                 "UPDATE captures SET method = 'GET', url = 'https://example.test/socket?token=secret', privacy_class = 'public' WHERE capture_id = 'ws-verify'",
+                [],
+            )
+            .unwrap();
+
+        let broken = store.verify().unwrap();
+        assert_eq!(broken.checked_capture_invariants, 1);
+        assert_eq!(broken.invalid_captures, 1);
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("privacy class")));
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid method")));
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid URL identity")));
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("not redacted")));
+    }
+
+    #[test]
+    fn verify_rejects_eventsource_privacy_method_and_url_invariant_breaks() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+
+        let mut item = metadata(
+            "sse-verify",
+            "https://chatgpt.com/backend-api/events?token=%5BREDACTED%5D&keep=yes",
+            "EventSourceMessage",
+        );
+        item.method = "SSE_RECV".to_owned();
+        item.mime_type = "text/event-stream; charset=utf-8".to_owned();
+        store.begin(item).unwrap();
+        let body = b"data: {\"message\":\"verified\"}\n\n";
+        store
+            .append_chunk("sse-verify", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish("sse-verify", Some(body.len() as u64), None)
+            .unwrap();
+
+        let clean = store.verify().unwrap();
+        assert_eq!(clean.checked_capture_invariants, 1);
+        assert_eq!(clean.invalid_captures, 0);
+
+        store
+            .connection
+            .execute(
+                "UPDATE captures SET method = 'GET', url = 'https://example.test/events?token=secret', privacy_class = 'public' WHERE capture_id = 'sse-verify'",
                 [],
             )
             .unwrap();

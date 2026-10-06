@@ -355,6 +355,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         FROM captures
         WHERE body_hash IS NOT NULL
           AND lower(mime_type) LIKE 'text/event-stream%'
+          AND resource_type != 'EventSourceMessage'
         ORDER BY captured_at_ms, capture_id
         "#,
     )?;
@@ -366,6 +367,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         FROM captures
         WHERE body_hash IS NOT NULL
           AND lower(mime_type) LIKE '%json%'
+          AND resource_type NOT IN ('WebSocketFrame', 'EventSourceMessage')
         ORDER BY captured_at_ms, capture_id
         "#,
     )?;

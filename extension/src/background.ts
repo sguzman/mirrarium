@@ -4,6 +4,7 @@ const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
 const MAX_WEBSOCKET_JSON_FRAME_BYTES = 1024 * 1024;
+const MAX_EVENTSOURCE_MESSAGE_BYTES = 1024 * 1024;
 const RUNNING_BUILD_ID =
   chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version;
 
@@ -120,6 +121,7 @@ const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
 const webSockets = new Map<string, WebSocketMetadata>();
+const eventSourceSequences = new Map<string, number>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
@@ -171,6 +173,10 @@ function clearTabState(tabId: number): void {
 
   for (const key of webSockets.keys()) {
     if (key.startsWith(prefix)) webSockets.delete(key);
+  }
+
+  for (const key of eventSourceSequences.keys()) {
+    if (key.startsWith(prefix)) eventSourceSequences.delete(key);
   }
 
   for (const key of privateRevalidations.keys()) {
@@ -1649,6 +1655,128 @@ async function captureRedirectHop(
   });
 }
 
+function sanitizeEventSourceData(data: string): string {
+  try {
+    const value: unknown = JSON.parse(data);
+    return redactJsonSecrets(value) ? JSON.stringify(value) : data;
+  } catch {
+    return data;
+  }
+}
+
+function sanitizeEventSourceField(value: string): string {
+  return value.replace(/[\r\n]/g, " ");
+}
+
+function canonicalEventSourceMessage(
+  eventName: string,
+  eventId: string,
+  data: string,
+): string {
+  const lines: string[] = [];
+  if (eventName) lines.push(`event: ${sanitizeEventSourceField(eventName)}`);
+  if (eventId) lines.push(`id: ${sanitizeEventSourceField(eventId)}`);
+
+  const normalizedData = data.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (const line of normalizedData.split("\n")) {
+    lines.push(`data: ${line}`);
+  }
+
+  return `${lines.join("\n")}\n\n`;
+}
+
+function captureEventSourceMessage(
+  tabId: number,
+  requestId: string,
+  eventName: string,
+  eventId: string,
+  data: string,
+): void {
+  if (!attachedTabs.has(tabId)) return;
+
+  const key = requestKey(tabId, requestId);
+  const request = requests.get(key);
+  const response = responses.get(key);
+  const rawUrl = request?.url ?? response?.url;
+  if (!isSupportedChatGptUrl(rawUrl)) return;
+
+  const sequence = eventSourceSequences.get(key) ?? 0;
+  eventSourceSequences.set(key, sequence + 1);
+
+  const captureId = crypto.randomUUID();
+  let body: string | undefined;
+  let bodyError: string | null = null;
+
+  if (shouldSuppressResponseBody(rawUrl)) {
+    bodyError = "suppressed:credential_endpoint";
+  } else if (utf8ByteLength(data) > MAX_EVENTSOURCE_MESSAGE_BYTES) {
+    bodyError = "suppressed:eventsource_message_too_large";
+  } else {
+    const sanitizedData = sanitizeEventSourceData(data);
+    const canonical = canonicalEventSourceMessage(
+      eventName,
+      eventId,
+      sanitizedData,
+    );
+    if (utf8ByteLength(canonical) > MAX_EVENTSOURCE_MESSAGE_BYTES) {
+      bodyError = "suppressed:eventsource_message_too_large";
+    } else {
+      body = canonical;
+    }
+  }
+
+  postNative({
+    type: "capture_start",
+    metadata: {
+      capture_id: captureId,
+      tab_id: tabId,
+      request_id: `${requestId}:sse:${sequence}`,
+      method: "SSE_RECV",
+      url: sanitizeUrlForStorage(rawUrl ?? ""),
+      status: Math.trunc(response?.status ?? 0),
+      mime_type: "text/event-stream; charset=utf-8",
+      resource_type: "EventSourceMessage",
+      provenance: {
+        frame_id: request?.frameId,
+        loader_id: request?.loaderId,
+        lifecycle_id: request?.lifecycleId,
+        redirect_hop: request?.redirectHop,
+        redirected_from_url: request?.redirectedFromUrl,
+        document_url: request?.documentUrl,
+        initiator_type: request?.initiatorType,
+        request_wall_time_ms: request?.requestWallTimeMs,
+        response_time_ms: response?.responseTimeMs,
+        response_protocol: response?.responseProtocol,
+        served_from_cache: request?.servedFromCache ?? false,
+        from_disk_cache: response?.fromDiskCache ?? false,
+        from_service_worker: response?.fromServiceWorker ?? false,
+        from_prefetch_cache: response?.fromPrefetchCache ?? false,
+        request_headers: request?.headers ?? {},
+        response_headers: response?.headers ?? {},
+      },
+    },
+  });
+
+  if (body === undefined || bodyError !== null) {
+    postNative({
+      type: "capture_finish",
+      capture_id: captureId,
+      encoded_data_length: undefined,
+      body_error: bodyError ?? "suppressed:eventsource_message_body_unavailable",
+    });
+    return;
+  }
+
+  const bodyBytes = utf8ByteLength(body);
+  postUtf8Body(captureId, body);
+  postNative({
+    type: "capture_finish",
+    capture_id: captureId,
+    encoded_data_length: bodyBytes,
+    body_error: null,
+  });
+}
+
 async function captureBody(
   tabId: number,
   requestId: string,
@@ -1662,6 +1790,7 @@ async function captureBody(
   const response = responses.get(key);
   requests.delete(key);
   responses.delete(key);
+  eventSourceSequences.delete(key);
 
   if (!request && !response) return;
 
@@ -1843,6 +1972,23 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === "Network.webSocketClosed") {
     const event = params as { requestId: string };
     webSockets.delete(requestKey(tabId, event.requestId));
+    return;
+  }
+
+  if (method === "Network.eventSourceMessageReceived") {
+    const event = params as {
+      requestId: string;
+      eventName: string;
+      eventId: string;
+      data: string;
+    };
+    captureEventSourceMessage(
+      tabId,
+      event.requestId,
+      event.eventName,
+      event.eventId,
+      event.data,
+    );
     return;
   }
 
