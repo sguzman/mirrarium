@@ -30,6 +30,20 @@ pub struct CacheCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PublicCoverageProfile {
+    pub host: String,
+    pub observed_captures: u64,
+    pub unique_urls: u64,
+    pub unique_body_bytes: u64,
+    pub eligible_urls: u64,
+    pub eligible_body_bytes: u64,
+    pub replay_supported_urls: u64,
+    pub replay_supported_body_bytes: u64,
+    pub expansion_candidate_urls: u64,
+    pub expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PrivateCoverageProfile {
     pub resource_type: String,
     pub mime_type: String,
@@ -123,6 +137,19 @@ pub struct CacheStats {
     pub replay_supported_body_bytes: u64,
     pub expansion_candidate_urls: u64,
     pub expansion_candidate_body_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PublicCoverageAggregate {
+    observed_captures: u64,
+    unique_urls: u64,
+    unique_body_bytes: u64,
+    eligible_urls: u64,
+    eligible_body_bytes: u64,
+    replay_supported_urls: u64,
+    replay_supported_body_bytes: u64,
+    expansion_candidate_urls: u64,
+    expansion_candidate_body_bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -345,6 +372,94 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CacheStats> {
         expansion_candidate_urls,
         expansion_candidate_body_bytes,
     })
+}
+
+pub fn public_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PublicCoverageProfile>> {
+    let candidates = build_inventory(raw_root)?;
+    let mut aggregates: BTreeMap<String, PublicCoverageAggregate> = BTreeMap::new();
+
+    for candidate in candidates {
+        let host = Url::parse(&candidate.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "[invalid]".to_owned());
+        let aggregate = aggregates.entry(host).or_default();
+
+        aggregate.observed_captures = aggregate
+            .observed_captures
+            .checked_add(candidate.capture_count)
+            .context("public coverage capture count overflow")?;
+        aggregate.unique_urls = aggregate
+            .unique_urls
+            .checked_add(1)
+            .context("public coverage URL count overflow")?;
+        aggregate.unique_body_bytes = aggregate
+            .unique_body_bytes
+            .checked_add(candidate.body_bytes)
+            .context("public coverage body bytes overflow")?;
+
+        if candidate.eligible {
+            aggregate.eligible_urls = aggregate
+                .eligible_urls
+                .checked_add(1)
+                .context("public coverage eligible URL count overflow")?;
+            aggregate.eligible_body_bytes = aggregate
+                .eligible_body_bytes
+                .checked_add(candidate.body_bytes)
+                .context("public coverage eligible bytes overflow")?;
+        }
+        if candidate.replay_supported {
+            aggregate.replay_supported_urls = aggregate
+                .replay_supported_urls
+                .checked_add(1)
+                .context("public coverage replay URL count overflow")?;
+            aggregate.replay_supported_body_bytes = aggregate
+                .replay_supported_body_bytes
+                .checked_add(candidate.body_bytes)
+                .context("public coverage replay bytes overflow")?;
+        }
+        if candidate.expansion_candidate {
+            aggregate.expansion_candidate_urls = aggregate
+                .expansion_candidate_urls
+                .checked_add(1)
+                .context("public coverage expansion URL count overflow")?;
+            aggregate.expansion_candidate_body_bytes = aggregate
+                .expansion_candidate_body_bytes
+                .checked_add(candidate.body_bytes)
+                .context("public coverage expansion bytes overflow")?;
+        }
+    }
+
+    let mut profiles: Vec<PublicCoverageProfile> = aggregates
+        .into_iter()
+        .map(|(host, aggregate)| PublicCoverageProfile {
+            host,
+            observed_captures: aggregate.observed_captures,
+            unique_urls: aggregate.unique_urls,
+            unique_body_bytes: aggregate.unique_body_bytes,
+            eligible_urls: aggregate.eligible_urls,
+            eligible_body_bytes: aggregate.eligible_body_bytes,
+            replay_supported_urls: aggregate.replay_supported_urls,
+            replay_supported_body_bytes: aggregate.replay_supported_body_bytes,
+            expansion_candidate_urls: aggregate.expansion_candidate_urls,
+            expansion_candidate_body_bytes: aggregate.expansion_candidate_body_bytes,
+        })
+        .collect();
+
+    profiles.sort_by(|left, right| {
+        right
+            .expansion_candidate_body_bytes
+            .cmp(&left.expansion_candidate_body_bytes)
+            .then_with(|| {
+                right
+                    .replay_supported_body_bytes
+                    .cmp(&left.replay_supported_body_bytes)
+            })
+            .then_with(|| right.unique_body_bytes.cmp(&left.unique_body_bytes))
+            .then_with(|| left.host.cmp(&right.host))
+    });
+
+    Ok(profiles)
 }
 
 pub fn private_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PrivateCoverageProfile>> {
@@ -1490,6 +1605,45 @@ mod tests {
         assert_eq!(stats.replay_supported_urls, 0);
         assert_eq!(stats.expansion_candidate_urls, 1);
         assert_eq!(stats.expansion_candidate_body_bytes, 12);
+    }
+
+    #[test]
+    fn public_coverage_surfaces_supported_and_scope_expansion_bytes() {
+        let (directory, connection) = open_fixture();
+        insert_capture(
+            &connection,
+            "supported",
+            1,
+            "https://chatgpt.com/_next/static/app.js",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("public, max-age=31536000, immutable"),
+        );
+        insert_capture(
+            &connection,
+            "expansion",
+            2,
+            "https://static.openai.com/assets/app.js",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            Some("public, max-age=31536000, immutable"),
+        );
+
+        let profiles = public_coverage(directory.path()).unwrap();
+        let chatgpt = profiles
+            .iter()
+            .find(|item| item.host == "chatgpt.com")
+            .unwrap();
+        assert_eq!(chatgpt.replay_supported_urls, 1);
+        assert_eq!(chatgpt.replay_supported_body_bytes, 12);
+        assert_eq!(chatgpt.expansion_candidate_urls, 0);
+
+        let static_openai = profiles
+            .iter()
+            .find(|item| item.host == "static.openai.com")
+            .unwrap();
+        assert_eq!(static_openai.eligible_urls, 1);
+        assert_eq!(static_openai.replay_supported_urls, 0);
+        assert_eq!(static_openai.expansion_candidate_urls, 1);
+        assert_eq!(static_openai.expansion_candidate_body_bytes, 12);
     }
 
     #[test]
