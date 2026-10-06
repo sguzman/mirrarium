@@ -314,12 +314,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           return {
             status: response.status,
             marker: response.headers.get("x-mirrarium-revalidated"),
+            origin304: response.headers.get("x-mirrarium-origin-304"),
             body: await response.json(),
           };
         });
         expect(queryRevalidation).toEqual({
           status: 200,
           marker: "hit",
+          origin304: "preserved",
           body: {
             items: ["conversation-a", "conversation-b"],
             offset: 0,
@@ -360,6 +362,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(privateRevalidation).toEqual({
           status: 200,
           marker: "hit",
+          origin304: "preserved",
           body: {
             id: "fixture-conversation",
             title: "Private fixture",
@@ -386,6 +389,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(refreshedPrivateRead).toEqual({
           status: 200,
           marker: null,
+          origin304: null,
           body: {
             id: "fixture-conversation",
             title: "Private fixture",
@@ -436,6 +440,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(secondRevalidation).toEqual({
           status: 200,
           marker: "hit",
+          origin304: "preserved",
           body: {
             id: "fixture-conversation",
             title: "Private fixture",

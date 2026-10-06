@@ -203,6 +203,7 @@ const fixtureServer = https.createServer(
         response.writeHead(304, {
           etag,
           "cache-control": "private, max-age=0, must-revalidate",
+          "x-mirrarium-origin-304": "preserved",
         });
         response.end();
         return;
@@ -230,6 +231,7 @@ const fixtureServer = https.createServer(
         response.writeHead(304, {
           etag,
           "cache-control": "private, max-age=0, must-revalidate",
+          "x-mirrarium-origin-304": "preserved",
         });
         response.end();
         return;
