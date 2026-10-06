@@ -1134,6 +1134,29 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         );
       }
 
+      const abortedCapture = captures.find(
+        (capture) =>
+          capture.method === "POST" &&
+          capture.url.includes("/backend-api/abort-fixture"),
+      );
+      expect(abortedCapture).toBeTruthy();
+      expect(abortedCapture?.status).toBe(200);
+      expect(abortedCapture?.request_body_kind).toBe("json");
+      expect(abortedCapture?.request_body_hash).toBeTruthy();
+      expect(abortedCapture?.request_body_bytes).toBeGreaterThan(0);
+      expect(abortedCapture?.request_body_error).toBeFalsy();
+      expect(abortedCapture?.body_hash).toBeFalsy();
+      expect(abortedCapture?.body_bytes).toBe(0);
+      expect(abortedCapture?.body_error).toBeTruthy();
+      expect(abortedCapture?.body_error).not.toContain("suppressed:");
+      expect(
+        Object.fromEntries(
+          Object.entries(abortedCapture?.provenance.response_headers ?? {}).map(
+            ([key, value]) => [key.toLowerCase(), value],
+          ),
+        )["x-mirrarium-abort"],
+      ).toBe("fixture");
+
       const uploadCapture = captures.find((capture) =>
         capture.url.includes("/backend-api/upload-fixture"),
       );

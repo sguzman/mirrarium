@@ -61,6 +61,7 @@ ${stressScriptTags}
 const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
 const redirectPostSecret = ["fixture", "redirect", "post", "secret"].join("-");
+const abortPostSecret = ["fixture", "abort", "post", "secret"].join("-");
 Promise.all([
   fetch("/backend-api/conversation/test").then((response) => response.json()),
   fetch("/backend-api/conversations?offset=0&limit=2").then((response) =>
@@ -117,6 +118,16 @@ Promise.all([
       access_token: redirectPostSecret,
     }),
   }).then((response) => response.json()),
+  fetch("/backend-api/abort-fixture", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: "preserve request evidence on failed response",
+      access_token: abortPostSecret,
+    }),
+  })
+    .then((response) => response.text())
+    .catch(() => null),
   fetch("/backend-api/no-content-fixture").then((response) => response.text()),
   fetch("/backend-api/head-fixture", { method: "HEAD" }).then((response) =>
     response.text(),
@@ -438,6 +449,21 @@ const fixtureServer = https.createServer(
       request.on("end", () => {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
+    if (request.url === "/backend-api/abort-fixture" && request.method === "POST") {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": "4096",
+          "cache-control": "no-store",
+          "x-mirrarium-abort": "fixture",
+        });
+        response.write('{"partial":"response');
+        response.socket?.destroy();
       });
       return;
     }
