@@ -229,6 +229,41 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(candidate?.reasons).toEqual([]);
       }
 
+      const { stdout: privateReadsStdout } = await execFileAsync(
+        cliPath,
+        ["cache", "private-reads", "50"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const privateReads = JSON.parse(privateReadsStdout) as Array<{
+        url: string;
+        mime_type: string;
+        capture_count: number;
+        distinct_body_hashes: number;
+        latest_etag?: string;
+        latest_cache_control?: string;
+        has_validator: boolean;
+        stable_so_far: boolean;
+        revalidation_candidate: boolean;
+        reasons: string[];
+      }>;
+      const fixtureConversationRead = privateReads.find((item) =>
+        item.url.includes("/backend-api/conversation/test"),
+      );
+      expect(fixtureConversationRead).toBeTruthy();
+      expect(fixtureConversationRead).toMatchObject({
+        mime_type: "application/json",
+        has_validator: true,
+        stable_so_far: true,
+        revalidation_candidate: true,
+        latest_etag: "\"fixture-conversation-v1\"",
+        reasons: [],
+      });
+
       const replayCountsBefore = (await fetch(
         "http://127.0.0.1:43118/replay-counts",
       ).then((response) => response.json())) as {
