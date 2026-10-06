@@ -1588,6 +1588,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         stream_captures: number;
         stream_events: number;
         json_stream_events: number;
+        eventsource_streams: number;
+        eventsource_events: number;
+        eventsource_json_events: number;
+        eventsource_skipped_captures: number;
         stream_message_revisions: number;
         conversation_snapshots: number;
         message_observations: number;
@@ -1598,12 +1602,100 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
       expect(corpusStats.json_stream_events).toBeGreaterThanOrEqual(2);
+      expect(corpusStats.eventsource_streams).toBe(1);
+      expect(corpusStats.eventsource_events).toBe(2);
+      expect(corpusStats.eventsource_json_events).toBe(1);
+      expect(corpusStats.eventsource_skipped_captures).toBe(0);
       expect(corpusStats.stream_message_revisions).toBeGreaterThanOrEqual(2);
       expect(corpusStats.conversation_snapshots).toBeGreaterThanOrEqual(1);
       expect(corpusStats.message_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_reconstructions).toBeGreaterThanOrEqual(1);
       expect(corpusStats.attachment_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.attachment_downloads).toBeGreaterThanOrEqual(1);
+
+      const { stdout: eventSourceStreamsStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "eventsource-streams", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const eventSourceStreams = JSON.parse(eventSourceStreamsStdout) as Array<{
+        lifecycle_id: string;
+        source_url: string;
+        privacy_class: string;
+        event_count: number;
+      }>;
+      const derivedEventSource = eventSourceStreams.find((stream) =>
+        stream.source_url.includes("/backend-api/eventsource-fixture"),
+      );
+      expect(derivedEventSource).toBeTruthy();
+      expect(derivedEventSource?.privacy_class).toBe("private");
+      expect(derivedEventSource?.event_count).toBe(2);
+      expect(derivedEventSource?.source_url).not.toContain(
+        "fixture-eventsource-query-secret",
+      );
+      expect(derivedEventSource?.source_url).toContain("keep=yes");
+
+      const { stdout: eventSourceEventsStdout } = await execFileAsync(
+        cliPath,
+        [
+          "corpus",
+          "eventsource-events",
+          derivedEventSource?.lifecycle_id ?? "",
+          "20",
+        ],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const derivedEventSourceEvents = JSON.parse(
+        eventSourceEventsStdout,
+      ) as Array<{
+        lifecycle_id: string;
+        transport_sequence: number;
+        source_capture_id: string;
+        source_body_hash: string;
+        event_name?: string;
+        event_id?: string;
+        data: string;
+        json_valid: boolean;
+      }>;
+      expect(
+        derivedEventSourceEvents.map((event) => event.transport_sequence),
+      ).toEqual([0, 1]);
+      expect(derivedEventSourceEvents.map((event) => event.event_name)).toEqual([
+        "delta",
+        "done",
+      ]);
+      expect(derivedEventSourceEvents.map((event) => event.event_id)).toEqual([
+        "fixture-event-1",
+        "fixture-event-2",
+      ]);
+      expect(
+        derivedEventSourceEvents.every(
+          (event) =>
+            event.lifecycle_id === derivedEventSource?.lifecycle_id &&
+            event.source_capture_id.length > 0 &&
+            event.source_body_hash.length === 64,
+        ),
+      ).toBe(true);
+      expect(derivedEventSourceEvents[0]?.json_valid).toBe(true);
+      expect(JSON.parse(derivedEventSourceEvents[0]?.data ?? "{}")).toMatchObject({
+        message: "long-lived eventsource fixture",
+        access_token: "[REDACTED]",
+      });
+      expect(derivedEventSourceEvents[0]?.data).not.toContain(
+        "fixture-eventsource-secret",
+      );
+      expect(derivedEventSourceEvents[1]?.json_valid).toBe(false);
+      expect(derivedEventSourceEvents[1]?.data).toBe("[DONE]");
 
       const { stdout: attachmentsStdout } = await execFileAsync(
         cliPath,
