@@ -15,6 +15,13 @@ const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
 const REPLAY_RAW_CHUNK_BYTES: usize = 384 * 1024;
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 
+fn open_cache_reader_if_present(root: &Path) -> Result<Option<cache::CacheReader>> {
+    if !root.join("ledger.sqlite3").is_file() {
+        return Ok(None);
+    }
+    cache::CacheReader::open(root).map(Some)
+}
+
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
@@ -67,8 +74,15 @@ fn run_native_host() -> Result<()> {
                 resource_type,
             }) => {
                 if cache_reader.is_none() {
-                    match cache::CacheReader::open(&root) {
-                        Ok(reader) => cache_reader = Some(reader),
+                    match open_cache_reader_if_present(&root) {
+                        Ok(Some(reader)) => cache_reader = Some(reader),
+                        Ok(None) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::CacheMiss { lookup_id },
+                            )?;
+                            continue;
+                        }
                         Err(error) => {
                             write_native_response(
                                 &mut output,
@@ -93,8 +107,15 @@ fn run_native_host() -> Result<()> {
             }
             Ok(HostRequest::PrivateReadLookup { lookup_id, url }) => {
                 if cache_reader.is_none() {
-                    match cache::CacheReader::open(&root) {
-                        Ok(reader) => cache_reader = Some(reader),
+                    match open_cache_reader_if_present(&root) {
+                        Ok(Some(reader)) => cache_reader = Some(reader),
+                        Ok(None) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::PrivateReadMiss { lookup_id },
+                            )?;
+                            continue;
+                        }
                         Err(error) => {
                             write_native_response(
                                 &mut output,
@@ -663,6 +684,14 @@ mod tests {
             }
         }
         assert_eq!(reconstructed, body);
+    }
+
+    #[test]
+    fn missing_ledger_is_a_cache_miss_not_an_open_error() {
+        let directory = tempdir().unwrap();
+        assert!(!directory.path().join("ledger.sqlite3").exists());
+        assert!(open_cache_reader_if_present(directory.path()).unwrap().is_none());
+        assert!(!directory.path().join("ledger.sqlite3").exists());
     }
 
     #[test]
