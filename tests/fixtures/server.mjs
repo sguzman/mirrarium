@@ -57,6 +57,13 @@ function encodeWebSocketTextFrame(text) {
   return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
 }
 
+function encodeWebSocketBinaryFrame(payload) {
+  if (payload.length >= 126) {
+    throw new Error("fixture WebSocket binary payload unexpectedly large");
+  }
+  return Buffer.concat([Buffer.from([0x82, payload.length]), payload]);
+}
+
 const page = `<!doctype html>
 <meta charset="utf-8">
 <title>Mirrarium fixture</title>
@@ -716,12 +723,16 @@ fixtureServer.on("upgrade", (request, socket) => {
     }
     replied = true;
     socket.write(
-      encodeWebSocketTextFrame(
-        JSON.stringify({
-          message: "server websocket fixture",
-          access_token: "fixture-ws-server-secret",
-        }),
-      ),
+      Buffer.concat([
+        encodeWebSocketTextFrame(
+          JSON.stringify({
+            message: "server websocket fixture",
+            access_token: "fixture-ws-server-secret",
+          }),
+        ),
+        encodeWebSocketTextFrame("plain websocket fixture"),
+        encodeWebSocketBinaryFrame(Buffer.from([1, 2, 3, 4])),
+      ]),
     );
   });
 });

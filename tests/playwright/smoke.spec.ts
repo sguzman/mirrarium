@@ -972,10 +972,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const websocketRoundTrip = await page.evaluate(
         () =>
-          new Promise<string>((resolve, reject) => {
+          new Promise<{
+            textMessages: number;
+            binaryMessages: number;
+            jsonMessage?: string;
+          }>((resolve, reject) => {
             const socket = new WebSocket(
               "wss://chatgpt.com:43117/backend-api/ws-fixture?token=fixture-ws-query-secret&keep=yes",
             );
+            socket.binaryType = "arraybuffer";
+            let textMessages = 0;
+            let binaryMessages = 0;
+            let jsonMessage: string | undefined;
             const timeout = setTimeout(() => {
               socket.close();
               reject(new Error("websocket fixture timed out"));
@@ -989,14 +997,17 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
               );
             });
             socket.addEventListener("message", (event) => {
-              clearTimeout(timeout);
-              if (typeof event.data !== "string") {
-                socket.close();
-                reject(new Error("unexpected binary websocket fixture response"));
-                return;
+              if (typeof event.data === "string") {
+                textMessages += 1;
+                if (event.data.startsWith("{")) jsonMessage = event.data;
+              } else {
+                binaryMessages += 1;
               }
-              socket.close();
-              resolve(event.data);
+              if (textMessages + binaryMessages === 3) {
+                clearTimeout(timeout);
+                socket.close();
+                resolve({ textMessages, binaryMessages, jsonMessage });
+              }
             });
             socket.addEventListener("error", () => {
               clearTimeout(timeout);
@@ -1004,7 +1015,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
             });
           }),
       );
-      expect(JSON.parse(websocketRoundTrip)).toMatchObject({
+      expect(websocketRoundTrip).toMatchObject({
+        textMessages: 2,
+        binaryMessages: 1,
+      });
+      expect(JSON.parse(websocketRoundTrip.jsonMessage ?? "{}")).toMatchObject({
         message: "server websocket fixture",
       });
 
@@ -1180,32 +1195,76 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           capture.resource_type === "WebSocketFrame" &&
           capture.url.includes("/backend-api/ws-fixture"),
       );
-      const websocketReceived = captures.find(
+      const websocketReceived = captures.filter(
         (capture) =>
           capture.method === "WS_RECV" &&
           capture.resource_type === "WebSocketFrame" &&
           capture.url.includes("/backend-api/ws-fixture"),
       );
-      expect(websocketSent).toBeTruthy();
-      expect(websocketReceived).toBeTruthy();
-      expect(websocketSent?.status).toBe(101);
-      expect(websocketReceived?.status).toBe(101);
-      expect(websocketSent?.mime_type).toBe("application/json");
-      expect(websocketReceived?.mime_type).toBe("application/json");
-      expect(websocketSent?.body_hash).toBeTruthy();
-      expect(websocketReceived?.body_hash).toBeTruthy();
-      expect(websocketSent?.body_bytes).toBeGreaterThan(0);
-      expect(websocketReceived?.body_bytes).toBeGreaterThan(0);
-      expect(websocketSent?.body_error).toBeFalsy();
-      expect(websocketReceived?.body_error).toBeFalsy();
-      expect(websocketSent?.provenance.lifecycle_id).toBeTruthy();
-      expect(websocketReceived?.provenance.lifecycle_id).toBe(
-        websocketSent?.provenance.lifecycle_id,
+      const websocketReceivedJson = websocketReceived.find(
+        (capture) => capture.mime_type === "application/json",
       );
+      const websocketReceivedPlain = websocketReceived.find(
+        (capture) => capture.mime_type === "text/plain; charset=utf-8",
+      );
+      const websocketReceivedBinary = websocketReceived.find(
+        (capture) => capture.mime_type === "application/octet-stream",
+      );
+      expect(websocketSent).toBeTruthy();
+      expect(websocketReceived).toHaveLength(3);
+      expect(websocketReceivedJson).toBeTruthy();
+      expect(websocketReceivedPlain).toBeTruthy();
+      expect(websocketReceivedBinary).toBeTruthy();
+      expect(websocketSent?.status).toBe(101);
+      expect(websocketReceivedJson?.status).toBe(101);
+      expect(websocketSent?.mime_type).toBe("application/json");
+      expect(websocketSent?.body_hash).toBeTruthy();
+      expect(websocketReceivedJson?.body_hash).toBeTruthy();
+      expect(websocketSent?.body_bytes).toBeGreaterThan(0);
+      expect(websocketReceivedJson?.body_bytes).toBeGreaterThan(0);
+      expect(websocketSent?.body_error).toBeFalsy();
+      expect(websocketReceivedJson?.body_error).toBeFalsy();
+      expect(websocketReceivedPlain?.body_hash).toBeFalsy();
+      expect(websocketReceivedPlain?.body_bytes).toBe(0);
+      expect(websocketReceivedPlain?.body_error).toBe(
+        "suppressed:unparseable_websocket_text_frame",
+      );
+      expect(websocketReceivedBinary?.body_hash).toBeFalsy();
+      expect(websocketReceivedBinary?.body_bytes).toBe(0);
+      expect(websocketReceivedBinary?.body_error).toBe(
+        "suppressed:websocket_binary_frame_not_archived",
+      );
+      expect(websocketSent?.provenance.lifecycle_id).toBeTruthy();
+      for (const received of websocketReceived) {
+        expect(received.provenance.lifecycle_id).toBe(
+          websocketSent?.provenance.lifecycle_id,
+        );
+        expect(received.url).not.toContain("fixture-ws-query-secret");
+      }
       expect(websocketSent?.provenance.response_protocol).toBe("websocket");
       expect(websocketSent?.url).not.toContain("fixture-ws-query-secret");
-      expect(websocketReceived?.url).not.toContain("fixture-ws-query-secret");
       expect(websocketSent?.url).toContain("keep=yes");
+
+      const { stdout: websocketStatsStdout } = await execFileAsync(
+        cliPath,
+        ["stats"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const websocketStats = JSON.parse(websocketStatsStdout) as {
+        websocket_frames: number;
+        websocket_frame_body_bytes: number;
+        websocket_frame_errors: number;
+        suppressed_websocket_frames: number;
+      };
+      expect(websocketStats.websocket_frames).toBe(4);
+      expect(websocketStats.websocket_frame_body_bytes).toBeGreaterThan(0);
+      expect(websocketStats.websocket_frame_errors).toBe(0);
+      expect(websocketStats.suppressed_websocket_frames).toBe(2);
 
       const abortedCapture = captures.find(
         (capture) =>
