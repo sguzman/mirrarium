@@ -1760,21 +1760,28 @@ pub fn migrate_private_storage(root: impl AsRef<Path>) -> Result<PrivateMigratio
 
     if root.join("ledger.sqlite3").is_file() {
         let reader = CaptureStore::open_read_only(root)?;
-        let status = reader.private_storage_status()?;
-        if status.legacy_plaintext_private_objects == 0
-            && status.missing_or_invalid_private_objects == 0
-            && status.ledger_encrypted
-            && !status.ledger_plaintext_legacy
-        {
-            return Ok(PrivateMigrationReport {
-                key_path: status.key_path,
-                migrated_objects: 0,
-                migrated_body_bytes: 0,
-                already_encrypted_objects: status.encrypted_private_objects,
-                ledger_migrated: false,
-                ledger_already_encrypted: true,
-                ledger_plaintext_bytes: 0,
-            });
+        let has_objects_table: i64 = reader.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'objects'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_objects_table > 0 {
+            let status = reader.private_storage_status()?;
+            if status.legacy_plaintext_private_objects == 0
+                && status.missing_or_invalid_private_objects == 0
+                && status.ledger_encrypted
+                && !status.ledger_plaintext_legacy
+            {
+                return Ok(PrivateMigrationReport {
+                    key_path: status.key_path,
+                    migrated_objects: 0,
+                    migrated_body_bytes: 0,
+                    already_encrypted_objects: status.encrypted_private_objects,
+                    ledger_migrated: false,
+                    ledger_already_encrypted: true,
+                    ledger_plaintext_bytes: 0,
+                });
+            }
         }
     }
 
