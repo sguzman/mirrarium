@@ -2698,12 +2698,12 @@ mod tests {
     fn read_only_capture_store_does_not_mutate_live_ledger() {
         let directory = tempdir().unwrap();
         let mut writer = CaptureStore::open(directory.path()).unwrap();
-        let metadata = metadata(
+        let first_metadata = metadata(
             "read-only-live",
             "https://chatgpt.com/backend-api/read-only",
             "Fetch",
         );
-        writer.begin(metadata).unwrap();
+        writer.begin(first_metadata).unwrap();
         writer
             .append_chunk("read-only-live", 0, &BASE64.encode(b"{\"version\":1}"))
             .unwrap();
@@ -2712,12 +2712,12 @@ mod tests {
         let reader = CaptureStore::open_read_only(directory.path()).unwrap();
         assert_eq!(reader.recent_captures(10).unwrap().len(), 1);
 
-        let metadata = metadata(
+        let second_metadata = metadata(
             "read-only-live-2",
             "https://chatgpt.com/backend-api/read-only",
             "Fetch",
         );
-        writer.begin(metadata).unwrap();
+        writer.begin(second_metadata).unwrap();
         writer
             .append_chunk("read-only-live-2", 0, &BASE64.encode(b"{\"version\":2}"))
             .unwrap();
