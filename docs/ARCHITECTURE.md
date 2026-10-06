@@ -103,7 +103,7 @@ Implemented:
 - transparent `MIRRPV01`/legacy-plaintext compatibility plus idempotent verified in-place private-CAS migration;
 - private encryption status/key-location CLI and isolated Chromium proof that raw private CAS files contain no known fixture plaintext;
 - SQLite request ledger;
-- body-read failure recording;
+- body-read failure recording, including Chromium proof that a POST whose response fails after headers preserves sanitized request evidence and response metadata without installing incomplete response bytes into CAS;
 - protocol-aware no-body handling for HEAD and 1xx/204/205/304 responses, recorded as intentional suppression without calling `Network.getResponseBody`;
 - Unix permission hardening;
 - CLI-readable JSON store statistics;
@@ -140,6 +140,7 @@ Implemented:
 - Chromium end-to-end proof that replay still works with browser cache disabled and avoids origin requests;
 - privacy-bounded durable replay outcome telemetry with hit/miss/error/timeout/fulfillment buckets and replayed-byte totals;
 - Chromium cold-to-warm lifecycle proof covering initial misses, warm hits, saved bytes, and zero healthy-path replay errors;
+- concurrent Chromium stress proof with browser cache disabled: 16 immutable static replays execute locally while 32 private POST captures write concurrently, with no origin fallback and zero replay lookup/timeout/fulfillment errors;
 - private JSON/HTML read inventory with volatility, ETag/Last-Modified, cache-control, redacted-identity detection, and conservative revalidation-candidate classification;
 - aggregate private cache-coverage audit by resource/MIME family, including validator/no-store coverage, current-policy bytes, and potential expansion bytes without creating a second private URL ledger;
 - verified private-CAS lookup with auth/no-store/sensitive-query safety gates, 16 MiB ceiling, path/length/SHA-256 validation, and dedicated chunked native messaging;
@@ -156,5 +157,5 @@ Next:
 
 - cautiously expand conditional revalidation to additional private MIME/route families only when `cache private-coverage` shows meaningful validator-backed bytes and stable semantics;
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
-- deeper redirect/body semantics where Chromium exposes safe evidence;
+- capture additional browser transport classes only where Chromium exposes stable payload/provenance evidence that can be sanitized and encrypted without weakening the raw-evidence boundary;
 - optional signed/package distribution if a future browser deployment path can preserve the current stable extension identity and native-host contract without adding service dependencies.

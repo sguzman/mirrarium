@@ -56,7 +56,7 @@ Raw evidence is preserved. Derived representations may be deleted and rebuilt as
 
 Reusable authentication secrets are not archival data and must not be persisted. Credential-bearing auth/session bodies are suppressed, credential-like query parameters are redacted before URLs are written to the ledger, request bodies are sanitized before persistence, and sensitive request/response headers are redacted before transport provenance is stored.
 
-Mirrarium also distinguishes protocol-level absence from capture failure. HEAD responses and 1xx/204/205/304 statuses are recorded as `suppressed:no_response_body_expected` without calling `Network.getResponseBody`, so legitimate no-body responses do not inflate body-read error telemetry.
+Mirrarium also distinguishes protocol-level absence from capture failure. HEAD responses and 1xx/204/205/304 statuses are recorded as `suppressed:no_response_body_expected` without calling `Network.getResponseBody`, so legitimate no-body responses do not inflate body-read error telemetry. A response that genuinely fails after headers is kept as failure evidence instead: request evidence and response metadata are retained, but incomplete response bytes never become a CAS object.
 
 ## Inspection CLI
 
@@ -113,7 +113,7 @@ Writable raw-store access is single-writer per data root. The native host holds 
 
 `cache public-coverage` aggregates that evidence by host, reporting observed captures, unique bytes, immutable/stable bytes, bytes already replay-supported, and bytes blocked only by current host/path scope. This is the required evidence view before widening public replay to another host.
 
-Verified hits are streamed from the native host in sub-1-MiB messages and fulfilled through CDP Fetch. The Chromium integration test disables the browser's ordinary cache and verifies Mirrarium's replay marker while proving the ChatGPT and `cdn.oaistatic.com` origins receive no additional requests for replayed static resources.
+Verified hits are streamed from the native host in sub-1-MiB messages and fulfilled through CDP Fetch. The Chromium integration test disables the browser's ordinary cache and verifies Mirrarium's replay marker while proving the ChatGPT and `cdn.oaistatic.com` origins receive no additional requests for replayed static resources. A dedicated stress pass also replays 16 immutable static objects while 32 private POST captures are being written concurrently; all static objects execute locally with zero origin fallback and zero replay lookup/timeout/fulfillment errors.
 
 `cache replay-stats` reports the durable cold/warm replay lifecycle: attempts, successful hits, misses, lookup errors, local lookup timeouts, fulfillment failures, and bytes actually replayed. Telemetry accepts only the same public static replay scope, so it cannot become a ledger for private or dynamic request URLs.
 
