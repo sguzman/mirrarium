@@ -111,6 +111,24 @@ pub struct VerifyReport {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IncomingMaintenanceStatus {
+    pub incoming_exists: bool,
+    pub writer_active: bool,
+    pub incomplete_capture_files: u64,
+    pub incomplete_capture_bytes: u64,
+    pub inflight_capture_files: u64,
+    pub inflight_capture_bytes: u64,
+    pub abandoned_capture_files: u64,
+    pub abandoned_capture_bytes: u64,
+    pub ledger_recovery_files: u64,
+    pub ledger_recovery_bytes: u64,
+    pub unexpected_files: u64,
+    pub unexpected_bytes: u64,
+    pub unexpected_non_file_entries: u64,
+    pub cleanup_on_next_writer_start: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PrivateStorageStatus {
     pub key_path: String,
     pub key_exists: bool,
@@ -1833,6 +1851,174 @@ fn is_abandoned_capture_part_name(name: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn is_ledger_recovery_file_name(name: &str) -> bool {
+    matches!(
+        name,
+        "ledger.sqlite3.encrypted.part"
+            | "ledger.sqlite3.encrypted.part-wal"
+            | "ledger.sqlite3.encrypted.part-shm"
+            | "ledger.sqlite3.plaintext-backup"
+            | "ledger.sqlite3.plaintext-backup-wal"
+            | "ledger.sqlite3.plaintext-backup-shm"
+    )
+}
+
+fn writer_lock_is_active(root: &Path) -> Result<bool> {
+    let path = root.join(".writer.lock");
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("opening Mirrarium writer lock {}", path.display()));
+        }
+    };
+
+    match file.try_lock_shared() {
+        Ok(()) => {
+            FileExt::unlock(&file)
+                .with_context(|| format!("unlocking Mirrarium writer lock {}", path.display()))?;
+            Ok(false)
+        }
+        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error)
+            .with_context(|| format!("probing Mirrarium writer lock {}", path.display())),
+    }
+}
+
+fn add_maintenance_file(
+    files: &mut u64,
+    bytes: &mut u64,
+    file_bytes: u64,
+    label: &str,
+) -> Result<()> {
+    *files = files
+        .checked_add(1)
+        .with_context(|| format!("{label} file count overflow"))?;
+    *bytes = bytes
+        .checked_add(file_bytes)
+        .with_context(|| format!("{label} byte count overflow"))?;
+    Ok(())
+}
+
+pub fn incoming_maintenance_status(
+    root: impl AsRef<Path>,
+) -> Result<IncomingMaintenanceStatus> {
+    let root = root.as_ref();
+    let writer_active = writer_lock_is_active(root)?;
+    let incoming = root.join(".incoming");
+
+    if !incoming.exists() {
+        return Ok(IncomingMaintenanceStatus {
+            incoming_exists: false,
+            writer_active,
+            incomplete_capture_files: 0,
+            incomplete_capture_bytes: 0,
+            inflight_capture_files: 0,
+            inflight_capture_bytes: 0,
+            abandoned_capture_files: 0,
+            abandoned_capture_bytes: 0,
+            ledger_recovery_files: 0,
+            ledger_recovery_bytes: 0,
+            unexpected_files: 0,
+            unexpected_bytes: 0,
+            unexpected_non_file_entries: 0,
+            cleanup_on_next_writer_start: false,
+        });
+    }
+
+    anyhow::ensure!(
+        incoming.is_dir(),
+        "incoming path is not a directory: {}",
+        incoming.display()
+    );
+
+    let mut incomplete_capture_files = 0_u64;
+    let mut incomplete_capture_bytes = 0_u64;
+    let mut ledger_recovery_files = 0_u64;
+    let mut ledger_recovery_bytes = 0_u64;
+    let mut unexpected_files = 0_u64;
+    let mut unexpected_bytes = 0_u64;
+    let mut unexpected_non_file_entries = 0_u64;
+
+    for entry in fs::read_dir(&incoming)
+        .with_context(|| format!("reading incoming directory {}", incoming.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            unexpected_non_file_entries = unexpected_non_file_entries
+                .checked_add(1)
+                .context("unexpected incoming entry count overflow")?;
+            continue;
+        }
+
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            let bytes = entry.metadata()?.len();
+            add_maintenance_file(
+                &mut unexpected_files,
+                &mut unexpected_bytes,
+                bytes,
+                "unexpected incoming",
+            )?;
+            continue;
+        };
+        let bytes = entry.metadata()?.len();
+
+        if is_abandoned_capture_part_name(name) {
+            add_maintenance_file(
+                &mut incomplete_capture_files,
+                &mut incomplete_capture_bytes,
+                bytes,
+                "incomplete capture",
+            )?;
+        } else if is_ledger_recovery_file_name(name) {
+            add_maintenance_file(
+                &mut ledger_recovery_files,
+                &mut ledger_recovery_bytes,
+                bytes,
+                "ledger recovery",
+            )?;
+        } else {
+            add_maintenance_file(
+                &mut unexpected_files,
+                &mut unexpected_bytes,
+                bytes,
+                "unexpected incoming",
+            )?;
+        }
+    }
+
+    let (inflight_capture_files, inflight_capture_bytes) = if writer_active {
+        (incomplete_capture_files, incomplete_capture_bytes)
+    } else {
+        (0, 0)
+    };
+    let (abandoned_capture_files, abandoned_capture_bytes) = if writer_active {
+        (0, 0)
+    } else {
+        (incomplete_capture_files, incomplete_capture_bytes)
+    };
+
+    Ok(IncomingMaintenanceStatus {
+        incoming_exists: true,
+        writer_active,
+        incomplete_capture_files,
+        incomplete_capture_bytes,
+        inflight_capture_files,
+        inflight_capture_bytes,
+        abandoned_capture_files,
+        abandoned_capture_bytes,
+        ledger_recovery_files,
+        ledger_recovery_bytes,
+        unexpected_files,
+        unexpected_bytes,
+        unexpected_non_file_entries,
+        cleanup_on_next_writer_start: !writer_active && incomplete_capture_files > 0,
+    })
+}
+
 fn purge_abandoned_capture_parts(root: &Path) -> Result<(u64, u64)> {
     let incoming = root.join(".incoming");
     let mut removed_files = 0_u64;
@@ -3058,6 +3244,69 @@ mod tests {
         assert!(!object_migration.exists());
         assert!(ledger_target.exists());
         assert!(ledger_backup.exists());
+    }
+
+    #[test]
+    fn incoming_maintenance_status_distinguishes_abandoned_and_recovery_artifacts() {
+        let directory = tempdir().unwrap();
+        let incoming = directory.path().join(".incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        let hash = "b".repeat(64);
+
+        fs::write(incoming.join(format!("{hash}.part")), b"response").unwrap();
+        fs::write(incoming.join(format!("{hash}.request.part")), b"request").unwrap();
+        fs::write(
+            incoming.join(format!("{hash}.private-migration.part")),
+            b"migration",
+        )
+        .unwrap();
+        fs::write(
+            incoming.join("ledger.sqlite3.encrypted.part"),
+            b"ledger target",
+        )
+        .unwrap();
+        fs::write(
+            incoming.join("ledger.sqlite3.plaintext-backup"),
+            b"ledger backup",
+        )
+        .unwrap();
+        fs::write(incoming.join("unexpected.bin"), b"unknown").unwrap();
+        fs::create_dir(incoming.join("unexpected-directory")).unwrap();
+
+        let status = incoming_maintenance_status(directory.path()).unwrap();
+        assert!(status.incoming_exists);
+        assert!(!status.writer_active);
+        assert_eq!(status.incomplete_capture_files, 3);
+        assert_eq!(status.abandoned_capture_files, 3);
+        assert_eq!(status.inflight_capture_files, 0);
+        assert_eq!(status.ledger_recovery_files, 2);
+        assert_eq!(status.unexpected_files, 1);
+        assert_eq!(status.unexpected_non_file_entries, 1);
+        assert!(status.cleanup_on_next_writer_start);
+    }
+
+    #[test]
+    fn incoming_maintenance_status_marks_parts_inflight_while_writer_is_live() {
+        let directory = tempdir().unwrap();
+        let writer = CaptureStore::open(directory.path()).unwrap();
+        let incoming = directory.path().join(".incoming");
+        let hash = "c".repeat(64);
+        fs::write(incoming.join(format!("{hash}.part")), b"active").unwrap();
+
+        let live = incoming_maintenance_status(directory.path()).unwrap();
+        assert!(live.writer_active);
+        assert_eq!(live.incomplete_capture_files, 1);
+        assert_eq!(live.inflight_capture_files, 1);
+        assert_eq!(live.abandoned_capture_files, 0);
+        assert!(!live.cleanup_on_next_writer_start);
+
+        drop(writer);
+
+        let abandoned = incoming_maintenance_status(directory.path()).unwrap();
+        assert!(!abandoned.writer_active);
+        assert_eq!(abandoned.inflight_capture_files, 0);
+        assert_eq!(abandoned.abandoned_capture_files, 1);
+        assert!(abandoned.cleanup_on_next_writer_start);
     }
 
     #[test]

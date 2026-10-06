@@ -10,7 +10,9 @@ use std::{
 use anyhow::{Context, Result};
 use mirrarium_cache as cache;
 use mirrarium_corpus as corpus;
-use mirrarium_store::{default_data_root, migrate_private_storage, CaptureStore};
+use mirrarium_store::{
+    default_data_root, incoming_maintenance_status, migrate_private_storage, CaptureStore,
+};
 
 const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
@@ -76,6 +78,20 @@ fn run() -> Result<()> {
                 report.corrupt_objects
             );
         }
+        Some("maintenance") => match arguments.get(1).map(String::as_str) {
+            Some("incoming") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&incoming_maintenance_status(&root)?)?
+                );
+            }
+            Some(command) => anyhow::bail!(
+                "unknown maintenance command {command:?}; use incoming"
+            ),
+            None => anyhow::bail!(
+                "missing maintenance command; use 'mirrarium maintenance incoming'"
+            ),
+        },
         Some("privacy") => match arguments.get(1).map(String::as_str) {
             Some("status") => {
                 let store = CaptureStore::open_read_only(&root)?;
@@ -908,6 +924,7 @@ USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
   mirrarium verify
+  mirrarium maintenance incoming
   mirrarium privacy status
   mirrarium privacy migrate
   mirrarium cache opportunities
@@ -944,6 +961,12 @@ EXTENSION:
 NATIVE HOST:
   BROWSER defaults to edge.
   MIRRARIUM_BROWSER_USER_DATA_DIR overrides the browser user-data root.
+
+MAINTENANCE:
+  'maintenance incoming' is read-only. It classifies hashed incomplete capture
+  parts as in-flight while a writer holds .writer.lock, or abandoned otherwise;
+  it also reports preserved ledger-migration recovery artifacts and unexpected
+  entries without opening or decrypting incomplete payloads.
 
 DATA ROOT:
   MIRRARIUM_DATA_DIR, then XDG_DATA_HOME/mirrarium,

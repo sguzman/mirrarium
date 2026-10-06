@@ -64,6 +64,7 @@ The Rust CLI reads the same local store as the native host:
 mirrarium stats
 mirrarium captures 20
 mirrarium verify
+mirrarium maintenance incoming
 mirrarium privacy status
 mirrarium privacy migrate
 mirrarium cache opportunities
@@ -102,7 +103,7 @@ Private response staging is encrypted from the first body chunk. Normal private 
 
 In steady-state operation Mirrarium no longer intentionally stores private response payloads, raw-ledger contents, or derived-corpus contents as plaintext on disk. The exception is migration of an already-plaintext legacy ledger: the original plaintext database may be retained temporarily as a rollback backup while the new SQLCipher database is verified, and an interrupted migration deliberately preserves recovery evidence until the next migration recovery pass. Key material must therefore be backed up separately from the archive.
 
-Writable raw-store access is single-writer per data root. The native host holds an exclusive `.writer.lock` for its writable lifetime; read-only CLI/cache/corpus/status operations remain concurrent. On writable startup, abandoned hashed response/request/object-migration `.part` files are purged before capture resumes, while the named raw-ledger migration target/backup files are preserved for explicit migration recovery. A fully encrypted `privacy migrate` therefore remains a read-only no-op even while the browser daemon is live; an actual legacy migration still requires the exclusive writer lock.
+Writable raw-store access is single-writer per data root. The native host holds an exclusive `.writer.lock` for its writable lifetime; read-only CLI/cache/corpus/status operations remain concurrent. On writable startup, abandoned hashed response/request/object-migration `.part` files are purged before capture resumes, while the named raw-ledger migration target/backup files are preserved for explicit migration recovery. `mirrarium maintenance incoming` exposes this boundary without mutating it: hashed part files are reported as in-flight when a writer owns the lock and abandoned otherwise, ledger-recovery artifacts are counted separately, and unexpected files/non-files are surfaced without reading or decrypting incomplete payloads. A fully encrypted `privacy migrate` therefore remains a read-only no-op even while the browser daemon is live; an actual legacy migration still requires the exclusive writer lock.
 
 `cache opportunities` combines public/private coverage with runtime savings and, when evidence exists, names the largest currently unsupported public host and private MIME/resource family plus the policy gate blocking each. A null lead means captured evidence does not justify widening that side yet.
 

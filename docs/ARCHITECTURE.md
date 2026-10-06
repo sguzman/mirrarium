@@ -125,6 +125,7 @@ Implemented:
 - Chromium proof that encrypted raw-ledger capture, changed private-response persistence, and subsequent revalidation remain live while read-only inspection runs concurrently;
 - exclusive per-data-root writer locking for writable raw-store lifetimes, with read-only inspection left concurrent;
 - startup purge of abandoned hashed capture/request/object-migration part files while preserving raw-ledger migration recovery artifacts;
+- read-only `.incoming` maintenance reporting that distinguishes live in-flight parts from abandoned crash remnants via the writer lock, reports ledger recovery artifacts separately, and surfaces unexpected entries without opening incomplete payloads;
 - live-safe encrypted migration preflight: already-encrypted stores report a read-only no-op, while real legacy migrations still require exclusive ownership;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
 - immutable public-resource replay candidate inventory and policy auditing;
@@ -155,5 +156,4 @@ Next:
 - cautiously expand conditional revalidation to additional private MIME/route families only when `cache private-coverage` shows meaningful validator-backed bytes and stable semantics;
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
-- optional signed/package distribution if a future browser deployment path can preserve the current stable extension identity and native-host contract without adding service dependencies;
-- explicit stale/incomplete-capture maintenance visibility for `.incoming` without ever treating incomplete ciphertext as archive evidence.
+- optional signed/package distribution if a future browser deployment path can preserve the current stable extension identity and native-host contract without adding service dependencies.
