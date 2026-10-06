@@ -13,6 +13,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
     KeyInit, XChaCha20Poly1305, XNonce,
 };
+use fs2::FileExt;
 use hkdf::Hkdf;
 use mirrarium_protocol::{CaptureMetadata, CaptureProvenance, RequestBodyMetadata};
 use rand_core::{OsRng, RngCore};
@@ -198,6 +199,7 @@ pub struct CaptureStore {
     root: PathBuf,
     connection: Connection,
     in_flight: HashMap<String, InFlightCapture>,
+    writer_lock: Option<File>,
 }
 
 impl CaptureStore {
@@ -208,6 +210,7 @@ impl CaptureStore {
             root,
             connection,
             in_flight: HashMap::new(),
+            writer_lock: None,
         })
     }
 
@@ -221,6 +224,9 @@ impl CaptureStore {
         harden_directory(&root)?;
         harden_directory(&root.join(".incoming"))?;
         harden_directory(&root.join("private"))?;
+
+        let writer_lock = acquire_writer_lock(&root)?;
+        purge_abandoned_capture_parts(&root)?;
 
         let database_path = root.join("ledger.sqlite3");
         let connection = open_raw_ledger_connection(&root, false)?;
@@ -341,6 +347,7 @@ impl CaptureStore {
             root,
             connection,
             in_flight: HashMap::new(),
+            writer_lock: Some(writer_lock),
         })
     }
 
@@ -1750,10 +1757,12 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
 pub fn migrate_private_storage(root: impl AsRef<Path>) -> Result<PrivateMigrationReport> {
     let root = root.as_ref();
     let key_path = private_key_path(root)?;
-    let store = CaptureStore::open(root)?;
+    let mut store = CaptureStore::open(root)?;
     let objects = store.migrate_private_objects()?;
+    let writer_lock = store.writer_lock.take();
     drop(store);
     let ledger = migrate_raw_ledger(root)?;
+    drop(writer_lock);
 
     Ok(PrivateMigrationReport {
         key_path: key_path.to_string_lossy().into_owned(),
@@ -1764,6 +1773,71 @@ pub fn migrate_private_storage(root: impl AsRef<Path>) -> Result<PrivateMigratio
         ledger_already_encrypted: ledger.already_encrypted,
         ledger_plaintext_bytes: ledger.plaintext_bytes,
     })
+}
+
+fn acquire_writer_lock(root: &Path) -> Result<File> {
+    let path = root.join(".writer.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| format!("opening Mirrarium writer lock {}", path.display()))?;
+    harden_file(&path)?;
+    file.try_lock_exclusive().with_context(|| {
+        format!(
+            "another Mirrarium writer is already using data root {}",
+            root.display()
+        )
+    })?;
+    Ok(file)
+}
+
+fn is_abandoned_capture_part_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".part") else {
+        return false;
+    };
+
+    let hash = stem
+        .strip_suffix(".request")
+        .or_else(|| stem.strip_suffix(".private-migration"))
+        .unwrap_or(stem);
+    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn purge_abandoned_capture_parts(root: &Path) -> Result<(u64, u64)> {
+    let incoming = root.join(".incoming");
+    let mut removed_files = 0_u64;
+    let mut removed_bytes = 0_u64;
+
+    for entry in fs::read_dir(&incoming)
+        .with_context(|| format!("reading incoming directory {}", incoming.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_abandoned_capture_part_name(name) {
+            continue;
+        }
+
+        let path = entry.path();
+        let bytes = entry.metadata()?.len();
+        fs::remove_file(&path)
+            .with_context(|| format!("removing abandoned capture part {}", path.display()))?;
+        removed_files = removed_files
+            .checked_add(1)
+            .context("abandoned capture file count overflow")?;
+        removed_bytes = removed_bytes
+            .checked_add(bytes)
+            .context("abandoned capture byte count overflow")?;
+    }
+
+    Ok((removed_files, removed_bytes))
 }
 
 pub fn open_raw_ledger_read_only(root: impl AsRef<Path>) -> Result<Connection> {
@@ -2910,6 +2984,50 @@ mod tests {
         let error = load_or_create_private_key(directory.path()).unwrap_err();
         assert!(error.to_string().contains("restore that key"));
         assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn writable_store_excludes_second_writer_but_allows_read_only_inspection() {
+        let directory = tempdir().unwrap();
+        let writer = CaptureStore::open(directory.path()).unwrap();
+
+        let error = CaptureStore::open(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("another Mirrarium writer"));
+
+        let reader = CaptureStore::open_read_only(directory.path()).unwrap();
+        assert_eq!(reader.stats().unwrap().captures, 0);
+        drop(reader);
+        drop(writer);
+
+        CaptureStore::open(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn abandoned_capture_part_purge_preserves_ledger_recovery_files() {
+        let directory = tempdir().unwrap();
+        let incoming = directory.path().join(".incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        let hash = "a".repeat(64);
+        let response = incoming.join(format!("{hash}.part"));
+        let request = incoming.join(format!("{hash}.request.part"));
+        let object_migration = incoming.join(format!("{hash}.private-migration.part"));
+        let ledger_target = incoming.join("ledger.sqlite3.encrypted.part");
+        let ledger_backup = incoming.join("ledger.sqlite3.plaintext-backup");
+
+        fs::write(&response, b"legacy plaintext response").unwrap();
+        fs::write(&request, b"encrypted request temp").unwrap();
+        fs::write(&object_migration, b"encrypted object migration temp").unwrap();
+        fs::write(&ledger_target, b"ledger target").unwrap();
+        fs::write(&ledger_backup, b"ledger backup").unwrap();
+
+        let (files, bytes) = purge_abandoned_capture_parts(directory.path()).unwrap();
+        assert_eq!(files, 3);
+        assert!(bytes > 0);
+        assert!(!response.exists());
+        assert!(!request.exists());
+        assert!(!object_migration.exists());
+        assert!(ledger_target.exists());
+        assert!(ledger_backup.exists());
     }
 
     #[test]
