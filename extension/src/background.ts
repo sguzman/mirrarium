@@ -101,6 +101,7 @@ const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
+const privateRevalidations = new Map<string, PrivateReadHit>();
 let nativePort: chrome.runtime.Port | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -130,6 +131,10 @@ function clearTabState(tabId: number): void {
 
   for (const key of responses.keys()) {
     if (key.startsWith(prefix)) responses.delete(key);
+  }
+
+  for (const key of privateRevalidations.keys()) {
+    if (key.startsWith(prefix)) privateRevalidations.delete(key);
   }
 }
 
@@ -489,6 +494,59 @@ function lookupPrivateRead(url: string): Promise<PrivateReadHit | null> {
   });
 }
 
+function isPrivateRevalidationCandidate(
+  rawUrl: string,
+  method: string,
+  resourceType: string | undefined,
+): boolean {
+  if (
+    method.toUpperCase() !== "GET" ||
+    !resourceType ||
+    !["fetch", "xhr"].includes(resourceType.toLowerCase())
+  ) {
+    return false;
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    const path = url.pathname.toLowerCase();
+    return (
+      url.protocol === "https:" &&
+      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
+      path.startsWith("/backend-api/") &&
+      !path.startsWith("/backend-api/auth/") &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function requestHeadersWithValidators(
+  headers: Record<string, string> | undefined,
+  hit: PrivateReadHit,
+): Array<{ name: string; value: string }> | null {
+  const etag = safeReplayHeaderValue(hit.etag);
+  const lastModified = safeReplayHeaderValue(hit.lastModified);
+  if (!etag && !lastModified) return null;
+
+  const result: Array<{ name: string; value: string }> = [];
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const normalized = name.toLowerCase();
+    if (normalized === "if-none-match" || normalized === "if-modified-since") {
+      continue;
+    }
+    result.push({ name, value: String(value) });
+  }
+  if (etag) {
+    result.push({ name: "If-None-Match", value: etag });
+  } else if (lastModified) {
+    result.push({ name: "If-Modified-Since", value: lastModified });
+  }
+  return result;
+}
+
 function isReplayInterceptCandidate(
   rawUrl: string,
   method: string,
@@ -535,15 +593,131 @@ async function continuePausedRequest(tabId: number, requestId: string): Promise<
   }
 }
 
+async function continuePausedResponse(tabId: number, requestId: string): Promise<void> {
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.continueResponse", {
+      requestId,
+    });
+  } catch {
+    // The tab/request may have disappeared while a response was paused.
+  }
+}
+
+async function beginPrivateRevalidation(
+  tabId: number,
+  event: {
+    requestId: string;
+    resourceType?: string;
+    request: {
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+    };
+  },
+): Promise<void> {
+  const hit = await lookupPrivateRead(event.request.url);
+  if (!hit) {
+    await continuePausedRequest(tabId, event.requestId);
+    return;
+  }
+
+  const headers = requestHeadersWithValidators(event.request.headers, hit);
+  if (!headers) {
+    await continuePausedRequest(tabId, event.requestId);
+    return;
+  }
+
+  const key = requestKey(tabId, event.requestId);
+  privateRevalidations.set(key, hit);
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.continueRequest", {
+      requestId: event.requestId,
+      headers,
+    });
+  } catch (error) {
+    privateRevalidations.delete(key);
+    console.warn("Mirrarium could not start private revalidation", error);
+    await continuePausedRequest(tabId, event.requestId);
+  }
+}
+
+async function finishPrivateRevalidation(
+  tabId: number,
+  event: {
+    requestId: string;
+    responseStatusCode?: number;
+  },
+): Promise<void> {
+  const key = requestKey(tabId, event.requestId);
+  const hit = privateRevalidations.get(key);
+  privateRevalidations.delete(key);
+
+  if (!hit || event.responseStatusCode !== 304) {
+    await continuePausedResponse(tabId, event.requestId);
+    return;
+  }
+
+  const responseHeaders: Array<{ name: string; value: string }> = [
+    { name: "Content-Type", value: hit.mimeType },
+    { name: "X-Mirrarium-Revalidated", value: "hit" },
+  ];
+  for (const [name, rawValue] of [
+    ["Cache-Control", hit.cacheControl],
+    ["ETag", hit.etag],
+    ["Last-Modified", hit.lastModified],
+  ] as const) {
+    const value = safeReplayHeaderValue(rawValue);
+    if (value) responseHeaders.push({ name, value });
+  }
+
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.fulfillRequest", {
+      requestId: event.requestId,
+      responseCode: 200,
+      responsePhrase: "OK",
+      responseHeaders,
+      body: hit.bodyBase64,
+    });
+  } catch (error) {
+    console.warn("Mirrarium could not fulfill private 304 revalidation", error);
+    await continuePausedResponse(tabId, event.requestId);
+  }
+}
+
 async function handlePausedRequest(
   tabId: number,
   event: {
     requestId: string;
     resourceType?: string;
-    request: { method: string; url: string };
+    responseStatusCode?: number;
+    responseErrorReason?: string;
+    request: {
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+    };
   },
 ): Promise<void> {
+  if (
+    event.responseStatusCode !== undefined ||
+    event.responseErrorReason !== undefined
+  ) {
+    await finishPrivateRevalidation(tabId, event);
+    return;
+  }
+
   const resourceType = event.resourceType ?? "";
+  if (
+    isPrivateRevalidationCandidate(
+      event.request.url,
+      event.request.method,
+      resourceType,
+    )
+  ) {
+    await beginPrivateRevalidation(tabId, event);
+    return;
+  }
+
   if (
     !isReplayInterceptCandidate(
       event.request.url,
@@ -629,6 +803,38 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
         {
           urlPattern: "https://cdn.oaistatic.com:*/*",
           requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chatgpt.com/backend-api/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chatgpt.com:*/backend-api/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chat.openai.com/backend-api/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chat.openai.com:*/backend-api/*",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chatgpt.com/backend-api/*",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chatgpt.com:*/backend-api/*",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chat.openai.com/backend-api/*",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chat.openai.com:*/backend-api/*",
+          requestStage: "Response",
         },
       ],
     });
