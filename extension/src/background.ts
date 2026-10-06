@@ -408,8 +408,13 @@ function getNativePort(): chrome.runtime.Port | undefined {
     });
     port.onMessage.addListener(handleNativeMessage);
     nativePort = port;
+    port.postMessage({
+      type: "extension_runtime_state",
+      build_id: RUNNING_BUILD_ID,
+    });
     return port;
   } catch (error) {
+    nativePort = undefined;
     failAllCacheLookups();
     console.warn("Mirrarium native host unavailable", error);
     return undefined;

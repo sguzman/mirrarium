@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { chromium, expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { chromium, expect, test } from "@playwright/test";
 
 const execFileAsync = promisify(execFile);
 const nativeHostName = "com.sguzman.mirrarium";
@@ -39,115 +39,6 @@ async function readFilesRecursively(directory: string): Promise<Buffer[]> {
   return files;
 }
 
-async function extensionWorkerBuildIdsViaCdp(
-  context: BrowserContext,
-  page: Page,
-): Promise<string[]> {
-  const browser = context.browser();
-  if (!browser) return [];
-
-  const serviceWorkerCdp = await context.newCDPSession(page);
-  try {
-    await serviceWorkerCdp.send("ServiceWorker.enable");
-    await serviceWorkerCdp.send("ServiceWorker.startWorker", {
-      scopeURL: `chrome-extension://${expectedExtensionId}/`,
-    });
-  } finally {
-    await serviceWorkerCdp.detach();
-  }
-
-  const cdp = await browser.newBrowserCDPSession();
-  try {
-    const { targetInfos } = (await cdp.send("Target.getTargets")) as {
-      targetInfos: Array<{
-        targetId: string;
-        type: string;
-        url: string;
-      }>;
-    };
-    const workerTargets = targetInfos.filter(
-      (target) =>
-        target.type === "service_worker" &&
-        target.url === `chrome-extension://${expectedExtensionId}/background.js`,
-    );
-    const buildIds: string[] = [];
-
-    for (const target of workerTargets) {
-      const { sessionId } = (await cdp.send("Target.attachToTarget", {
-        targetId: target.targetId,
-        flatten: false,
-      })) as { sessionId: string };
-
-      let nextMessageId = 0;
-      const sendToWorker = async (
-        method: string,
-        params: Record<string, unknown> = {},
-      ): Promise<Record<string, unknown>> => {
-        const messageId = ++nextMessageId;
-        let onMessage:
-          | ((event: { sessionId: string; message: string }) => void)
-          | undefined;
-        let timeoutId: NodeJS.Timeout | undefined;
-        const response = new Promise<Record<string, unknown>>((resolve, reject) => {
-          onMessage = (event) => {
-            if (event.sessionId !== sessionId) return;
-            const payload = JSON.parse(event.message) as {
-              id?: number;
-              result?: Record<string, unknown>;
-              error?: unknown;
-            };
-            if (payload.id !== messageId) return;
-            if (timeoutId) clearTimeout(timeoutId);
-            cdp.off("Target.receivedMessageFromTarget", onMessage!);
-            if (payload.error) {
-              reject(new Error(JSON.stringify(payload.error)));
-              return;
-            }
-            resolve(payload.result ?? {});
-          };
-          cdp.on("Target.receivedMessageFromTarget", onMessage);
-          timeoutId = setTimeout(() => {
-            cdp.off("Target.receivedMessageFromTarget", onMessage!);
-            reject(new Error(`timed out evaluating extension worker ${target.targetId}`));
-          }, 1_000);
-        });
-
-        await cdp.send("Target.sendMessageToTarget", {
-          sessionId,
-          message: JSON.stringify({ id: messageId, method, params }),
-        });
-        return await response;
-      };
-
-      try {
-        const evaluation = (await sendToWorker("Runtime.evaluate", {
-          expression:
-            "chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version",
-          returnByValue: true,
-        })) as {
-          result?: {
-            type?: string;
-            value?: unknown;
-          };
-        };
-        if (typeof evaluation.result?.value === "string") {
-          buildIds.push(evaluation.result.value);
-        }
-      } catch {
-        // The worker may be replaced while the raw CDP probe is attached.
-      } finally {
-        await cdp
-          .send("Target.detachFromTarget", { sessionId })
-          .catch(() => undefined);
-      }
-    }
-
-    return buildIds;
-  } finally {
-    await cdp.detach();
-  }
-}
-
 test("captures ChatGPT-shaped traffic into isolated durable storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "mirrarium-e2e-"));
   const browserHome = join(root, "home");
@@ -156,6 +47,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   const privateKeyFile = join(root, "private.key");
   const installedExtensionPath = join(root, "installed-extension");
   const extensionStateFile = join(root, "extension-install.json");
+  const extensionRuntimeStateFile = join(root, "extension-runtime.json");
   const childEnv = {
     ...process.env,
     MIRRARIUM_PRIVATE_KEY_FILE: privateKeyFile,
@@ -174,6 +66,28 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       },
     });
     return JSON.parse(stdout) as StoreStats;
+  }
+
+  async function readRunningExtensionBuildId(): Promise<string | null> {
+    try {
+      const state = JSON.parse(
+        await readFile(extensionRuntimeStateFile, "utf8"),
+      ) as {
+        schema_version?: number;
+        extension_id?: string;
+        build_id?: string;
+      };
+      if (
+        state.schema_version !== 1 ||
+        state.extension_id !== expectedExtensionId ||
+        typeof state.build_id !== "string"
+      ) {
+        return null;
+      }
+      return state.build_id;
+    } catch {
+      return null;
+    }
   }
 
   try {
@@ -1646,6 +1560,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         build_id: updatedBuildId,
       });
 
+      await expect
+        .poll(readRunningExtensionBuildId, { timeout: 10_000 })
+        .toBe(extensionInstall.build_id);
+
       const neutralPage = await context.newPage();
       await neutralPage.goto("about:blank");
       await neutralPage.bringToFront();
@@ -1655,11 +1573,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       await page.bringToFront();
 
       await expect
-        .poll(
-          async () => (await extensionWorkerBuildIdsViaCdp(context, page)).join(","),
-          { timeout: 10_000 },
-        )
-        .toContain(updatedBuildId);
+        .poll(readRunningExtensionBuildId, { timeout: 10_000 })
+        .toBe(updatedBuildId);
       await neutralPage.close();
     } finally {
       await context.close();

@@ -53,6 +53,9 @@ pub struct CaptureMetadata {
 pub enum HostRequest {
     Ping,
     ExtensionInstallState,
+    ExtensionRuntimeState {
+        build_id: String,
+    },
     CacheLookup {
         lookup_id: String,
         url: String,

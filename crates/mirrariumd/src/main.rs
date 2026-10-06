@@ -51,6 +51,16 @@ fn run_native_host() -> Result<()> {
                 };
                 write_native_response(&mut output, &response)?;
             }
+            Ok(HostRequest::ExtensionRuntimeState { build_id }) => {
+                let response = match publish_extension_runtime_state(&build_id) {
+                    Ok(()) => HostResponse::Ack { capture_id: None },
+                    Err(error) => HostResponse::Error {
+                        capture_id: None,
+                        message: format!("extension runtime state unavailable: {error:#}"),
+                    },
+                };
+                write_native_response(&mut output, &response)?;
+            }
             Ok(HostRequest::CacheLookup {
                 lookup_id,
                 url,
@@ -269,6 +279,7 @@ fn request_capture_id(request: &HostRequest) -> Option<String> {
         | HostRequest::CaptureFinish { capture_id, .. } => Some(capture_id.clone()),
         HostRequest::Ping
         | HostRequest::ExtensionInstallState
+        | HostRequest::ExtensionRuntimeState { .. }
         | HostRequest::CacheLookup { .. }
         | HostRequest::PrivateReadLookup { .. }
         | HostRequest::CacheReplayOutcome { .. }
@@ -287,6 +298,15 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
                 Err(error) => HostResponse::Error {
                     capture_id: None,
                     message: format!("extension install state unavailable: {error:#}"),
+                },
+            };
+        }
+        HostRequest::ExtensionRuntimeState { build_id } => {
+            return match publish_extension_runtime_state(&build_id) {
+                Ok(()) => HostResponse::Ack { capture_id: None },
+                Err(error) => HostResponse::Error {
+                    capture_id: None,
+                    message: format!("extension runtime state unavailable: {error:#}"),
                 },
             };
         }
@@ -367,6 +387,48 @@ fn extension_state_path() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .context("set HOME, XDG_CONFIG_HOME, or MIRRARIUM_EXTENSION_STATE_FILE")?;
     Ok(PathBuf::from(home).join(".config/mirrarium/extension-install.json"))
+}
+
+fn extension_runtime_state_path() -> Result<PathBuf> {
+    let install_state_path = extension_state_path()?;
+    let parent = install_state_path
+        .parent()
+        .context("extension install-state path has no parent directory")?;
+    Ok(parent.join("extension-runtime.json"))
+}
+
+fn publish_extension_runtime_state(build_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !build_id.is_empty() && build_id.len() <= 256,
+        "extension runtime build_id is invalid"
+    );
+
+    let state_path = extension_runtime_state_path()?;
+    let parent = state_path
+        .parent()
+        .context("extension runtime-state path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating extension runtime-state directory {}", parent.display()))?;
+
+    let state = serde_json::json!({
+        "schema_version": 1,
+        "extension_id": EXTENSION_ID,
+        "build_id": build_id,
+    });
+    let temp = parent.join(format!(
+        ".extension-runtime.{}.tmp",
+        std::process::id()
+    ));
+    fs::write(&temp, serde_json::to_vec_pretty(&state)?)
+        .with_context(|| format!("writing extension runtime state {}", temp.display()))?;
+    fs::rename(&temp, &state_path).with_context(|| {
+        format!(
+            "installing extension runtime state {} to {}",
+            temp.display(),
+            state_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn installed_extension_build_id() -> Result<Option<String>> {
