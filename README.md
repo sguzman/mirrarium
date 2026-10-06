@@ -91,9 +91,11 @@ mirrarium native-host status
 
 `privacy migrate` verifies each legacy private object against its indexed logical byte count and SHA-256, then atomically replaces it with an encrypted envelope. The command is idempotent. The default key lives outside the data archive under `XDG_CONFIG_HOME/mirrarium/private.key` or `~/.config/mirrarium/private.key`; `MIRRARIUM_PRIVATE_KEY_FILE` can override it. **Back up the key separately. Losing it makes encrypted private CAS objects unrecoverable.**
 
-Persisted private CAS payloads and the rebuildable derived corpus database are encrypted at rest. The corpus uses SQLCipher with a corpus-specific key derived from Mirrarium's master key; `corpus rebuild` deletes any old corpus DB/WAL/SHM and recreates it encrypted from raw evidence. The corpus file therefore cannot be opened as ordinary SQLite without the Mirrarium key.
+Persisted private CAS payloads, the authoritative raw ledger, and the rebuildable derived corpus database are encrypted at rest. New raw ledgers are SQLCipher-encrypted from birth with a ledger-specific key derived from Mirrarium's master key. Existing ordinary-SQLite ledgers remain readable until `privacy migrate`; migration checkpoints the plaintext WAL, exports into a fresh keyed SQLCipher database, verifies schema, row counts, user version, and integrity, atomically installs the encrypted ledger, and preserves recovery evidence on failure. Read-only CLI/cache/corpus inspection never opens a second ledger writer.
 
-The remaining plaintext private state is narrower: the authoritative raw `ledger.sqlite3` is still ordinary SQLite, and in-flight response bodies are written to permission-hardened `.incoming` temp files before final CAS encryption. Those two surfaces remain separate work.
+The derived corpus likewise uses SQLCipher with its own domain-separated key; `corpus rebuild` deletes any old corpus DB/WAL/SHM and recreates it encrypted from raw evidence. Neither database can be opened as ordinary SQLite without the Mirrarium key.
+
+The remaining plaintext private at-rest surface is now the in-flight response capture path: private response chunks are written to permission-hardened `.incoming` temp files before sanitization and final CAS encryption. Eliminating that plaintext staging without weakening streaming, sanitization, or crash-recovery semantics is the remaining storage-security task.
 
 `cache opportunities` combines public/private coverage with runtime savings and, when evidence exists, names the largest currently unsupported public host and private MIME/resource family plus the policy gate blocking each. A null lead means captured evidence does not justify widening that side yet.
 

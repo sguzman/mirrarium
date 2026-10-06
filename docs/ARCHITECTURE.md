@@ -117,6 +117,10 @@ Implemented:
 - explicit derived-corpus schema versioning with rebuild-required failure semantics;
 - SQLCipher encryption for the rebuildable derived corpus using a domain-separated key derived from the Mirrarium master key;
 - Chromium proof that the derived corpus is not a plaintext SQLite file and does not expose known fixture conversation plaintext at rest;
+- SQLCipher encryption for new authoritative raw ledgers from birth with a separate domain-derived key;
+- verified legacy raw-ledger migration via WAL checkpoint + `sqlcipher_export`, schema/row-count/user-version/integrity checks, atomic replacement, and interruption recovery;
+- read-only ledger inspection paths for CLI/cache/corpus/daemon stats so the browser's native host remains the sole long-lived writer;
+- Chromium proof that encrypted raw-ledger capture, changed private-response persistence, and subsequent revalidation remain live while read-only inspection runs concurrently;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
 - immutable public-resource replay candidate inventory and policy auditing;
 - explicit separation between immutable/stable public evidence, currently supported replay scope, and safe host/path expansion candidates with byte totals;
@@ -144,5 +148,4 @@ Next:
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
-- encrypt the authoritative raw SQLite ledger with a verified plaintext-to-SQLCipher migration path;
 - eliminate plaintext in-flight private capture files without weakening response sanitization or crash recovery semantics.
