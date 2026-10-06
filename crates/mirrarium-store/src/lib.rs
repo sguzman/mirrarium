@@ -2508,7 +2508,9 @@ pub fn classify(metadata: &CaptureMetadata) -> PrivacyClass {
         || host == "static.openai.com";
     let static_path = path.starts_with("/_next/static/");
 
-    if static_path || (static_type && (static_host || is_chatgpt_host(&host))) {
+    if url.scheme() == "https"
+        && (static_path || (static_type && (static_host || is_chatgpt_host(&host))))
+    {
         return PrivacyClass::Public;
     }
 
@@ -3139,6 +3141,23 @@ mod tests {
             .unwrap();
         assert_eq!(count, 3);
         assert_eq!(bytes, 128);
+    }
+
+    #[test]
+    fn websocket_chatgpt_static_path_remains_private() {
+        let item = metadata(
+            "websocket-private",
+            "wss://chatgpt.com/_next/static/socket",
+            "WebSocketFrame",
+        );
+        assert_eq!(classify(&item), PrivacyClass::Private);
+
+        let public_item = metadata(
+            "https-static",
+            "https://chatgpt.com/_next/static/example.js",
+            "Script",
+        );
+        assert_eq!(classify(&public_item), PrivacyClass::Public);
     }
 
     #[test]
