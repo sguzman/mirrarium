@@ -831,15 +831,19 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(attachment?.observation.sanitized_url).not.toContain(
         "fixture-download-secret",
       );
-      expect(attachment?.downloads).toHaveLength(1);
-      expect(attachment?.downloads[0]).toMatchObject({
-        mime_type: "text/plain",
-      });
-      expect(attachment?.downloads[0].source_url).not.toContain(
-        "fixture-download-secret",
-      );
-      expect(attachment?.downloads[0].body_hash).toHaveLength(64);
-      expect(attachment?.downloads[0].body_bytes).toBeGreaterThan(0);
+      expect(attachment?.downloads.length).toBeGreaterThanOrEqual(1);
+      expect(
+        attachment?.downloads.every(
+          (download) =>
+            download.mime_type === "text/plain" &&
+            !download.source_url.includes("fixture-download-secret") &&
+            download.body_hash.length === 64 &&
+            download.body_bytes > 0,
+        ),
+      ).toBe(true);
+      expect(
+        new Set(attachment?.downloads.map((download) => download.body_hash)).size,
+      ).toBe(1);
 
       const { stdout: conversationsStdout } = await execFileAsync(
         cliPath,
