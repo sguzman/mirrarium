@@ -341,7 +341,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
-        ["captures", "20"],
+        ["captures", "100"],
         {
           env: {
             ...process.env,
