@@ -1636,13 +1636,21 @@ fn private_key_path(root: &Path) -> Result<PathBuf> {
     if let Some(path) = env::var_os("MIRRARIUM_PRIVATE_KEY_FILE") {
         return Ok(PathBuf::from(path));
     }
+
+    // An explicit data root is frequently used for isolated/disposable
+    // Mirrarium instances. Keep the key with that explicitly selected root so
+    // every cooperating process resolves the same key even when HOME differs.
+    if env::var_os("MIRRARIUM_DATA_DIR").is_some() || cfg!(test) {
+        return Ok(root.join(".keys/private.key"));
+    }
+
     if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(path).join("mirrarium/private.key"));
     }
     if let Some(home) = env::var_os("HOME") {
         return Ok(PathBuf::from(home).join(".config/mirrarium/private.key"));
     }
-    Ok(root.join(".private.key"))
+    Ok(root.join(".keys/private.key"))
 }
 
 fn read_private_key(path: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
