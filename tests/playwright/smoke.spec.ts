@@ -743,6 +743,43 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(revalidationStats.fulfill_errors).toBe(0);
       expect(revalidationStats.saved_body_bytes).toBeGreaterThan(0);
 
+      const { stdout: opportunitiesStdout } = await execFileAsync(
+        cliPath,
+        ["cache", "opportunities"],
+        {
+          env: {
+            ...process.env,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const opportunities = JSON.parse(opportunitiesStdout) as {
+        public_observed_captures: number;
+        public_unique_urls: number;
+        public_eligible_body_bytes: number;
+        public_replay_supported_body_bytes: number;
+        public_expansion_candidate_body_bytes: number;
+        private_observed_captures: number;
+        private_observed_body_bytes: number;
+        private_validator_body_bytes: number;
+        private_current_policy_body_bytes: number;
+        private_expansion_candidate_body_bytes: number;
+        runtime_public_replayed_bytes: number;
+        runtime_private_revalidated_saved_body_bytes: number;
+        runtime_total_saved_body_bytes: number;
+      };
+      expect(opportunities.public_replay_supported_body_bytes).toBeGreaterThan(0);
+      expect(opportunities.private_current_policy_body_bytes).toBeGreaterThan(0);
+      expect(opportunities.runtime_public_replayed_bytes).toBe(
+        replayStats.replayed_bytes,
+      );
+      expect(opportunities.runtime_private_revalidated_saved_body_bytes).toBe(
+        revalidationStats.saved_body_bytes,
+      );
+      expect(opportunities.runtime_total_saved_body_bytes).toBe(
+        replayStats.replayed_bytes + revalidationStats.saved_body_bytes,
+      );
+
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
         ["captures", "100"],
