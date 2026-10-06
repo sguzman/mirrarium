@@ -1,4 +1,8 @@
-use std::io::{self, Read, Write};
+use std::{
+    env, fs,
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -9,6 +13,7 @@ use mirrarium_store::{default_data_root, CaptureStore};
 const MAX_NATIVE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
 const REPLAY_RAW_CHUNK_BYTES: usize = 384 * 1024;
+const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -198,6 +203,7 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         | HostRequest::RequestBodyFinish { capture_id, .. }
         | HostRequest::CaptureFinish { capture_id, .. } => Some(capture_id.clone()),
         HostRequest::Ping
+        | HostRequest::ExtensionInstallState
         | HostRequest::CacheLookup { .. }
         | HostRequest::PrivateReadLookup { .. }
         | HostRequest::CacheReplayOutcome { .. }
@@ -206,6 +212,15 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
 
     let result = match request {
         HostRequest::Ping => return HostResponse::Pong,
+        HostRequest::ExtensionInstallState => {
+            return match installed_extension_build_id() {
+                Ok(build_id) => HostResponse::ExtensionInstallState { build_id },
+                Err(error) => HostResponse::Error {
+                    capture_id: None,
+                    message: format!("extension install state unavailable: {error:#}"),
+                },
+            };
+        }
         HostRequest::CacheLookup { lookup_id, .. } => {
             return HostResponse::CacheLookupError {
                 lookup_id,
@@ -271,6 +286,70 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             message: format!("{error:#}"),
         },
     }
+}
+
+fn extension_state_path() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("MIRRARIUM_EXTENSION_STATE_FILE") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(path).join("mirrarium/extension-install.json"));
+    }
+    let home = env::var_os("HOME")
+        .context("set HOME, XDG_CONFIG_HOME, or MIRRARIUM_EXTENSION_STATE_FILE")?;
+    Ok(PathBuf::from(home).join(".config/mirrarium/extension-install.json"))
+}
+
+fn installed_extension_build_id() -> Result<Option<String>> {
+    read_extension_build_id_from_state(&extension_state_path()?)
+}
+
+fn read_extension_build_id_from_state(path: &Path) -> Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", path.display()))?;
+
+    anyhow::ensure!(
+        state.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1),
+        "unsupported extension install-state schema"
+    );
+    anyhow::ensure!(
+        state.get("extension_id").and_then(serde_json::Value::as_str) == Some(EXTENSION_ID),
+        "extension install-state id mismatch"
+    );
+    let build_id = state
+        .get("build_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("extension install-state build_id is missing")?;
+    let install_path = state
+        .get("install_path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .context("extension install-state install_path is missing")?;
+    let manifest_path = install_path.join("manifest.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("reading installed manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parsing installed manifest {}", manifest_path.display()))?;
+    let manifest_build_id = manifest
+        .get("version_name")
+        .and_then(serde_json::Value::as_str);
+    if manifest_build_id != Some(build_id) {
+        return Ok(None);
+    }
+
+    Ok(Some(build_id.to_owned()))
 }
 
 fn read_native_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
@@ -453,6 +532,52 @@ mod tests {
             }
         }
         assert_eq!(reconstructed, body);
+    }
+
+    #[test]
+    fn extension_install_state_requires_matching_installed_manifest() {
+        let directory = tempdir().unwrap();
+        let install = directory.path().join("extension");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(
+            install.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "manifest_version": 3,
+                "name": "Mirrarium",
+                "version": "0.1.0",
+                "version_name": "0.1.0+abc"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = directory.path().join("state.json");
+        fs::write(
+            &state,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "extension_id": EXTENSION_ID,
+                "build_id": "0.1.0+abc",
+                "install_path": install
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_extension_build_id_from_state(&state).unwrap().as_deref(),
+            Some("0.1.0+abc")
+        );
+
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("extension/manifest.json")).unwrap())
+                .unwrap();
+        manifest["version_name"] = serde_json::Value::String("0.1.0+different".to_owned());
+        fs::write(
+            directory.path().join("extension/manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(read_extension_build_id_from_state(&state).unwrap().is_none());
     }
 
     #[test]
