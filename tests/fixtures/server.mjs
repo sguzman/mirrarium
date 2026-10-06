@@ -49,19 +49,30 @@ const stressScriptTags = Array.from(
   (_, index) => `<script src="/_next/static/stress-${index}.js"></script>`,
 ).join("\n");
 
-function encodeWebSocketTextFrame(text) {
-  const payload = Buffer.from(text, "utf8");
-  if (payload.length >= 126) {
-    throw new Error("fixture WebSocket payload unexpectedly large");
+function encodeWebSocketFrame(opcode, payload) {
+  let header;
+  if (payload.length <= 125) {
+    header = Buffer.from([0x80 | opcode, payload.length]);
+  } else if (payload.length <= 0xffff) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(payload.length), 2);
   }
-  return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  return Buffer.concat([header, payload]);
+}
+
+function encodeWebSocketTextFrame(text) {
+  return encodeWebSocketFrame(1, Buffer.from(text, "utf8"));
 }
 
 function encodeWebSocketBinaryFrame(payload) {
-  if (payload.length >= 126) {
-    throw new Error("fixture WebSocket binary payload unexpectedly large");
-  }
-  return Buffer.concat([Buffer.from([0x82, payload.length]), payload]);
+  return encodeWebSocketFrame(2, payload);
 }
 
 const page = `<!doctype html>
@@ -732,6 +743,13 @@ fixtureServer.on("upgrade", (request, socket) => {
         ),
         encodeWebSocketTextFrame("plain websocket fixture"),
         encodeWebSocketBinaryFrame(Buffer.from([1, 2, 3, 4])),
+        encodeWebSocketTextFrame(
+          JSON.stringify({
+            message: "oversized websocket fixture",
+            padding: "x".repeat(1024 * 1024 + 1024),
+            access_token: "fixture-ws-oversized-secret",
+          }),
+        ),
       ]),
     );
   });

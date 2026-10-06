@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WEBSOCKET_FRAME_BYTES: u64 = 1024 * 1024;
 const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
 const PRIVATE_STREAM_MAGIC: &[u8; 8] = b"MIRRPV02";
 const PRIVATE_KEY_BYTES: usize = 32;
@@ -453,12 +454,23 @@ impl CaptureStore {
         let bytes = BASE64
             .decode(data_base64)
             .with_context(|| format!("decoding chunk {sequence} for {capture_id}"))?;
-        capture.writer.write_chunk(&bytes)?;
-        capture.hasher.update(&bytes);
-        capture.bytes = capture
+        let next_bytes = capture
             .bytes
             .checked_add(bytes.len() as u64)
             .context("capture byte count overflow")?;
+        if capture.metadata.resource_type == "WebSocketFrame"
+            && next_bytes > MAX_WEBSOCKET_FRAME_BYTES
+        {
+            capture.suppressed_reason = Some("websocket_text_frame_too_large".to_owned());
+            capture.next_sequence = capture
+                .next_sequence
+                .checked_add(1)
+                .context("capture sequence overflow")?;
+            return Ok(());
+        }
+        capture.writer.write_chunk(&bytes)?;
+        capture.hasher.update(&bytes);
+        capture.bytes = next_bytes;
         capture.next_sequence = capture
             .next_sequence
             .checked_add(1)
@@ -3284,6 +3296,42 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn oversized_websocket_frame_is_suppressed_before_cas() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let mut item = metadata(
+            "ws-too-large",
+            "https://chatgpt.com/backend-api/ws-fixture",
+            "WebSocketFrame",
+        );
+        item.method = "WS_RECV".to_owned();
+        item.mime_type = "application/json".to_owned();
+        item.status = 101;
+        store.begin(item).unwrap();
+
+        let chunk = vec![b'x'; 384 * 1024];
+        for sequence in 0..3 {
+            store
+                .append_chunk(
+                    "ws-too-large",
+                    sequence,
+                    &BASE64.encode(&chunk),
+                )
+                .unwrap();
+        }
+        store.finish("ws-too-large", None, None).unwrap();
+
+        let capture = store.recent_captures(10).unwrap().pop().unwrap();
+        assert_eq!(capture.body_hash, None);
+        assert_eq!(capture.body_bytes, 0);
+        assert_eq!(
+            capture.body_error.as_deref(),
+            Some("suppressed:websocket_text_frame_too_large")
+        );
+        assert_eq!(store.stats().unwrap().suppressed_websocket_frames, 1);
     }
 
     #[test]

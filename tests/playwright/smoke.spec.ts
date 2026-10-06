@@ -999,11 +999,13 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
             socket.addEventListener("message", (event) => {
               if (typeof event.data === "string") {
                 textMessages += 1;
-                if (event.data.startsWith("{")) jsonMessage = event.data;
+                if (event.data.startsWith("{") && jsonMessage === undefined) {
+                  jsonMessage = event.data;
+                }
               } else {
                 binaryMessages += 1;
               }
-              if (textMessages + binaryMessages === 3) {
+              if (textMessages + binaryMessages === 4) {
                 clearTimeout(timeout);
                 socket.close();
                 resolve({ textMessages, binaryMessages, jsonMessage });
@@ -1016,7 +1018,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           }),
       );
       expect(websocketRoundTrip).toMatchObject({
-        textMessages: 2,
+        textMessages: 3,
         binaryMessages: 1,
       });
       expect(JSON.parse(websocketRoundTrip.jsonMessage ?? "{}")).toMatchObject({
@@ -1210,11 +1212,17 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const websocketReceivedBinary = websocketReceived.find(
         (capture) => capture.mime_type === "application/octet-stream",
       );
+      const websocketReceivedOversized = websocketReceived.find(
+        (capture) =>
+          capture.body_error ===
+          "suppressed:websocket_text_frame_too_large",
+      );
       expect(websocketSent).toBeTruthy();
-      expect(websocketReceived).toHaveLength(3);
+      expect(websocketReceived).toHaveLength(4);
       expect(websocketReceivedJson).toBeTruthy();
       expect(websocketReceivedPlain).toBeTruthy();
       expect(websocketReceivedBinary).toBeTruthy();
+      expect(websocketReceivedOversized).toBeTruthy();
       expect(websocketSent?.status).toBe(101);
       expect(websocketReceivedJson?.status).toBe(101);
       expect(websocketSent?.mime_type).toBe("application/json");
@@ -1233,6 +1241,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(websocketReceivedBinary?.body_bytes).toBe(0);
       expect(websocketReceivedBinary?.body_error).toBe(
         "suppressed:websocket_binary_frame_not_archived",
+      );
+      expect(websocketReceivedOversized?.body_hash).toBeFalsy();
+      expect(websocketReceivedOversized?.body_bytes).toBe(0);
+      expect(websocketReceivedOversized?.body_error).toBe(
+        "suppressed:websocket_text_frame_too_large",
       );
       expect(websocketSent?.provenance.lifecycle_id).toBeTruthy();
       for (const received of websocketReceived) {
@@ -1261,10 +1274,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         websocket_frame_errors: number;
         suppressed_websocket_frames: number;
       };
-      expect(websocketStats.websocket_frames).toBe(4);
+      expect(websocketStats.websocket_frames).toBe(5);
       expect(websocketStats.websocket_frame_body_bytes).toBeGreaterThan(0);
       expect(websocketStats.websocket_frame_errors).toBe(0);
-      expect(websocketStats.suppressed_websocket_frames).toBe(2);
+      expect(websocketStats.suppressed_websocket_frames).toBe(3);
 
       const abortedCapture = captures.find(
         (capture) =>

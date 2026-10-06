@@ -3,6 +3,7 @@ const CDP_VERSION = "1.3";
 const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
+const MAX_WEBSOCKET_JSON_FRAME_BYTES = 1024 * 1024;
 const RUNNING_BUILD_ID =
   chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version;
 
@@ -1426,6 +1427,29 @@ function postBase64Body(captureId: string, body: string): void {
   }
 }
 
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   const block = 32 * 1024;
@@ -1541,12 +1565,21 @@ function captureWebSocketFrame(
     bodyError = "suppressed:credential_endpoint";
   } else if (frame.opcode === 1) {
     mimeType = "application/json";
-    try {
-      const value: unknown = JSON.parse(frame.payloadData);
-      body = redactJsonSecrets(value) ? JSON.stringify(value) : frame.payloadData;
-    } catch {
-      bodyError = "suppressed:unparseable_websocket_text_frame";
-      mimeType = "text/plain; charset=utf-8";
+    const payloadBytes = utf8ByteLength(frame.payloadData);
+    if (payloadBytes > MAX_WEBSOCKET_JSON_FRAME_BYTES) {
+      bodyError = "suppressed:websocket_text_frame_too_large";
+    } else {
+      try {
+        const value: unknown = JSON.parse(frame.payloadData);
+        body = redactJsonSecrets(value) ? JSON.stringify(value) : frame.payloadData;
+        if (utf8ByteLength(body) > MAX_WEBSOCKET_JSON_FRAME_BYTES) {
+          body = undefined;
+          bodyError = "suppressed:websocket_text_frame_too_large";
+        }
+      } catch {
+        bodyError = "suppressed:unparseable_websocket_text_frame";
+        mimeType = "text/plain; charset=utf-8";
+      }
     }
   } else if (frame.opcode === 2) {
     bodyError = "suppressed:websocket_binary_frame_not_archived";
@@ -1586,11 +1619,12 @@ function captureWebSocketFrame(
     return;
   }
 
+  const bodyBytes = utf8ByteLength(body);
   postUtf8Body(captureId, body);
   postNative({
     type: "capture_finish",
     capture_id: captureId,
-    encoded_data_length: new TextEncoder().encode(body).length,
+    encoded_data_length: bodyBytes,
     body_error: null,
   });
 }
