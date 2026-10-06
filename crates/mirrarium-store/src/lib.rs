@@ -2,14 +2,19 @@ use std::{
     collections::{BTreeMap, HashMap},
     env,
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305, XNonce,
+};
 use mirrarium_protocol::{CaptureMetadata, CaptureProvenance, RequestBodyMetadata};
+use rand_core::{OsRng, RngCore};
 use rusqlite::{params, types::Type, Connection};
 use serde::Serialize;
 use serde_json::Value;
@@ -17,6 +22,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
+const PRIVATE_KEY_BYTES: usize = 32;
+const PRIVATE_NONCE_BYTES: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyClass {
@@ -1629,6 +1637,134 @@ fn is_chatgpt_host(host: &str) -> bool {
         || host == "chat.openai.com"
 }
 
+fn private_key_path(root: &Path) -> Result<PathBuf> {
+    if let Some(path) = env::var_os("MIRRARIUM_PRIVATE_KEY_FILE") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(path).join("mirrarium/private.key"));
+    }
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".config/mirrarium/private.key"));
+    }
+    Ok(root.join(".private.key"))
+}
+
+fn read_private_key(path: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("reading Mirrarium private key {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() == PRIVATE_KEY_BYTES,
+        "Mirrarium private key {} must be exactly {} bytes",
+        path.display(),
+        PRIVATE_KEY_BYTES
+    );
+    let mut key = [0_u8; PRIVATE_KEY_BYTES];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+fn load_or_create_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
+    let path = private_key_path(root)?;
+    match read_private_key(&path) {
+        Ok(key) => return Ok(key),
+        Err(error) if path.exists() => return Err(error),
+        Err(_) => {}
+    }
+
+    let parent = path
+        .parent()
+        .context("Mirrarium private key path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating private-key directory {}", parent.display()))?;
+    harden_directory(parent)?;
+
+    let mut key = [0_u8; PRIVATE_KEY_BYTES];
+    OsRng.fill_bytes(&mut key);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            harden_file(&path)?;
+            file.write_all(&key)?;
+            file.flush()?;
+            Ok(key)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => read_private_key(&path),
+        Err(error) => Err(error)
+            .with_context(|| format!("creating Mirrarium private key {}", path.display())),
+    }
+}
+
+fn load_existing_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
+    let path = private_key_path(root)?;
+    read_private_key(&path).with_context(|| {
+        format!(
+            "private object is encrypted but Mirrarium key {} is unavailable",
+            path.display()
+        )
+    })
+}
+
+fn private_object_aad(hash: &str) -> Vec<u8> {
+    let mut aad = b"mirrarium-private-object-v1\0".to_vec();
+    aad.extend_from_slice(hash.as_bytes());
+    aad
+}
+
+fn encrypt_private_object_bytes(
+    key: &[u8; PRIVATE_KEY_BYTES],
+    hash: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let mut nonce = [0_u8; PRIVATE_NONCE_BYTES];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &private_object_aad(hash),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("encrypting private object failed"))?;
+
+    let mut envelope = Vec::with_capacity(
+        PRIVATE_OBJECT_MAGIC.len() + PRIVATE_NONCE_BYTES + ciphertext.len(),
+    );
+    envelope.extend_from_slice(PRIVATE_OBJECT_MAGIC);
+    envelope.extend_from_slice(&nonce);
+    envelope.extend_from_slice(&ciphertext);
+    Ok(envelope)
+}
+
+fn decrypt_private_object_bytes(
+    key: &[u8; PRIVATE_KEY_BYTES],
+    hash: &str,
+    envelope: &[u8],
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        envelope.len() >= PRIVATE_OBJECT_MAGIC.len() + PRIVATE_NONCE_BYTES + 16,
+        "encrypted private object envelope is truncated"
+    );
+    anyhow::ensure!(
+        envelope.starts_with(PRIVATE_OBJECT_MAGIC),
+        "private object envelope magic mismatch"
+    );
+
+    let nonce_start = PRIVATE_OBJECT_MAGIC.len();
+    let nonce_end = nonce_start + PRIVATE_NONCE_BYTES;
+    let cipher = XChaCha20Poly1305::new(key.into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(&envelope[nonce_start..nonce_end]),
+            Payload {
+                msg: &envelope[nonce_end..],
+                aad: &private_object_aad(hash),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("decrypting private object failed"))
+}
+
 pub fn read_verified_object(
     root: impl AsRef<Path>,
     storage_class: &str,
@@ -1870,6 +2006,41 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn private_object_envelope_round_trips_and_binds_hash() {
+        let key = [7_u8; PRIVATE_KEY_BYTES];
+        let plaintext = b"private fixture bytes";
+        let hash = sha256_hex(plaintext);
+        let envelope = encrypt_private_object_bytes(&key, &hash, plaintext).unwrap();
+
+        assert!(envelope.starts_with(PRIVATE_OBJECT_MAGIC));
+        assert_ne!(envelope.as_slice(), plaintext);
+        assert!(!String::from_utf8_lossy(&envelope).contains("private fixture bytes"));
+
+        let decoded = decrypt_private_object_bytes(&key, &hash, &envelope).unwrap();
+        assert_eq!(decoded, plaintext);
+
+        let wrong_hash = sha256_hex(b"different plaintext");
+        assert!(decrypt_private_object_bytes(&key, &wrong_hash, &envelope).is_err());
+    }
+
+    #[test]
+    fn private_object_envelope_rejects_wrong_key_and_truncation() {
+        let key = [3_u8; PRIVATE_KEY_BYTES];
+        let wrong_key = [4_u8; PRIVATE_KEY_BYTES];
+        let plaintext = b"private fixture bytes";
+        let hash = sha256_hex(plaintext);
+        let envelope = encrypt_private_object_bytes(&key, &hash, plaintext).unwrap();
+
+        assert!(decrypt_private_object_bytes(&wrong_key, &hash, &envelope).is_err());
+        assert!(decrypt_private_object_bytes(
+            &key,
+            &hash,
+            &envelope[..PRIVATE_OBJECT_MAGIC.len() + PRIVATE_NONCE_BYTES]
+        )
+        .is_err());
     }
 
     #[test]

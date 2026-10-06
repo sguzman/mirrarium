@@ -17,6 +17,8 @@ rust-version = "1.82"
 [workspace.dependencies]
 anyhow = "1.0"
 base64 = "0.22"
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
