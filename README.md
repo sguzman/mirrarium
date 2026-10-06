@@ -91,7 +91,9 @@ mirrarium native-host status
 
 `privacy migrate` verifies each legacy private object against its indexed logical byte count and SHA-256, then atomically replaces it with an encrypted envelope. The command is idempotent. The default key lives outside the data archive under `XDG_CONFIG_HOME/mirrarium/private.key` or `~/.config/mirrarium/private.key`; `MIRRARIUM_PRIVATE_KEY_FILE` can override it. **Back up the key separately. Losing it makes encrypted private CAS objects unrecoverable.**
 
-This currently protects persisted private CAS payloads, not every private byte Mirrarium owns. The raw SQLite ledger, rebuildable derived corpus database, and in-flight temporary capture files are still plaintext (with existing permission hardening and secret redaction). Full SQLite/temp at-rest encryption remains separate work.
+Persisted private CAS payloads and the rebuildable derived corpus database are encrypted at rest. The corpus uses SQLCipher with a corpus-specific key derived from Mirrarium's master key; `corpus rebuild` deletes any old corpus DB/WAL/SHM and recreates it encrypted from raw evidence. The corpus file therefore cannot be opened as ordinary SQLite without the Mirrarium key.
+
+The remaining plaintext private state is narrower: the authoritative raw `ledger.sqlite3` is still ordinary SQLite, and in-flight response bodies are written to permission-hardened `.incoming` temp files before final CAS encryption. Those two surfaces remain separate work.
 
 `cache opportunities` combines public/private coverage with runtime savings and, when evidence exists, names the largest currently unsupported public host and private MIME/resource family plus the policy gate blocking each. A null lead means captured evidence does not justify widening that side yet.
 

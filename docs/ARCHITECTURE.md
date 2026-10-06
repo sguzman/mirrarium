@@ -115,6 +115,8 @@ Implemented:
 - revision-aware canonical merging: exact-ID prefix refinement plus unambiguous exact-parent tail extension;
 - temporal gating that prevents stream evidence older than the canonical snapshot from rewriting it;
 - explicit derived-corpus schema versioning with rebuild-required failure semantics;
+- SQLCipher encryption for the rebuildable derived corpus using a domain-separated key derived from the Mirrarium master key;
+- Chromium proof that the derived corpus is not a plaintext SQLite file and does not expose known fixture conversation plaintext at rest;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
 - immutable public-resource replay candidate inventory and policy auditing;
 - explicit separation between immutable/stable public evidence, currently supported replay scope, and safe host/path expansion candidates with byte totals;
@@ -142,4 +144,5 @@ Next:
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
-- encrypt private SQLite ledger/derived-corpus state and eliminate plaintext in-flight private capture files without weakening recoverability/migration semantics.
+- encrypt the authoritative raw SQLite ledger with a verified plaintext-to-SQLCipher migration path;
+- eliminate plaintext in-flight private capture files without weakening response sanitization or crash recovery semantics.

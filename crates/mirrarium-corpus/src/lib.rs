@@ -2217,23 +2217,6 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
     events
 }
 
-fn object_path(root: &Path, privacy_class: &str, hash: &str) -> Result<PathBuf> {
-    anyhow::ensure!(
-        matches!(privacy_class, "public" | "private" | "unknown"),
-        "invalid storage class {privacy_class:?}"
-    );
-    anyhow::ensure!(
-        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "invalid SHA-256 object key {hash:?}"
-    );
-
-    Ok(root
-        .join(privacy_class)
-        .join("objects")
-        .join(&hash[..2])
-        .join(hash))
-}
-
 fn sqlcipher_raw_key_literal(key: &[u8; 32]) -> String {
     let mut hex = String::with_capacity(64);
     for byte in key {
