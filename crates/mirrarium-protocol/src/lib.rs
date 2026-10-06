@@ -52,6 +52,7 @@ pub struct CaptureMetadata {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostRequest {
     Ping,
+    ExtensionInstallState,
     CacheLookup {
         lookup_id: String,
         url: String,
@@ -101,6 +102,9 @@ pub enum HostRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostResponse {
     Pong,
+    ExtensionInstallState {
+        build_id: Option<String>,
+    },
     CacheMiss {
         lookup_id: String,
     },
