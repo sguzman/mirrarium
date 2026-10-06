@@ -52,6 +52,7 @@ const page = `<!doctype html>
 <script>
 const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
+const redirectPostSecret = ["fixture", "redirect", "post", "secret"].join("-");
 Promise.all([
   fetch("/backend-api/conversation/test").then((response) => response.json()),
   fetch("/backend-api/conversations?offset=0&limit=2").then((response) =>
@@ -92,6 +93,22 @@ Promise.all([
       ),
     ),
   fetch("/backend-api/redirect-start").then((response) => response.text()),
+  fetch("/backend-api/redirect-post-start", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: "preserve this redirect body",
+      access_token: redirectPostSecret,
+    }),
+  }).then((response) => response.json()),
+  fetch("/backend-api/redirect-see-other-start", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: "drop this body after 303",
+      access_token: redirectPostSecret,
+    }),
+  }).then((response) => response.json()),
   fetch("/backend-api/no-content-fixture").then((response) => response.text()),
   fetch("/backend-api/head-fixture", { method: "HEAD" }).then((response) =>
     response.text(),
@@ -388,6 +405,61 @@ const fixtureServer = https.createServer(
     if (request.url?.startsWith("/backend-api/redirect-final")) {
       response.writeHead(200, { "content-type": "text/plain" });
       response.end("redirect complete");
+      return;
+    }
+
+    if (
+      request.url === "/backend-api/redirect-post-start" &&
+      request.method === "POST"
+    ) {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(307, {
+          location:
+            "/backend-api/redirect-post-final?token=fixture-redirect-307-secret",
+        });
+        response.end();
+      });
+      return;
+    }
+
+    if (
+      request.url?.startsWith("/backend-api/redirect-post-final") &&
+      request.method === "POST"
+    ) {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, received_bytes: body.length }));
+      });
+      return;
+    }
+
+    if (
+      request.url === "/backend-api/redirect-see-other-start" &&
+      request.method === "POST"
+    ) {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(303, {
+          location:
+            "/backend-api/redirect-see-other-final?token=fixture-redirect-303-secret",
+        });
+        response.end();
+      });
+      return;
+    }
+
+    if (
+      request.url?.startsWith("/backend-api/redirect-see-other-final") &&
+      request.method === "GET"
+    ) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true, method: request.method }));
       return;
     }
 

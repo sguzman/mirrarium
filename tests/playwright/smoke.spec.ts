@@ -1043,6 +1043,65 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(redirectHeaders.location).not.toContain("fixture-redirect-secret");
 
+      const redirect307Start = captures.find(
+        (capture) =>
+          capture.status === 307 &&
+          capture.method === "POST" &&
+          capture.url.includes("/backend-api/redirect-post-start"),
+      );
+      const redirect307Final = captures.find(
+        (capture) =>
+          capture.status === 200 &&
+          capture.method === "POST" &&
+          capture.url.includes("/backend-api/redirect-post-final"),
+      );
+      expect(redirect307Start).toBeTruthy();
+      expect(redirect307Final).toBeTruthy();
+      expect(redirect307Final?.provenance.lifecycle_id).toBe(
+        redirect307Start?.provenance.lifecycle_id,
+      );
+      expect(redirect307Start?.provenance.redirect_hop).toBe(0);
+      expect(redirect307Final?.provenance.redirect_hop).toBe(1);
+      expect(redirect307Final?.provenance.redirected_from_url).toContain(
+        "/backend-api/redirect-post-start",
+      );
+      expect(redirect307Final?.url).not.toContain("fixture-redirect-307-secret");
+      expect(redirect307Start?.request_body_hash).toBeTruthy();
+      expect(redirect307Final?.request_body_hash).toBe(
+        redirect307Start?.request_body_hash,
+      );
+      expect(redirect307Start?.request_body_bytes).toBeGreaterThan(0);
+      expect(redirect307Final?.request_body_bytes).toBeGreaterThan(0);
+      expect(redirect307Start?.request_body_error).toBeFalsy();
+      expect(redirect307Final?.request_body_error).toBeFalsy();
+
+      const redirect303Start = captures.find(
+        (capture) =>
+          capture.status === 303 &&
+          capture.method === "POST" &&
+          capture.url.includes("/backend-api/redirect-see-other-start"),
+      );
+      const redirect303Final = captures.find(
+        (capture) =>
+          capture.status === 200 &&
+          capture.method === "GET" &&
+          capture.url.includes("/backend-api/redirect-see-other-final"),
+      );
+      expect(redirect303Start).toBeTruthy();
+      expect(redirect303Final).toBeTruthy();
+      expect(redirect303Final?.provenance.lifecycle_id).toBe(
+        redirect303Start?.provenance.lifecycle_id,
+      );
+      expect(redirect303Start?.provenance.redirect_hop).toBe(0);
+      expect(redirect303Final?.provenance.redirect_hop).toBe(1);
+      expect(redirect303Start?.request_body_hash).toBeTruthy();
+      expect(redirect303Start?.request_body_bytes).toBeGreaterThan(0);
+      expect(redirect303Start?.request_body_error).toBeFalsy();
+      expect(redirect303Final?.request_body_hash).toBeFalsy();
+      expect(redirect303Final?.request_body_bytes).toBe(0);
+      expect(redirect303Final?.request_body_error).toBeFalsy();
+      expect(redirect303Final?.url).not.toContain("fixture-redirect-303-secret");
+
       for (const [urlFragment, method, status] of [
         ["/backend-api/no-content-fixture", "GET", 204],
         ["/backend-api/head-fixture", "HEAD", 200],

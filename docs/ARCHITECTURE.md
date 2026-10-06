@@ -89,7 +89,7 @@ Implemented:
 - CDP attachment restricted to ChatGPT origins;
 - request/response metadata observation;
 - sanitized transport provenance: request/response headers, frame and loader identity, initiator, wall-clock timing, response protocol, and browser-cache/service-worker/prefetch signals;
-- redirect-chain preservation with stable lifecycle IDs, hop numbers, and sanitized previous-URL provenance;
+- redirect-chain preservation with stable lifecycle IDs, hop numbers, and sanitized previous-URL provenance, including Chromium proof that POST→307→POST keeps the sanitized request body associated with both hops while POST→303→GET does not leak the prior body onto the GET hop;
 - outbound JSON/form request-body capture with extension + daemon secret filtering;
 - metadata-only multipart/upload provenance without raw form/file archival;
 - completed response-body extraction;
