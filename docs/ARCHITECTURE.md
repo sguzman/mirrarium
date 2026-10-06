@@ -123,6 +123,9 @@ Implemented:
 - verified legacy raw-ledger migration via WAL checkpoint + `sqlcipher_export`, schema/row-count/user-version/integrity checks, atomic replacement, and interruption recovery;
 - read-only ledger inspection paths for CLI/cache/corpus/daemon stats so the browser's native host remains the sole long-lived writer;
 - Chromium proof that encrypted raw-ledger capture, changed private-response persistence, and subsequent revalidation remain live while read-only inspection runs concurrently;
+- exclusive per-data-root writer locking for writable raw-store lifetimes, with read-only inspection left concurrent;
+- startup purge of abandoned hashed capture/request/object-migration part files while preserving raw-ledger migration recovery artifacts;
+- live-safe encrypted migration preflight: already-encrypted stores report a read-only no-op, while real legacy migrations still require exclusive ownership;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
 - immutable public-resource replay candidate inventory and policy auditing;
 - explicit separation between immutable/stable public evidence, currently supported replay scope, and safe host/path expansion candidates with byte totals;

@@ -466,9 +466,9 @@ DATA ROOT:
 
 PRIVATE KEY:
   MIRRARIUM_PRIVATE_KEY_FILE overrides the key path.
-  Explicit MIRRARIUM_DATA_DIR instances keep a key under .keys/private.key;
-  zero-config installs use XDG_CONFIG_HOME/mirrarium/private.key or
-  ~/.config/mirrarium/private.key."
+  Normal application data roots use XDG_CONFIG_HOME/mirrarium/private.key or
+  ~/.config/mirrarium/private.key; isolated roots used by tests/embeddings keep
+  a self-contained .keys/private.key."
     );
 }
 
