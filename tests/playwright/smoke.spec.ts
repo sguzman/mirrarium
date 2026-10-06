@@ -282,7 +282,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(fixtureDocumentRead).toBeTruthy();
       expect(fixtureDocumentRead).toMatchObject({
-        mime_type: "text/html; charset=utf-8",
+        mime_type: "text/html",
         has_validator: true,
         stable_so_far: true,
         revalidation_candidate: true,
