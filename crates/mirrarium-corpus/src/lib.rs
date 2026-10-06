@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use mirrarium_store::{private_database_key, read_verified_object};
+use mirrarium_store::{open_raw_ledger_read_only, private_database_key, read_verified_object};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 use serde_json::Value;
@@ -343,11 +343,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     )?;
     corpus.pragma_update(None, "user_version", CORPUS_SCHEMA_VERSION)?;
 
-    let raw = Connection::open_with_flags(
-        &raw_database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", raw_database.display()))?;
+    let raw = open_raw_ledger_read_only(raw_root)?;
 
     let stream_sources = collect_sources(
         &raw,
@@ -1275,20 +1271,6 @@ fn canonical_messages_from_snapshot(
         Vec::new(),
         warnings,
     )
-}
-
-fn open_raw_ledger_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
-    let database = raw_root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-    Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))
 }
 
 fn capture_row_order(connection: &Connection, capture_id: &str) -> Result<Option<i64>> {

@@ -16,7 +16,7 @@ use chacha20poly1305::{
 use hkdf::Hkdf;
 use mirrarium_protocol::{CaptureMetadata, CaptureProvenance, RequestBodyMetadata};
 use rand_core::{OsRng, RngCore};
-use rusqlite::{params, types::Type, Connection};
+use rusqlite::{params, types::Type, Connection, OpenFlags};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1349,6 +1349,20 @@ fn is_sensitive_header_name(normalized: &str) -> bool {
             | "x_api_key"
     ) || normalized.ends_with("_token")
         || normalized.contains("credential")
+}
+
+pub fn open_raw_ledger_read_only(root: impl AsRef<Path>) -> Result<Connection> {
+    let database = root.as_ref().join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+    Connection::open_with_flags(
+        &database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening raw ledger {}", database.display()))
 }
 
 pub fn default_data_root() -> Result<PathBuf> {

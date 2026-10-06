@@ -4,9 +4,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
+#[cfg(test)]
+use rusqlite::Connection;
 use serde::Serialize;
-use mirrarium_store::read_verified_object;
+use mirrarium_store::{open_raw_ledger_read_only, read_verified_object};
 use url::Url;
 
 const MAX_REPLAY_BODY_BYTES: u64 = 16 * 1024 * 1024;
@@ -242,17 +244,7 @@ pub fn candidates(raw_root: impl AsRef<Path>, limit: u64) -> Result<Vec<CacheCan
 pub fn private_revalidation_stats(
     raw_root: impl AsRef<Path>,
 ) -> Result<PrivateRevalidationStats> {
-    let database = raw_root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
 
     let table_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'private_revalidation_events'",
@@ -304,17 +296,7 @@ pub fn private_revalidation_stats(
 }
 
 pub fn replay_stats(raw_root: impl AsRef<Path>) -> Result<ReplayStats> {
-    let database = raw_root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
 
     let table_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cache_replay_events'",
@@ -579,18 +561,7 @@ pub fn opportunities(raw_root: impl AsRef<Path>) -> Result<CacheOpportunitySumma
 }
 
 pub fn private_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PrivateCoverageProfile>> {
-    let database = raw_root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
 
     let mut statement = connection.prepare(
         r#"
@@ -755,18 +726,7 @@ pub fn private_reads(
     limit: u64,
 ) -> Result<Vec<PrivateReadProfile>> {
     anyhow::ensure!(limit > 0, "private-read limit must be greater than zero");
-    let database = raw_root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
 
     let mut statement = connection.prepare(
         r#"
@@ -937,18 +897,7 @@ pub fn private_lookup(
         return Ok(None);
     };
     let root = raw_root.as_ref();
-    let database = root.join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(root)?;
 
     let row = connection
         .query_row(
@@ -1157,18 +1106,7 @@ pub fn lookup(
         return Ok(None);
     };
     let root = raw_root.as_ref();
-    let database = root.join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(root)?;
 
     let mut hashes = BTreeSet::new();
     let mut statement = connection.prepare(
@@ -1357,18 +1295,7 @@ fn public_object_relative_path(hash: &str) -> PathBuf {
 }
 
 fn build_inventory(raw_root: impl AsRef<Path>) -> Result<Vec<CacheCandidate>> {
-    let database = raw_root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
 
     let mut statement = connection.prepare(
         r#"
