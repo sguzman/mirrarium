@@ -47,6 +47,11 @@ async function extensionWorkerBuildIdsViaCdp(
 
   const cdp = await browser.newBrowserCDPSession();
   try {
+    await cdp.send("ServiceWorker.enable");
+    await cdp.send("ServiceWorker.startWorker", {
+      scopeURL: `chrome-extension://${expectedExtensionId}/`,
+    });
+
     const { targetInfos } = (await cdp.send("Target.getTargets")) as {
       targetInfos: Array<{
         targetId: string;
