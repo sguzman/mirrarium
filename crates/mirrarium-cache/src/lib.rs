@@ -316,7 +316,10 @@ pub fn private_reads(
           AND status = 200
           AND body_hash IS NOT NULL
           AND body_error IS NULL
-          AND lower(mime_type) LIKE '%json%'
+          AND (
+              lower(mime_type) LIKE '%json%'
+              OR lower(mime_type) LIKE 'text/html%'
+          )
         ORDER BY url, captured_at_ms, rowid
         "#,
     )?;
@@ -496,7 +499,10 @@ pub fn private_lookup(
               AND status = 200
               AND body_hash IS NOT NULL
               AND body_error IS NULL
-              AND lower(mime_type) LIKE '%json%'
+              AND (
+                  lower(mime_type) LIKE '%json%'
+                  OR lower(mime_type) LIKE 'text/html%'
+              )
             ORDER BY captured_at_ms DESC, rowid DESC
             LIMIT 1
             "#,
@@ -1400,6 +1406,72 @@ mod tests {
         assert_eq!(entry.body_hash, hash);
         assert_eq!(entry.etag.as_deref(), Some("\"fixture-v1\""));
         assert_eq!(entry.captured_at_ms, 10);
+    }
+
+    #[test]
+    fn private_lookup_accepts_verified_html_document() {
+        let (directory, connection) = open_fixture();
+        let body = b"<!doctype html><title>cached document</title>";
+        let hash = format!("{:x}", Sha256::digest(body));
+        let relative_path = private_object_relative_path(&hash);
+        let object_path = directory.path().join(&relative_path);
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::write(&object_path, body).unwrap();
+        connection
+            .execute(
+                "INSERT INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('private', ?1, ?2, ?3, 1)",
+                params![
+                    hash,
+                    body.len() as i64,
+                    relative_path.to_string_lossy().to_string()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO captures (
+                    capture_id,
+                    captured_at_ms,
+                    method,
+                    url,
+                    status,
+                    mime_type,
+                    resource_type,
+                    privacy_class,
+                    body_hash,
+                    body_bytes,
+                    cache_control,
+                    etag,
+                    last_modified,
+                    body_error
+                ) VALUES (
+                    'private-html',
+                    10,
+                    'GET',
+                    'https://chatgpt.com/',
+                    200,
+                    'text/html; charset=utf-8',
+                    'Document',
+                    'private',
+                    ?1,
+                    ?2,
+                    'private, max-age=0, must-revalidate',
+                    '"document-v1"',
+                    NULL,
+                    NULL
+                )
+                "#,
+                params![hash, body.len() as i64],
+            )
+            .unwrap();
+
+        let entry = private_lookup(directory.path(), "https://chatgpt.com/")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.body, body);
+        assert_eq!(entry.mime_type, "text/html; charset=utf-8");
+        assert_eq!(entry.etag.as_deref(), Some(""document-v1""));
     }
 
     #[test]

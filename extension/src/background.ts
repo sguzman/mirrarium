@@ -510,27 +510,42 @@ function isPrivateRevalidationCandidate(
   method: string,
   resourceType: string | undefined,
 ): boolean {
-  if (
-    method.toUpperCase() !== "GET" ||
-    !resourceType ||
-    !["fetch", "xhr"].includes(resourceType.toLowerCase())
-  ) {
+  if (method.toUpperCase() !== "GET" || !resourceType) {
     return false;
   }
 
   try {
     const url = new URL(rawUrl);
     const path = url.pathname.toLowerCase();
-    return (
+    const type = resourceType.toLowerCase();
+    const safeIdentity =
       url.protocol === "https:" &&
       (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
-      path.startsWith("/backend-api/") &&
-      !path.startsWith("/backend-api/auth/") &&
       Array.from(url.searchParams.entries()).every(
         ([key, value]) =>
           !isSensitiveQueryKey(key) && value !== "[REDACTED]",
       ) &&
-      url.hash === ""
+      url.hash === "";
+
+    if (!safeIdentity) return false;
+
+    if (type === "document") {
+      return (
+        path !== "/api/auth" &&
+        !path.startsWith("/api/auth/") &&
+        path !== "/auth" &&
+        !path.startsWith("/auth/") &&
+        !path.startsWith("/backend-api/auth/") &&
+        !path.includes("/oauth/") &&
+        !path.endsWith("/oauth") &&
+        !path.includes("/login")
+      );
+    }
+
+    return (
+      ["fetch", "xhr"].includes(type) &&
+      path.startsWith("/backend-api/") &&
+      !path.startsWith("/backend-api/auth/")
     );
   } catch {
     return false;
@@ -899,6 +914,46 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
         },
         {
           urlPattern: "https://chat.openai.com:*/backend-api/*",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chatgpt.com/*",
+          resourceType: "Document",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chatgpt.com:*/*",
+          resourceType: "Document",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chat.openai.com/*",
+          resourceType: "Document",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chat.openai.com:*/*",
+          resourceType: "Document",
+          requestStage: "Request",
+        },
+        {
+          urlPattern: "https://chatgpt.com/*",
+          resourceType: "Document",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chatgpt.com:*/*",
+          resourceType: "Document",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chat.openai.com/*",
+          resourceType: "Document",
+          requestStage: "Response",
+        },
+        {
+          urlPattern: "https://chat.openai.com:*/*",
+          resourceType: "Document",
           requestStage: "Response",
         },
       ],
