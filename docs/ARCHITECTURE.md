@@ -114,6 +114,8 @@ Implemented:
 - explicit derived-corpus schema versioning with rebuild-required failure semantics;
 - structured attachment observations and captured-download correlation by sanitized URL identity;
 - immutable public-resource replay candidate inventory and policy auditing;
+- explicit separation between immutable/stable public evidence, currently supported replay scope, and safe host/path expansion candidates with byte totals;
+- aggregate public replay-coverage audit by host, so new static origins can be justified by observed eligible bytes rather than guessed;
 - verified public-CAS replay lookup with URL/type restrictions, 16 MiB ceiling, path/length/SHA-256 validation;
 - chunked native-host replay transport kept below Chrome's per-message host-to-extension limit;
 - fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts, stylesheets, images, and fonts;
@@ -133,7 +135,7 @@ Implemented:
 Next:
 
 - cautiously expand conditional revalidation to additional private MIME/route families only when `cache private-coverage` shows meaningful validator-backed bytes and stable semantics;
-- cautiously evaluate additional already-classified exact public static hosts only when observed evidence justifies them;
+- cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
 - encryption/key management for private storage.

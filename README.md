@@ -68,6 +68,7 @@ mirrarium cache stats
 mirrarium cache replay-stats
 mirrarium cache revalidation-stats
 mirrarium cache candidates [limit]
+mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
 mirrarium cache private-coverage
 mirrarium corpus rebuild
@@ -83,7 +84,9 @@ mirrarium native-host status
 
 `verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
 
-`cache stats` and `cache candidates` audit the public replay surface. A candidate must be a successful public GET with a stored body, a static resource type, explicit `Cache-Control: immutable`, and exactly one observed body hash for its URL. Replay is stricter still: v1 fulfills exact query-free ChatGPT `/_next/static/` script, stylesheet, image, and font URLs plus exact query-free `cdn.oaistatic.com` static resources. Bodies are capped at 16 MiB, the public CAS path, byte count, and SHA-256 are re-verified before serving, and every miss, timeout, corruption, ambiguity, or native-host error fails open to the network.
+`cache stats` and `cache candidates` audit the public replay surface. A candidate must be a successful public GET with a stored body, a static resource type, explicit `Cache-Control: immutable`, and exactly one observed body hash for its URL. Evidence eligibility is distinct from replay policy: candidates now report whether the current exact-host/path policy actually permits replay, whether they are safe scope-expansion candidates, and why a byte-stable asset remains outside policy. Replay is stricter still: v1 fulfills exact query-free ChatGPT `/_next/static/` script, stylesheet, image, and font URLs plus exact query-free `cdn.oaistatic.com` static resources. Bodies are capped at 16 MiB, the public CAS path, byte count, and SHA-256 are re-verified before serving, and every miss, timeout, corruption, ambiguity, or native-host error fails open to the network.
+
+`cache public-coverage` aggregates that evidence by host, reporting observed captures, unique bytes, immutable/stable bytes, bytes already replay-supported, and bytes blocked only by current host/path scope. This is the required evidence view before widening public replay to another host.
 
 Verified hits are streamed from the native host in sub-1-MiB messages and fulfilled through CDP Fetch. The Chromium integration test disables the browser's ordinary cache and verifies Mirrarium's replay marker while proving the ChatGPT and `cdn.oaistatic.com` origins receive no additional requests for replayed static resources.
 
