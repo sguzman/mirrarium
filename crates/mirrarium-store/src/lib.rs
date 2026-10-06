@@ -13,6 +13,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
     KeyInit, XChaCha20Poly1305, XNonce,
 };
+use hkdf::Hkdf;
 use mirrarium_protocol::{CaptureMetadata, CaptureProvenance, RequestBodyMetadata};
 use rand_core::{OsRng, RngCore};
 use rusqlite::{params, types::Type, Connection};
@@ -1871,6 +1872,33 @@ fn load_existing_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
     })
 }
 
+pub fn private_database_key(
+    root: impl AsRef<Path>,
+    purpose: &str,
+    create_master_if_missing: bool,
+) -> Result<[u8; PRIVATE_KEY_BYTES]> {
+    anyhow::ensure!(
+        !purpose.is_empty()
+            && purpose.len() <= 128
+            && purpose
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "invalid private database key purpose"
+    );
+
+    let root = root.as_ref();
+    let master = if create_master_if_missing {
+        load_or_create_private_key(root)?
+    } else {
+        load_existing_private_key(root)?
+    };
+    let hkdf = Hkdf::<Sha256>::new(Some(b"mirrarium-private-database-v1"), &master);
+    let mut derived = [0_u8; PRIVATE_KEY_BYTES];
+    hkdf.expand(purpose.as_bytes(), &mut derived)
+        .map_err(|_| anyhow::anyhow!("deriving private database key failed"))?;
+    Ok(derived)
+}
+
 fn private_object_aad(hash: &str) -> Vec<u8> {
     let mut aad = b"mirrarium-private-object-v1\0".to_vec();
     aad.extend_from_slice(hash.as_bytes());
@@ -2180,6 +2208,19 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn private_database_keys_are_stable_and_domain_separated() {
+        let directory = tempdir().unwrap();
+        let one = private_database_key(directory.path(), "corpus-sqlcipher-v1", true).unwrap();
+        let two = private_database_key(directory.path(), "corpus-sqlcipher-v1", false).unwrap();
+        let other = private_database_key(directory.path(), "ledger-sqlcipher-v1", false).unwrap();
+
+        assert_eq!(one, two);
+        assert_ne!(one, other);
+        assert!(private_database_key(directory.path(), "", false).is_err());
+        assert!(private_database_key(directory.path(), "bad purpose", false).is_err());
     }
 
     #[test]
