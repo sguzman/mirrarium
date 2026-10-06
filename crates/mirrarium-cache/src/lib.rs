@@ -2130,6 +2130,58 @@ mod tests {
     }
 
     #[test]
+    fn persistent_cache_reader_observes_later_private_commits() {
+        let (directory, connection) = open_fixture();
+        let url = "https://chatgpt.com/backend-api/conversation/live";
+
+        let write_version = |id: &str, timestamp: i64, etag: &str, body: &[u8]| {
+            let hash = format!("{:x}", Sha256::digest(body));
+            let relative_path = private_object_relative_path(&hash);
+            let object_path = directory.path().join(&relative_path);
+            fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+            fs::write(&object_path, body).unwrap();
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('private', ?1, ?2, ?3, ?4)",
+                    params![
+                        hash,
+                        body.len() as i64,
+                        relative_path.to_string_lossy().to_string(),
+                        timestamp
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO captures (
+                        capture_id, captured_at_ms, method, url, status, mime_type,
+                        resource_type, privacy_class, body_hash, body_bytes,
+                        cache_control, etag, last_modified, body_error
+                    ) VALUES (
+                        ?1, ?2, 'GET', ?3, 200, 'application/json', 'Fetch',
+                        'private', ?4, ?5, 'private, max-age=0, must-revalidate',
+                        ?6, NULL, NULL
+                    )
+                    "#,
+                    params![id, timestamp, url, hash, body.len() as i64, etag],
+                )
+                .unwrap();
+        };
+
+        write_version("live-v1", 10, "\"live-v1\"", br#"{"version":1}"#);
+        let reader = CacheReader::open(directory.path()).unwrap();
+        let first = reader.private_lookup(url).unwrap().unwrap();
+        assert_eq!(first.etag.as_deref(), Some("\"live-v1\""));
+        assert_eq!(first.body, br#"{"version":1}"#);
+
+        write_version("live-v2", 20, "\"live-v2\"", br#"{"version":2}"#);
+        let second = reader.private_lookup(url).unwrap().unwrap();
+        assert_eq!(second.etag.as_deref(), Some("\"live-v2\""));
+        assert_eq!(second.body, br#"{"version":2}"#);
+    }
+
+    #[test]
     fn private_lookup_accepts_verified_html_document() {
         let (directory, connection) = open_fixture();
         let body = b"<!doctype html><title>cached document</title>";
