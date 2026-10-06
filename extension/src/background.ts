@@ -1585,6 +1585,10 @@ async function captureBody(
   }
 }
 
+chrome.runtime.onInstalled.addListener(() => {
+  checkInstalledExtensionVersion();
+});
+
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId !== undefined) {
     fetchSetupTabs.delete(source.tabId);
