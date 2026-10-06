@@ -126,6 +126,24 @@ pub struct ReplayStats {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PublicExpansionLead {
+    pub host: String,
+    pub candidate_urls: u64,
+    pub body_bytes: u64,
+    pub blocking_gate: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateExpansionLead {
+    pub resource_type: String,
+    pub mime_type: String,
+    pub candidate_captures: u64,
+    pub unique_urls: u64,
+    pub body_bytes: u64,
+    pub blocking_gate: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CacheOpportunitySummary {
     pub public_observed_captures: u64,
     pub public_unique_urls: u64,
@@ -137,6 +155,8 @@ pub struct CacheOpportunitySummary {
     pub private_validator_body_bytes: u64,
     pub private_current_policy_body_bytes: u64,
     pub private_expansion_candidate_body_bytes: u64,
+    pub top_public_expansion: Option<PublicExpansionLead>,
+    pub top_private_expansion: Option<PrivateExpansionLead>,
     pub runtime_public_replayed_bytes: u64,
     pub runtime_private_revalidated_saved_body_bytes: u64,
     pub runtime_total_saved_body_bytes: u64,
@@ -482,6 +502,7 @@ pub fn public_coverage(raw_root: impl AsRef<Path>) -> Result<Vec<PublicCoverageP
 pub fn opportunities(raw_root: impl AsRef<Path>) -> Result<CacheOpportunitySummary> {
     let root = raw_root.as_ref();
     let public = stats(root)?;
+    let public_coverage = public_coverage(root)?;
     let private = private_coverage(root)?;
     let replay = replay_stats(root)?;
     let revalidation = private_revalidation_stats(root)?;
@@ -513,6 +534,27 @@ pub fn opportunities(raw_root: impl AsRef<Path>) -> Result<CacheOpportunitySumma
                 .checked_add(item.expansion_candidate_body_bytes)
                 .context("private opportunity expansion bytes overflow")
         })?;
+    let top_public_expansion = public_coverage
+        .iter()
+        .find(|item| item.expansion_candidate_body_bytes > 0)
+        .map(|item| PublicExpansionLead {
+            host: item.host.clone(),
+            candidate_urls: item.expansion_candidate_urls,
+            body_bytes: item.expansion_candidate_body_bytes,
+            blocking_gate: "public_scope".to_owned(),
+        });
+    let top_private_expansion = private
+        .iter()
+        .find(|item| item.expansion_candidate_body_bytes > 0)
+        .map(|item| PrivateExpansionLead {
+            resource_type: item.resource_type.clone(),
+            mime_type: item.mime_type.clone(),
+            candidate_captures: item.expansion_candidate_captures,
+            unique_urls: item.unique_urls,
+            body_bytes: item.expansion_candidate_body_bytes,
+            blocking_gate: "private_mime_family".to_owned(),
+        });
+
     let runtime_total_saved_body_bytes = replay
         .replayed_bytes
         .checked_add(revalidation.saved_body_bytes)
@@ -529,6 +571,8 @@ pub fn opportunities(raw_root: impl AsRef<Path>) -> Result<CacheOpportunitySumma
         private_validator_body_bytes,
         private_current_policy_body_bytes,
         private_expansion_candidate_body_bytes,
+        top_public_expansion,
+        top_private_expansion,
         runtime_public_replayed_bytes: replay.replayed_bytes,
         runtime_private_revalidated_saved_body_bytes: revalidation.saved_body_bytes,
         runtime_total_saved_body_bytes,
@@ -1759,6 +1803,26 @@ mod tests {
         assert_eq!(summary.private_validator_body_bytes, 400);
         assert_eq!(summary.private_current_policy_body_bytes, 100);
         assert_eq!(summary.private_expansion_candidate_body_bytes, 300);
+        assert_eq!(
+            summary.top_public_expansion,
+            Some(PublicExpansionLead {
+                host: "static.openai.com".to_owned(),
+                candidate_urls: 1,
+                body_bytes: 12,
+                blocking_gate: "public_scope".to_owned(),
+            })
+        );
+        assert_eq!(
+            summary.top_private_expansion,
+            Some(PrivateExpansionLead {
+                resource_type: "Fetch".to_owned(),
+                mime_type: "text/plain".to_owned(),
+                candidate_captures: 1,
+                unique_urls: 1,
+                body_bytes: 300,
+                blocking_gate: "private_mime_family".to_owned(),
+            })
+        );
         assert_eq!(summary.runtime_public_replayed_bytes, 50);
         assert_eq!(summary.runtime_private_revalidated_saved_body_bytes, 60);
         assert_eq!(summary.runtime_total_saved_body_bytes, 110);

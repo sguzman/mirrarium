@@ -764,12 +764,28 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         private_validator_body_bytes: number;
         private_current_policy_body_bytes: number;
         private_expansion_candidate_body_bytes: number;
+        top_public_expansion: {
+          host: string;
+          candidate_urls: number;
+          body_bytes: number;
+          blocking_gate: string;
+        } | null;
+        top_private_expansion: {
+          resource_type: string;
+          mime_type: string;
+          candidate_captures: number;
+          unique_urls: number;
+          body_bytes: number;
+          blocking_gate: string;
+        } | null;
         runtime_public_replayed_bytes: number;
         runtime_private_revalidated_saved_body_bytes: number;
         runtime_total_saved_body_bytes: number;
       };
       expect(opportunities.public_replay_supported_body_bytes).toBeGreaterThan(0);
       expect(opportunities.private_current_policy_body_bytes).toBeGreaterThan(0);
+      expect(opportunities.top_public_expansion).toBeNull();
+      expect(opportunities.top_private_expansion).toBeNull();
       expect(opportunities.runtime_public_replayed_bytes).toBe(
         replayStats.replayed_bytes,
       );
