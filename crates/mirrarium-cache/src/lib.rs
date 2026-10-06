@@ -117,7 +117,6 @@ pub struct CacheStats {
     pub conflicting_urls: u64,
 }
 
-#[derive(Debug, Clone)]
 #[derive(Debug, Default)]
 struct PrivateCoverageAggregate {
     capture_count: u64,
@@ -132,6 +131,7 @@ struct PrivateCoverageAggregate {
     expansion_candidate_body_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
 struct PrivateReadAggregate {
     mime_type: String,
     capture_count: u64,
