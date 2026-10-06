@@ -1471,7 +1471,7 @@ mod tests {
             .unwrap();
         assert_eq!(entry.body, body);
         assert_eq!(entry.mime_type, "text/html; charset=utf-8");
-        assert_eq!(entry.etag.as_deref(), Some(""document-v1""));
+        assert_eq!(entry.etag.as_deref(), Some("\"document-v1\""));
     }
 
     #[test]
