@@ -156,10 +156,31 @@ struct RequestBodyCapture {
     error: Option<String>,
 }
 
+enum ResponseBodySink {
+    Plain(BufWriter<File>),
+    PrivateEncrypted(PrivateStreamWriter),
+}
+
+impl ResponseBodySink {
+    fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            Self::Plain(writer) => writer.write_all(bytes).context("writing response temp body"),
+            Self::PrivateEncrypted(writer) => writer.write_chunk(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush().context("flushing response temp body"),
+            Self::PrivateEncrypted(writer) => writer.flush(),
+        }
+    }
+}
+
 struct InFlightCapture {
     metadata: CaptureMetadata,
     temp_path: PathBuf,
-    writer: BufWriter<File>,
+    writer: ResponseBodySink,
     hasher: Sha256,
     bytes: u64,
     next_sequence: u32,
@@ -344,12 +365,23 @@ impl CaptureStore {
             .with_context(|| format!("opening {}", temp_path.display()))?;
         harden_file(&temp_path)?;
 
+        let privacy = classify(&metadata);
+        let writer = if privacy == PrivacyClass::Private && suppressed_reason.is_none() {
+            let key = load_or_create_private_key(&self.root)?;
+            ResponseBodySink::PrivateEncrypted(PrivateStreamWriter::new(
+                BufWriter::new(file),
+                key,
+            )?)
+        } else {
+            ResponseBodySink::Plain(BufWriter::new(file))
+        };
+
         self.in_flight.insert(
             metadata.capture_id.clone(),
             InFlightCapture {
                 metadata,
                 temp_path,
-                writer: BufWriter::new(file),
+                writer,
                 hasher: Sha256::new(),
                 bytes: 0,
                 next_sequence: 0,
@@ -389,7 +421,7 @@ impl CaptureStore {
         let bytes = BASE64
             .decode(data_base64)
             .with_context(|| format!("decoding chunk {sequence} for {capture_id}"))?;
-        capture.writer.write_all(&bytes)?;
+        capture.writer.write_chunk(&bytes)?;
         capture.hasher.update(&bytes);
         capture.bytes = capture
             .bytes
@@ -577,15 +609,21 @@ impl CaptureStore {
         }
 
         let body_hash = match sanitize_response_body(
+            &self.root,
             privacy,
             &capture.metadata.mime_type,
             &capture.temp_path,
         )? {
             ResponseBodyDisposition::KeepRaw => format!("{:x}", capture.hasher.finalize()),
             ResponseBodyDisposition::Replace(bytes) => {
-                fs::write(&capture.temp_path, &bytes)
-                    .with_context(|| format!("rewriting {}", capture.temp_path.display()))?;
-                harden_file(&capture.temp_path)?;
+                if privacy == PrivacyClass::Private {
+                    let key = load_existing_private_key(&self.root)?;
+                    rewrite_private_stream_file(&capture.temp_path, key, &bytes)?;
+                } else {
+                    fs::write(&capture.temp_path, &bytes)
+                        .with_context(|| format!("rewriting {}", capture.temp_path.display()))?;
+                    harden_file(&capture.temp_path)?;
+                }
                 capture.bytes = bytes.len() as u64;
                 sha256_hex(&bytes)
             }
@@ -623,17 +661,12 @@ impl CaptureStore {
             fs::remove_file(&capture.temp_path)?;
         } else {
             if privacy == PrivacyClass::Private {
-                let plaintext = fs::read(&capture.temp_path)
-                    .with_context(|| format!("reading private temp object {}", capture.temp_path.display()))?;
+                let raw = fs::read(&capture.temp_path)
+                    .with_context(|| format!("verifying private temp object {}", capture.temp_path.display()))?;
                 anyhow::ensure!(
-                    plaintext.len() as u64 == capture.bytes,
-                    "private temp object byte count changed before encryption"
+                    raw.starts_with(PRIVATE_STREAM_MAGIC),
+                    "private response temp object is not MIRRPV02 encrypted"
                 );
-                let key = load_or_create_private_key(&self.root)?;
-                let envelope = encrypt_private_object_bytes(&key, &body_hash, &plaintext)?;
-                fs::write(&capture.temp_path, &envelope)
-                    .with_context(|| format!("encrypting {}", capture.temp_path.display()))?;
-                harden_file(&capture.temp_path)?;
             }
             fs::rename(&capture.temp_path, &final_path).with_context(|| {
                 format!(
@@ -1769,6 +1802,7 @@ fn request_body_kind(content_type: Option<&str>) -> &'static str {
 }
 
 fn sanitize_response_body(
+    root: &Path,
     privacy: PrivacyClass,
     mime_type: &str,
     path: &Path,
@@ -1782,8 +1816,18 @@ fn sanitize_response_body(
         return Ok(ResponseBodyDisposition::KeepRaw);
     }
 
-    let bytes = fs::read(path)
+    let stored = fs::read(path)
         .with_context(|| format!("reading structured response body {}", path.display()))?;
+    let bytes = if privacy == PrivacyClass::Private {
+        anyhow::ensure!(
+            stored.starts_with(PRIVATE_STREAM_MAGIC),
+            "private structured response temp object is not MIRRPV02 encrypted"
+        );
+        let key = load_existing_private_key(root)?;
+        decrypt_private_stream_bytes(&key, &stored)?
+    } else {
+        stored
+    };
 
     if mime_type.contains("json") {
         let mut value = match serde_json::from_slice::<Value>(&bytes) {
@@ -2615,6 +2659,9 @@ pub fn read_verified_object(
     let bytes = if class == PrivacyClass::Private && stored.starts_with(PRIVATE_OBJECT_MAGIC) {
         let key = load_existing_private_key(root)?;
         decrypt_private_object_bytes(&key, hash, &stored)?
+    } else if class == PrivacyClass::Private && stored.starts_with(PRIVATE_STREAM_MAGIC) {
+        let key = load_existing_private_key(root)?;
+        decrypt_private_stream_bytes(&key, &stored)?
     } else {
         stored
     };
@@ -3248,6 +3295,60 @@ mod tests {
     }
 
     #[test]
+    fn private_response_incoming_file_is_encrypted_from_first_chunk() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let capture_id = "encrypted-incoming";
+        let mut item = metadata(
+            capture_id,
+            "https://chatgpt.com/backend-api/conversation/incoming",
+            "Fetch",
+        );
+        item.mime_type = "text/plain".to_owned();
+        store.begin(item).unwrap();
+
+        let temp_path = directory
+            .path()
+            .join(".incoming")
+            .join(format!("{}.part", sha256_hex(capture_id.as_bytes())));
+        let initial = fs::read(&temp_path).unwrap();
+        assert!(initial.starts_with(PRIVATE_STREAM_MAGIC));
+
+        let plaintext = b"private-incoming-plaintext";
+        store
+            .append_chunk(capture_id, 0, &BASE64.encode(plaintext))
+            .unwrap();
+        store
+            .in_flight
+            .get_mut(capture_id)
+            .unwrap()
+            .writer
+            .flush()
+            .unwrap();
+
+        let raw = fs::read(&temp_path).unwrap();
+        assert!(raw.starts_with(PRIVATE_STREAM_MAGIC));
+        assert!(!raw.windows(plaintext.len()).any(|window| window == plaintext));
+        let key = load_existing_private_key(directory.path()).unwrap();
+        assert_eq!(decrypt_private_stream_bytes(&key, &raw).unwrap(), plaintext);
+
+        store
+            .finish(capture_id, Some(plaintext.len() as u64), None)
+            .unwrap();
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        let hash = capture.body_hash.unwrap();
+        let final_path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        let final_raw = fs::read(final_path).unwrap();
+        assert!(final_raw.starts_with(PRIVATE_STREAM_MAGIC));
+        assert_eq!(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+            plaintext
+        );
+    }
+
+    #[test]
     fn private_json_response_is_scrubbed_before_cas() {
         let directory = tempdir().unwrap();
         let mut store = CaptureStore::open(directory.path()).unwrap();
@@ -3273,7 +3374,7 @@ mod tests {
             .path()
             .join(object_relative_path(PrivacyClass::Private, &hash));
         let raw = fs::read(&path).unwrap();
-        assert!(raw.starts_with(PRIVATE_OBJECT_MAGIC));
+        assert!(raw.starts_with(PRIVATE_STREAM_MAGIC));
         assert!(!String::from_utf8_lossy(&raw).contains("top-secret"));
         let stored = String::from_utf8(
             read_verified_object(directory.path(), "private", &hash).unwrap(),
@@ -3322,7 +3423,7 @@ mod tests {
             .path()
             .join(object_relative_path(PrivacyClass::Private, &hash));
         let raw = fs::read(&path).unwrap();
-        assert!(raw.starts_with(PRIVATE_OBJECT_MAGIC));
+        assert!(raw.starts_with(PRIVATE_STREAM_MAGIC));
         let stored = String::from_utf8(
             read_verified_object(directory.path(), "private", &hash).unwrap(),
         )

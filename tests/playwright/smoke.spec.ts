@@ -965,11 +965,15 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const privateObjects = await readFilesRecursively(join(dataDir, "private", "objects"));
       expect(privateObjects.length).toBeGreaterThanOrEqual(1);
+      const privateObjectVersions = privateObjects.map((body) =>
+        body.subarray(0, 8).toString("ascii"),
+      );
       expect(
-        privateObjects.every(
-          (body) => body.subarray(0, 8).toString("ascii") === "MIRRPV01",
+        privateObjectVersions.every(
+          (version) => version === "MIRRPV01" || version === "MIRRPV02",
         ),
       ).toBe(true);
+      expect(privateObjectVersions).toContain("MIRRPV02");
       for (const plaintext of [
         "hello from request body",
         "fixture-secret-token",
