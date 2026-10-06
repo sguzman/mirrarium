@@ -57,6 +57,10 @@ pub enum HostRequest {
         url: String,
         resource_type: String,
     },
+    PrivateReadLookup {
+        lookup_id: String,
+        url: String,
+    },
     CacheReplayOutcome {
         url: String,
         resource_type: String,
@@ -114,6 +118,31 @@ pub enum HostResponse {
         lookup_id: String,
     },
     CacheLookupError {
+        lookup_id: String,
+        message: String,
+    },
+    PrivateReadMiss {
+        lookup_id: String,
+    },
+    PrivateReadHitStart {
+        lookup_id: String,
+        mime_type: String,
+        body_hash: String,
+        body_bytes: u64,
+        captured_at_ms: u64,
+        cache_control: Option<String>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+    PrivateReadHitChunk {
+        lookup_id: String,
+        sequence: u32,
+        data_base64: String,
+    },
+    PrivateReadHitFinish {
+        lookup_id: String,
+    },
+    PrivateReadLookupError {
         lookup_id: String,
         message: String,
     },

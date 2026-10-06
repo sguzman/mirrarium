@@ -45,6 +45,14 @@ fn run_native_host() -> Result<()> {
                     &resource_type,
                 )?;
             }
+            Ok(HostRequest::PrivateReadLookup { lookup_id, url }) => {
+                write_private_read_lookup_responses(
+                    &mut output,
+                    &root,
+                    lookup_id,
+                    &url,
+                )?;
+            }
             Ok(request) => {
                 let response = handle_request(&mut store, request);
                 write_native_response(&mut output, &response)?;
@@ -117,6 +125,65 @@ fn write_cache_lookup_responses(
     write_native_response(output, &HostResponse::CacheHitFinish { lookup_id })
 }
 
+fn write_private_read_lookup_responses(
+    output: &mut impl Write,
+    root: &std::path::Path,
+    lookup_id: String,
+    url: &str,
+) -> Result<()> {
+    let entry = match cache::private_lookup(root, url) {
+        Ok(entry) => entry,
+        Err(error) => {
+            return write_native_response(
+                output,
+                &HostResponse::PrivateReadLookupError {
+                    lookup_id,
+                    message: format!("{error:#}"),
+                },
+            );
+        }
+    };
+
+    let Some(entry) = entry else {
+        return write_native_response(
+            output,
+            &HostResponse::PrivateReadMiss { lookup_id },
+        );
+    };
+
+    write_native_response(
+        output,
+        &HostResponse::PrivateReadHitStart {
+            lookup_id: lookup_id.clone(),
+            mime_type: entry.mime_type,
+            body_hash: entry.body_hash,
+            body_bytes: entry.body_bytes,
+            captured_at_ms: entry.captured_at_ms,
+            cache_control: entry.cache_control,
+            etag: entry.etag,
+            last_modified: entry.last_modified,
+        },
+    )?;
+
+    for (sequence, chunk) in entry.body.chunks(REPLAY_RAW_CHUNK_BYTES).enumerate() {
+        write_native_response(
+            output,
+            &HostResponse::PrivateReadHitChunk {
+                lookup_id: lookup_id.clone(),
+                sequence: sequence
+                    .try_into()
+                    .context("private-read chunk sequence exceeds u32")?,
+                data_base64: BASE64.encode(chunk),
+            },
+        )?;
+    }
+
+    write_native_response(
+        output,
+        &HostResponse::PrivateReadHitFinish { lookup_id },
+    )
+}
+
 fn write_native_response(writer: &mut impl Write, response: &HostResponse) -> Result<()> {
     write_native_message(writer, &serde_json::to_vec(response)?)
 }
@@ -131,6 +198,7 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         | HostRequest::CaptureFinish { capture_id, .. } => Some(capture_id.clone()),
         HostRequest::Ping
         | HostRequest::CacheLookup { .. }
+        | HostRequest::PrivateReadLookup { .. }
         | HostRequest::CacheReplayOutcome { .. } => None,
     };
 
@@ -140,6 +208,13 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             return HostResponse::CacheLookupError {
                 lookup_id,
                 message: "cache lookup must be handled by the streaming response path".to_owned(),
+            };
+        }
+        HostRequest::PrivateReadLookup { lookup_id, .. } => {
+            return HostResponse::PrivateReadLookupError {
+                lookup_id,
+                message: "private-read lookup must be handled by the streaming response path"
+                    .to_owned(),
             };
         }
         HostRequest::CacheReplayOutcome {
@@ -304,6 +379,71 @@ mod tests {
             }
         }
         assert_eq!(expected_sequence, 2);
+        assert_eq!(reconstructed, body);
+    }
+
+    #[test]
+    fn private_read_lookup_streams_verified_private_json() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let body = br#"{"id":"private-conversation"}"#;
+        let metadata = CaptureMetadata {
+            capture_id: "private-json".to_owned(),
+            tab_id: 1,
+            request_id: "request-private-json".to_owned(),
+            method: "GET".to_owned(),
+            url: "https://chatgpt.com/backend-api/conversation/private".to_owned(),
+            status: 200,
+            mime_type: "application/json".to_owned(),
+            resource_type: "Fetch".to_owned(),
+            etag: Some(""private-v1"".to_owned()),
+            last_modified: None,
+            cache_control: Some("private, max-age=0, must-revalidate".to_owned()),
+            provenance: CaptureProvenance::default(),
+        };
+        store.begin(metadata).unwrap();
+        store
+            .append_chunk("private-json", 0, &BASE64.encode(body))
+            .unwrap();
+        store.finish("private-json", None, None).unwrap();
+        drop(store);
+
+        let mut output = Vec::new();
+        write_private_read_lookup_responses(
+            &mut output,
+            directory.path(),
+            "private-lookup-1".to_owned(),
+            "https://chatgpt.com/backend-api/conversation/private",
+        )
+        .unwrap();
+
+        let mut input = output.as_slice();
+        let mut responses = Vec::new();
+        while let Some(payload) = read_native_message(&mut input).unwrap() {
+            assert!(payload.len() <= MAX_NATIVE_RESPONSE_BYTES);
+            responses.push(serde_json::from_slice::<HostResponse>(&payload).unwrap());
+        }
+
+        assert!(matches!(
+            responses.first(),
+            Some(HostResponse::PrivateReadHitStart {
+                lookup_id,
+                etag: Some(etag),
+                ..
+            }) if lookup_id == "private-lookup-1" && etag == ""private-v1""
+        ));
+        assert!(matches!(
+            responses.last(),
+            Some(HostResponse::PrivateReadHitFinish { lookup_id })
+                if lookup_id == "private-lookup-1"
+        ));
+
+        let mut reconstructed = Vec::new();
+        for response in &responses {
+            if let HostResponse::PrivateReadHitChunk { data_base64, .. } = response {
+                reconstructed.extend(BASE64.decode(data_base64).unwrap());
+            }
+        }
         assert_eq!(reconstructed, body);
     }
 
