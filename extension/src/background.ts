@@ -515,7 +515,10 @@ function isPrivateRevalidationCandidate(
       (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
       path.startsWith("/backend-api/") &&
       !path.startsWith("/backend-api/auth/") &&
-      url.search === "" &&
+      Array.from(url.searchParams.entries()).every(
+        ([key, value]) =>
+          !isSensitiveQueryKey(key) && value !== "[REDACTED]",
+      ) &&
       url.hash === ""
     );
   } catch {

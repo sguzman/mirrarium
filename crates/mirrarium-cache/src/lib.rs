@@ -543,8 +543,8 @@ fn private_revalidation_url(raw_url: &str) -> Option<Url> {
         || !matches!(host.as_str(), "chatgpt.com" | "chat.openai.com")
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.query().is_some()
         || url.fragment().is_some()
+        || !private_query_identity_is_safe(&url)
         || path == "/api/auth"
         || path.starts_with("/api/auth/")
         || path == "/auth"
@@ -558,6 +558,37 @@ fn private_revalidation_url(raw_url: &str) -> Option<Url> {
     }
 
     Some(url)
+}
+
+fn private_query_identity_is_safe(url: &Url) -> bool {
+    url.query_pairs().all(|(key, value)| {
+        !is_sensitive_query_key(&key)
+            && value.as_ref() != "[REDACTED]"
+    })
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "token"
+            | "access_token"
+            | "id_token"
+            | "refresh_token"
+            | "session"
+            | "session_token"
+            | "auth"
+            | "authorization"
+            | "signature"
+            | "x_amz_signature"
+            | "x_goog_signature"
+            | "key"
+            | "api_key"
+            | "apikey"
+            | "code"
+    ) || normalized.ends_with("_token")
+        || normalized.ends_with("_signature")
+        || normalized.contains("credential")
 }
 
 fn cache_control_has_no_store(cache_control: Option<&str>) -> bool {
@@ -1302,11 +1333,17 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        assert!(private_lookup(
-            directory.path(),
-            "https://chatgpt.com/backend-api/conversation/a?cursor=1"
+        assert!(private_revalidation_url(
+            "https://chatgpt.com/backend-api/conversation/a?cursor=1&limit=20"
         )
-        .unwrap()
+        .is_some());
+        assert!(private_revalidation_url(
+            "https://chatgpt.com/backend-api/conversation/a?token=secret"
+        )
+        .is_none());
+        assert!(private_revalidation_url(
+            "https://chatgpt.com/backend-api/conversation/a?cursor=%5BREDACTED%5D"
+        )
         .is_none());
         assert!(private_lookup(
             directory.path(),
