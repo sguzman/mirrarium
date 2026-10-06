@@ -462,8 +462,11 @@ const fixtureServer = https.createServer(
           "cache-control": "no-store",
           "x-mirrarium-abort": "fixture",
         });
-        response.write('{"partial":"response');
-        response.socket?.destroy();
+        response.flushHeaders();
+        setTimeout(() => {
+          response.write('{"partial":"response');
+          response.socket?.destroy();
+        }, 50);
       });
       return;
     }
