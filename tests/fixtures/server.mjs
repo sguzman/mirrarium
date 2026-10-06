@@ -14,6 +14,7 @@ let staticCssHits = 0;
 let staticJsHits = 0;
 let staticImageHits = 0;
 let staticFontHits = 0;
+let staticStressHits = 0;
 let cdnJsHits = 0;
 let privateConversationHits = 0;
 let privateConversationConditional304s = 0;
@@ -41,6 +42,12 @@ execFileSync("openssl", [
   "subjectAltName=DNS:chatgpt.com,DNS:cdn.oaistatic.com",
 ], { stdio: "ignore" });
 
+const stressScriptCount = 16;
+const stressScriptTags = Array.from(
+  { length: stressScriptCount },
+  (_, index) => `<script src="/_next/static/stress-${index}.js"></script>`,
+).join("\n");
+
 const page = `<!doctype html>
 <meta charset="utf-8">
 <title>Mirrarium fixture</title>
@@ -48,6 +55,7 @@ const page = `<!doctype html>
 <h1>fixture</h1>
 <img alt="fixture pixel" src="/_next/static/pixel.svg">
 <script src="/_next/static/app.js"></script>
+${stressScriptTags}
 <script src="https://cdn.oaistatic.com:43117/assets/cdn-app.js"></script>
 <script>
 const requestMessage = ["hello", "from", "request", "body"].join(" ");
@@ -140,6 +148,28 @@ const replayProbe = `<!doctype html>
 <script src="https://cdn.oaistatic.com:43117/assets/cdn-app.js"></script>
 <h1>replay probe</h1>`;
 
+const replayStressProbe = `<!doctype html>
+<meta charset="utf-8">
+<title>Mirrarium replay stress probe</title>
+<h1>replay stress probe</h1>
+${stressScriptTags}
+<script>
+Promise.all(
+  Array.from({ length: 32 }, (_, index) =>
+    fetch("/backend-api/stress-write/" + index, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: "stress write " + index,
+        access_token: "fixture-stress-secret",
+      }),
+    }).then((response) => response.json()),
+  ),
+).then(() => {
+  document.body.dataset.ready = "yes";
+});
+</script>`;
+
 const fixtureServer = https.createServer(
   {
     key: readFileSync(keyPath),
@@ -158,6 +188,27 @@ const fixtureServer = https.createServer(
         "cache-control": "no-store",
       });
       response.end(replayProbe);
+      return;
+    }
+
+    if (request.url === "/replay-stress-probe") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      response.end(replayStressProbe);
+      return;
+    }
+
+    if (/^\/_next\/static\/stress-\d+\.js$/.test(request.url ?? "")) {
+      staticStressHits += 1;
+      response.writeHead(200, {
+        "content-type": "application/javascript",
+        "cache-control": "public, max-age=31536000, immutable",
+      });
+      response.end(
+        "globalThis.__mirrariumStressLoaded = (globalThis.__mirrariumStressLoaded ?? 0) + 1;",
+      );
       return;
     }
 
@@ -364,6 +415,21 @@ const fixtureServer = https.createServer(
         "content-disposition": 'attachment; filename="fixture-attachment.txt"',
       });
       response.end("fixture attachment bytes");
+      return;
+    }
+
+    if (
+      request.url?.startsWith("/backend-api/stress-write/") &&
+      request.method === "POST"
+    ) {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end(JSON.stringify({ ok: true }));
+      });
       return;
     }
 
@@ -622,6 +688,7 @@ const healthServer = http.createServer((request, response) => {
       js: staticJsHits,
       image: staticImageHits,
       font: staticFontHits,
+      stress_js: staticStressHits,
       cdn_js: cdnJsHits,
     }));
     return;

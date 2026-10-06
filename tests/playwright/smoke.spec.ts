@@ -519,12 +519,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         js: number;
         image: number;
         font: number;
+        stress_js: number;
         cdn_js: number;
       };
       expect(replayCountsBefore.css).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.js).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.image).toBeGreaterThanOrEqual(1);
       expect(replayCountsBefore.font).toBeGreaterThanOrEqual(1);
+      expect(replayCountsBefore.stress_js).toBeGreaterThanOrEqual(16);
       expect(replayCountsBefore.cdn_js).toBeGreaterThanOrEqual(1);
 
       const replaySession = await context.newCDPSession(page);
@@ -815,6 +817,17 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(imageResponse.status()).toBe(200);
         expect(fontResponse.status()).toBe(200);
         expect(cdnScriptResponse.status()).toBe(200);
+
+        await page.goto("https://chatgpt.com:43117/replay-stress-probe");
+        await page.waitForFunction(
+          () =>
+            document.body.dataset.ready === "yes" &&
+            (globalThis as typeof globalThis & {
+              __mirrariumStressLoaded?: number;
+            }).__mirrariumStressLoaded === 16,
+          undefined,
+          { timeout: 10_000 },
+        );
       } finally {
         await replaySession.detach();
       }
@@ -826,6 +839,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         js: number;
         image: number;
         font: number;
+        stress_js: number;
         cdn_js: number;
       };
       expect(replayCountsAfter).toEqual(replayCountsBefore);
@@ -857,7 +871,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .poll(async () => (await readReplayStats()).hits, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(5);
       const replayStats = await readReplayStats();
-      expect(replayStats.hits).toBeGreaterThanOrEqual(5);
+      expect(replayStats.hits).toBeGreaterThanOrEqual(21);
       expect(replayStats.misses).toBeGreaterThanOrEqual(1);
       expect(replayStats.replayed_bytes).toBeGreaterThan(0);
       expect(replayStats.lookup_errors).toBe(0);
