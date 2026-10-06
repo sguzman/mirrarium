@@ -29,6 +29,9 @@ fn run() -> Result<()> {
     if arguments.first().map(String::as_str) == Some("native-host") {
         return handle_native_host(&arguments[1..]);
     }
+    if arguments.first().map(String::as_str) == Some("extension") {
+        return handle_extension(&arguments[1..]);
+    }
 
     let root = default_data_root()?;
 
@@ -254,6 +257,256 @@ fn run() -> Result<()> {
 }
 
 
+
+fn handle_extension(arguments: &[String]) -> Result<()> {
+    match arguments.first().map(String::as_str) {
+        Some("install") => {
+            let source = resolve_extension_source(arguments.get(1).map(String::as_str))?;
+            let install_path = extension_install_path()?;
+            let manifest = install_extension(&source, &install_path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "source_path": source,
+                    "install_path": install_path,
+                    "extension_id": EXTENSION_ID,
+                    "manifest_version": manifest["manifest_version"],
+                    "version": manifest["version"],
+                }))?
+            );
+        }
+        Some("status") => {
+            let install_path = extension_install_path()?;
+            let manifest_path = install_path.join("manifest.json");
+            let installed = install_path.is_dir();
+            let (valid, version, error) = if installed {
+                match validate_extension_directory(&install_path) {
+                    Ok(manifest) => (
+                        true,
+                        manifest.get("version").cloned().unwrap_or(serde_json::Value::Null),
+                        serde_json::Value::Null,
+                    ),
+                    Err(error) => (
+                        false,
+                        serde_json::Value::Null,
+                        serde_json::Value::String(format!("{error:#}")),
+                    ),
+                }
+            } else {
+                (false, serde_json::Value::Null, serde_json::Value::Null)
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "install_path": install_path,
+                    "manifest_path": manifest_path,
+                    "installed": installed,
+                    "valid": valid,
+                    "version": version,
+                    "extension_id": EXTENSION_ID,
+                    "error": error,
+                }))?
+            );
+        }
+        Some("uninstall") => {
+            let install_path = extension_install_path()?;
+            let removed = if install_path.exists() {
+                fs::remove_dir_all(&install_path)
+                    .with_context(|| format!("removing {}", install_path.display()))?;
+                true
+            } else {
+                false
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "install_path": install_path,
+                    "removed": removed,
+                }))?
+            );
+        }
+        Some(command) => anyhow::bail!(
+            "unknown extension command {command:?}; use install, status, or uninstall"
+        ),
+        None => anyhow::bail!(
+            "missing extension command; use 'mirrarium extension install [SOURCE_DIR]'"
+        ),
+    }
+
+    Ok(())
+}
+
+fn extension_install_path() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("MIRRARIUM_EXTENSION_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(path).join("mirrarium/extension"));
+    }
+    let home = env::var_os("HOME")
+        .context("set HOME, XDG_DATA_HOME, or MIRRARIUM_EXTENSION_DIR")?;
+    Ok(PathBuf::from(home).join(".local/share/mirrarium/extension"))
+}
+
+fn resolve_extension_source(explicit: Option<&str>) -> Result<PathBuf> {
+    let candidate = explicit
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("MIRRARIUM_EXTENSION_SOURCE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("extension/dist"));
+    anyhow::ensure!(
+        candidate.is_dir(),
+        "extension source directory does not exist: {}",
+        candidate.display()
+    );
+    let canonical = fs::canonicalize(&candidate)
+        .with_context(|| format!("resolving extension source {}", candidate.display()))?;
+    validate_extension_directory(&canonical)?;
+    Ok(canonical)
+}
+
+fn validate_extension_directory(path: &Path) -> Result<serde_json::Value> {
+    anyhow::ensure!(path.is_dir(), "extension directory does not exist: {}", path.display());
+    let manifest_path = path.join("manifest.json");
+    let background_path = path.join("background.js");
+    anyhow::ensure!(
+        manifest_path.is_file(),
+        "extension manifest is missing: {}",
+        manifest_path.display()
+    );
+    anyhow::ensure!(
+        background_path.is_file(),
+        "extension background worker is missing: {}",
+        background_path.display()
+    );
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    anyhow::ensure!(
+        manifest.get("manifest_version").and_then(serde_json::Value::as_u64) == Some(3),
+        "Mirrarium extension must use manifest_version 3"
+    );
+    anyhow::ensure!(
+        manifest.get("name").and_then(serde_json::Value::as_str) == Some("Mirrarium"),
+        "extension manifest name is not Mirrarium"
+    );
+    anyhow::ensure!(
+        manifest.get("key").and_then(serde_json::Value::as_str).is_some_and(|key| !key.is_empty()),
+        "extension manifest is missing its stable key"
+    );
+    anyhow::ensure!(
+        manifest.get("version").and_then(serde_json::Value::as_str).is_some(),
+        "extension manifest is missing version"
+    );
+    Ok(manifest)
+}
+
+fn install_extension(source: &Path, destination: &Path) -> Result<serde_json::Value> {
+    let source = fs::canonicalize(source)
+        .with_context(|| format!("resolving extension source {}", source.display()))?;
+    let source_manifest = validate_extension_directory(&source)?;
+
+    if destination.exists() {
+        if let Ok(installed) = fs::canonicalize(destination) {
+            if installed == source {
+                return Ok(source_manifest);
+            }
+        }
+    }
+
+    let parent = destination
+        .parent()
+        .context("extension install path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating extension install parent {}", parent.display()))?;
+
+    let temp = parent.join(format!(".extension.install.{}.tmp", std::process::id()));
+    let backup = parent.join(format!(".extension.backup.{}", std::process::id()));
+    if temp.exists() {
+        fs::remove_dir_all(&temp)
+            .with_context(|| format!("removing stale extension staging {}", temp.display()))?;
+    }
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("removing stale extension backup {}", backup.display()))?;
+    }
+
+    copy_extension_tree(&source, &temp)?;
+    let installed_manifest = validate_extension_directory(&temp)?;
+
+    let had_destination = destination.exists();
+    if had_destination {
+        fs::rename(destination, &backup).with_context(|| {
+            format!(
+                "moving existing extension {} to {}",
+                destination.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    if let Err(error) = fs::rename(&temp, destination) {
+        if had_destination && backup.exists() && !destination.exists() {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "installing extension {} to {}",
+                temp.display(),
+                destination.display()
+            )
+        });
+    }
+
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("removing replaced extension {}", backup.display()))?;
+    }
+
+    Ok(installed_manifest)
+}
+
+fn copy_extension_tree(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir(destination)
+        .with_context(|| format!("creating extension staging {}", destination.display()))?;
+
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("reading extension source {}", source.display()))?
+    {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)?;
+
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "extension source contains unsupported symlink: {}",
+            source_path.display()
+        );
+
+        if metadata.is_dir() {
+            copy_extension_tree(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "copying extension file {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        } else {
+            anyhow::bail!(
+                "extension source contains unsupported entry: {}",
+                source_path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn handle_native_host(arguments: &[String]) -> Result<()> {
     match arguments.first().map(String::as_str) {
         Some("install") => {
@@ -452,9 +705,17 @@ USAGE:
   mirrarium corpus canonical <ID>
   mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
   mirrarium corpus stream-revisions <CONVERSATION_ID> [LIMIT]
+  mirrarium extension install [SOURCE_DIR]
+  mirrarium extension status
+  mirrarium extension uninstall
   mirrarium native-host install [BROWSER] [MIRRARIUMD_PATH]
   mirrarium native-host status [BROWSER]
   mirrarium native-host uninstall [BROWSER]
+
+EXTENSION:
+  SOURCE_DIR defaults to ./extension/dist.
+  MIRRARIUM_EXTENSION_SOURCE overrides the source.
+  MIRRARIUM_EXTENSION_DIR overrides the stable installed-extension directory.
 
 NATIVE HOST:
   BROWSER defaults to edge.
@@ -476,6 +737,81 @@ PRIVATE KEY:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_install_atomically_replaces_previous_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_one = directory.path().join("source-one");
+        let source_two = directory.path().join("source-two");
+        let destination = directory.path().join("installed");
+
+        for (source, version, marker) in [
+            (&source_one, "0.1.0", "first"),
+            (&source_two, "0.2.0", "second"),
+        ] {
+            fs::create_dir_all(source).unwrap();
+            fs::write(
+                source.join("manifest.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "manifest_version": 3,
+                    "name": "Mirrarium",
+                    "version": version,
+                    "key": "fixture-key"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(source.join("background.js"), format!("// {marker}")).unwrap();
+        }
+        fs::write(source_one.join("old-only.txt"), b"old").unwrap();
+
+        let first = install_extension(&source_one, &destination).unwrap();
+        assert_eq!(first["version"], "0.1.0");
+        assert!(destination.join("old-only.txt").is_file());
+
+        let second = install_extension(&source_two, &destination).unwrap();
+        assert_eq!(second["version"], "0.2.0");
+        assert!(!destination.join("old-only.txt").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("background.js")).unwrap(),
+            "// second"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_install_rejects_symlinked_source_entries() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("installed");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "manifest_version": 3,
+                "name": "Mirrarium",
+                "version": "0.1.0",
+                "key": "fixture-key"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(source.join("background.js"), b"// fixture").unwrap();
+        fs::write(directory.path().join("outside.txt"), b"outside").unwrap();
+        symlink(
+            directory.path().join("outside.txt"),
+            source.join("linked.txt"),
+        )
+        .unwrap();
+
+        let error = install_extension(&source, &destination)
+            .err()
+            .expect("symlinked extension source should be rejected");
+        assert!(error.to_string().contains("unsupported symlink"));
+        assert!(!destination.exists());
+    }
 
     #[test]
     fn browser_manifest_paths_match_linux_user_data_layouts() {

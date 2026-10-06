@@ -125,6 +125,19 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 
 The derived corpus is explicitly schema-versioned. When its rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors.
 
+## Linux extension install/update
+
+Build the extension, then copy it into Mirrarium's stable user-level install directory:
+
+```bash
+pnpm build:extension
+mirrarium extension install
+```
+
+The default source is `./extension/dist`. The installed copy lives at `$XDG_DATA_HOME/mirrarium/extension` or `~/.local/share/mirrarium/extension`; `MIRRARIUM_EXTENSION_SOURCE` and `MIRRARIUM_EXTENSION_DIR` override those paths. Installation validates the MV3 manifest/background worker, rejects symlinks, stages a self-contained copy beside the destination, and atomically replaces the previous installed tree.
+
+Use `mirrarium extension status` to inspect the installed copy and `mirrarium extension uninstall` to remove it. For unpacked Edge/Chromium development installs, load this **stable installed directory** once. Future `mirrarium extension install` runs update that same path rather than requiring a different build-tree location.
+
 ## Linux native-host install
 
 For normal Edge use, build or install `mirrarium` and `mirrariumd` side by side, then run:

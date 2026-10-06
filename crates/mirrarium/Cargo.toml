@@ -11,3 +11,6 @@ mirrarium-cache = { path = "../mirrarium-cache" }
 mirrarium-corpus = { path = "../mirrarium-corpus" }
 mirrarium-store = { path = "../mirrarium-store" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

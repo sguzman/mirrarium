@@ -45,11 +45,13 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   const userDataDir = join(root, "chromium-profile");
   const dataDir = join(root, "data");
   const privateKeyFile = join(root, "private.key");
+  const installedExtensionPath = join(root, "installed-extension");
   const childEnv = {
     ...process.env,
     MIRRARIUM_PRIVATE_KEY_FILE: privateKeyFile,
+    MIRRARIUM_EXTENSION_DIR: installedExtensionPath,
   };
-  const extensionPath = resolve("extension/dist");
+  const extensionSourcePath = resolve("extension/dist");
   const daemonPath = resolve("target/debug/mirrariumd");
   const cliPath = resolve("target/debug/mirrarium");
 
@@ -66,6 +68,58 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   try {
     await mkdir(userDataDir, { recursive: true });
     await mkdir(dataDir, { recursive: true });
+
+    const { stdout: extensionInstallStdout } = await execFileAsync(
+      cliPath,
+      ["extension", "install", extensionSourcePath],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_DATA_HOME: join(browserHome, ".local", "share"),
+        },
+      },
+    );
+    const extensionInstall = JSON.parse(extensionInstallStdout) as {
+      source_path: string;
+      install_path: string;
+      extension_id: string;
+      manifest_version: number;
+      version: string;
+    };
+    expect(extensionInstall).toMatchObject({
+      install_path: installedExtensionPath,
+      extension_id: expectedExtensionId,
+      manifest_version: 3,
+      version: "0.1.0",
+    });
+    expect(extensionInstall.source_path).toBe(extensionSourcePath);
+
+    const { stdout: extensionStatusStdout } = await execFileAsync(
+      cliPath,
+      ["extension", "status"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_DATA_HOME: join(browserHome, ".local", "share"),
+        },
+      },
+    );
+    const extensionStatus = JSON.parse(extensionStatusStdout) as {
+      install_path: string;
+      installed: boolean;
+      valid: boolean;
+      version: string;
+      extension_id: string;
+    };
+    expect(extensionStatus).toMatchObject({
+      install_path: installedExtensionPath,
+      installed: true,
+      valid: true,
+      version: "0.1.0",
+      extension_id: expectedExtensionId,
+    });
 
     const { stdout: nativeInstallStdout } = await execFileAsync(
       cliPath,
@@ -105,8 +159,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         MIRRARIUM_DATA_DIR: dataDir,
       },
       args: [
-        `--disable-extensions-except=${extensionPath}`,
-        `--load-extension=${extensionPath}`,
+        `--disable-extensions-except=${installedExtensionPath}`,
+        `--load-extension=${installedExtensionPath}`,
         "--host-resolver-rules=MAP chatgpt.com 127.0.0.1, MAP cdn.oaistatic.com 127.0.0.1",
         "--no-proxy-server",
       ],

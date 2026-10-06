@@ -145,12 +145,13 @@ Implemented:
 - sensitive/redacted query keys remain excluded before private lookup;
 - Chromium proof with browser cache disabled covering unchanged JSON v1, changed v2, capture of v2, subsequent v2 revalidation, exact query-bearing revalidation, and top-level private HTML document revalidation;
 - aggregate-only private revalidation telemetry with not-modified/refresh/fulfillment-error counts and avoided private body bytes, without a second private-URL ledger;
-- user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing.
+- user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing;
+- stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, atomic replacement, and Chromium e2e execution from the installed copy rather than the build tree.
 
 Next:
 
 - cautiously expand conditional revalidation to additional private MIME/route families only when `cache private-coverage` shows meaningful validator-backed bytes and stable semantics;
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
-- extension packaging/update ergonomics for normal Edge deployment;
-- explicit stale/incomplete-capture maintenance and recovery tooling for `.incoming` without ever treating incomplete ciphertext as archive evidence.
+- browser-facing update notification/reload ergonomics for the stable unpacked Edge deployment;
+- explicit stale/incomplete-capture maintenance visibility for `.incoming` without ever treating incomplete ciphertext as archive evidence.
