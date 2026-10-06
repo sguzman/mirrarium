@@ -2176,7 +2176,14 @@ fn private_key_path(root: &Path) -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    if cfg!(test) {
+    // Library callers (tests, fixtures, embeddings) may pass an isolated root
+    // directly instead of using Mirrarium's configured application data root.
+    // Keep those roots self-contained so independent instances never share a
+    // production key implicitly.
+    if default_data_root()
+        .map(|configured| configured != root)
+        .unwrap_or(true)
+    {
         return Ok(root.join(".keys/private.key"));
     }
 
