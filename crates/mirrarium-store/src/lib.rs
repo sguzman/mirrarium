@@ -26,6 +26,8 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
 const PRIVATE_KEY_BYTES: usize = 32;
 const PRIVATE_NONCE_BYTES: usize = 24;
+const SQLITE_PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
+const LEDGER_KEY_PURPOSE: &str = "ledger-sqlcipher-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyClass {
@@ -107,6 +109,9 @@ pub struct VerifyReport {
 pub struct PrivateStorageStatus {
     pub key_path: String,
     pub key_exists: bool,
+    pub ledger_exists: bool,
+    pub ledger_encrypted: bool,
+    pub ledger_plaintext_legacy: bool,
     pub private_objects: u64,
     pub encrypted_private_objects: u64,
     pub legacy_plaintext_private_objects: u64,
@@ -166,8 +171,7 @@ impl CaptureStore {
         harden_directory(&root.join("private"))?;
 
         let database_path = root.join("ledger.sqlite3");
-        let connection = Connection::open(&database_path)
-            .with_context(|| format!("opening {}", database_path.display()))?;
+        let connection = open_raw_ledger_connection(&root, false)?;
         harden_file(&database_path)?;
 
         connection.execute_batch(
@@ -648,6 +652,11 @@ impl CaptureStore {
 
     pub fn private_storage_status(&self) -> Result<PrivateStorageStatus> {
         let key_path = private_key_path(&self.root)?;
+        let ledger_path = self.root.join("ledger.sqlite3");
+        let ledger_exists = ledger_path.is_file();
+        let ledger_plaintext_legacy =
+            ledger_exists && database_has_plaintext_sqlite_header(&ledger_path)?;
+        let ledger_encrypted = ledger_exists && !ledger_plaintext_legacy;
         let mut statement = self.connection.prepare(
             "SELECT hash, relative_path FROM objects WHERE storage_class = 'private' ORDER BY hash",
         )?;
@@ -693,11 +702,14 @@ impl CaptureStore {
         Ok(PrivateStorageStatus {
             key_path: key_path.to_string_lossy().into_owned(),
             key_exists: key_path.is_file(),
+            ledger_exists,
+            ledger_encrypted,
+            ledger_plaintext_legacy,
             private_objects,
             encrypted_private_objects,
             legacy_plaintext_private_objects,
             missing_or_invalid_private_objects,
-            migration_needed: legacy_plaintext_private_objects > 0,
+            migration_needed: legacy_plaintext_private_objects > 0 || ledger_plaintext_legacy,
         })
     }
 
@@ -1351,18 +1363,55 @@ fn is_sensitive_header_name(normalized: &str) -> bool {
         || normalized.contains("credential")
 }
 
+fn database_has_plaintext_sqlite_header(path: &Path) -> Result<bool> {
+    let mut file = File::open(path)
+        .with_context(|| format!("opening database header {}", path.display()))?;
+    let mut header = [0_u8; SQLITE_PLAINTEXT_HEADER.len()];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header == SQLITE_PLAINTEXT_HEADER),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("reading database header {}", path.display())),
+    }
+}
+
+fn open_raw_ledger_connection(root: &Path, read_only: bool) -> Result<Connection> {
+    let database = root.join("ledger.sqlite3");
+    if read_only {
+        anyhow::ensure!(
+            database.is_file(),
+            "raw ledger does not exist: {}",
+            database.display()
+        );
+    }
+
+    let existed = database.is_file();
+    let plaintext = existed && database_has_plaintext_sqlite_header(&database)?;
+    let connection = if read_only {
+        Connection::open_with_flags(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    } else {
+        Connection::open(&database)
+    }
+    .with_context(|| format!("opening raw ledger {}", database.display()))?;
+
+    if !plaintext {
+        apply_private_database_key(
+            &connection,
+            root,
+            LEDGER_KEY_PURPOSE,
+            !existed,
+        )
+        .context("opening encrypted raw ledger")?;
+    }
+
+    Ok(connection)
+}
+
 pub fn open_raw_ledger_read_only(root: impl AsRef<Path>) -> Result<Connection> {
-    let database = root.as_ref().join("ledger.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "raw ledger does not exist: {}",
-        database.display()
-    );
-    Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening raw ledger {}", database.display()))
+    open_raw_ledger_connection(root.as_ref(), true)
 }
 
 pub fn default_data_root() -> Result<PathBuf> {
@@ -1954,6 +2003,40 @@ pub fn private_database_key(
     Ok(derived)
 }
 
+fn sqlcipher_raw_key_literal(key: &[u8; PRIVATE_KEY_BYTES]) -> String {
+    let mut hex = String::with_capacity(PRIVATE_KEY_BYTES * 2);
+    for byte in key {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("x'{hex}'")
+}
+
+pub fn apply_private_database_key(
+    connection: &Connection,
+    root: impl AsRef<Path>,
+    purpose: &str,
+    create_master_if_missing: bool,
+) -> Result<()> {
+    let key = private_database_key(root, purpose, create_master_if_missing)?;
+    let literal = sqlcipher_raw_key_literal(&key);
+    connection
+        .execute_batch(&format!("PRAGMA key = \"{literal}\";"))
+        .with_context(|| format!("applying SQLCipher key for {purpose}"))?;
+
+    let cipher_version: String = connection
+        .pragma_query_value(None, "cipher_version", |row| row.get(0))
+        .context("this Mirrarium build does not provide SQLCipher")?;
+    anyhow::ensure!(
+        !cipher_version.trim().is_empty(),
+        "SQLCipher cipher_version is empty"
+    );
+    connection
+        .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))
+        .with_context(|| format!("verifying SQLCipher key for {purpose}"))?;
+    Ok(())
+}
+
 fn private_object_aad(hash: &str) -> Vec<u8> {
     let mut aad = b"mirrarium-private-object-v1\0".to_vec();
     aad.extend_from_slice(hash.as_bytes());
@@ -2283,6 +2366,51 @@ mod tests {
         let error = load_or_create_private_key(directory.path()).unwrap_err();
         assert!(error.to_string().contains("restore that key"));
         assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn new_capture_store_creates_encrypted_raw_ledger() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+        let ledger = directory.path().join("ledger.sqlite3");
+        let raw = fs::read(&ledger).unwrap();
+        assert_ne!(
+            raw.get(..SQLITE_PLAINTEXT_HEADER.len()),
+            Some(SQLITE_PLAINTEXT_HEADER.as_slice())
+        );
+
+        let status = store.private_storage_status().unwrap();
+        assert!(status.ledger_exists);
+        assert!(status.ledger_encrypted);
+        assert!(!status.ledger_plaintext_legacy);
+
+        let read_only = open_raw_ledger_read_only(directory.path()).unwrap();
+        let table_count: i64 = read_only
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_count > 0);
+    }
+
+    #[test]
+    fn legacy_plaintext_raw_ledger_remains_readable() {
+        let directory = tempdir().unwrap();
+        let ledger = directory.path().join("ledger.sqlite3");
+        let plain = Connection::open(&ledger).unwrap();
+        plain
+            .execute_batch("CREATE TABLE legacy_probe (value TEXT); INSERT INTO legacy_probe VALUES ('ok');")
+            .unwrap();
+        drop(plain);
+
+        assert!(database_has_plaintext_sqlite_header(&ledger).unwrap());
+        let read_only = open_raw_ledger_read_only(directory.path()).unwrap();
+        let value: String = read_only
+            .query_row("SELECT value FROM legacy_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "ok");
     }
 
     #[test]

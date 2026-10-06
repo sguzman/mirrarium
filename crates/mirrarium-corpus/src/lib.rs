@@ -5,7 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use mirrarium_store::{open_raw_ledger_read_only, private_database_key, read_verified_object};
+use mirrarium_store::{
+    apply_private_database_key, open_raw_ledger_read_only, read_verified_object,
+};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 use serde_json::Value;
@@ -208,7 +210,8 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     remove_corpus_database_files(&corpus_database)?;
     let mut corpus = Connection::open(&corpus_database)
         .with_context(|| format!("opening {}", corpus_database.display()))?;
-    apply_corpus_database_key(&corpus, raw_root, true)?;
+    apply_private_database_key(&corpus, raw_root, "corpus-sqlcipher-v1", true)
+        .context("creating encrypted derived corpus")?;
     harden_file(&corpus_database)?;
 
     corpus.execute_batch(
@@ -410,8 +413,13 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening {}", database.display()))?;
-    apply_corpus_database_key(&connection, raw_root.as_ref(), false)
-        .context("opening encrypted derived corpus; restore the Mirrarium private key or run 'mirrarium corpus rebuild'")?;
+    apply_private_database_key(
+        &connection,
+        raw_root.as_ref(),
+        "corpus-sqlcipher-v1",
+        false,
+    )
+    .context("opening encrypted derived corpus; restore the Mirrarium private key or run 'mirrarium corpus rebuild'")?;
     validate_corpus_schema(&connection)?;
 
     for table in [
@@ -1295,8 +1303,13 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening {}", database.display()))?;
-    apply_corpus_database_key(&connection, raw_root.as_ref(), false)
-        .context("opening encrypted derived corpus; restore the Mirrarium private key or run 'mirrarium corpus rebuild'")?;
+    apply_private_database_key(
+        &connection,
+        raw_root.as_ref(),
+        "corpus-sqlcipher-v1",
+        false,
+    )
+    .context("opening encrypted derived corpus; restore the Mirrarium private key or run 'mirrarium corpus rebuild'")?;
     validate_corpus_schema(&connection)?;
 
     for table in [
@@ -2217,44 +2230,6 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
     events
 }
 
-fn sqlcipher_raw_key_literal(key: &[u8; 32]) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in key {
-        use std::fmt::Write as _;
-        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    format!("x'{hex}'")
-}
-
-fn apply_corpus_database_key(
-    connection: &Connection,
-    raw_root: &Path,
-    create_master_if_missing: bool,
-) -> Result<()> {
-    let key = private_database_key(
-        raw_root,
-        "corpus-sqlcipher-v1",
-        create_master_if_missing,
-    )?;
-    let literal = sqlcipher_raw_key_literal(&key);
-    connection
-        .execute_batch(&format!("PRAGMA key = \"{literal}\";"))
-        .context("applying SQLCipher corpus key")?;
-
-    let cipher_version: String = connection
-        .pragma_query_value(None, "cipher_version", |row| row.get(0))
-        .context("this Mirrarium build does not provide SQLCipher")?;
-    anyhow::ensure!(
-        !cipher_version.trim().is_empty(),
-        "SQLCipher cipher_version is empty"
-    );
-
-    connection
-        .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))
-        .context("verifying SQLCipher corpus key")?;
-    Ok(())
-}
-
 fn remove_corpus_database_files(database: &Path) -> Result<()> {
     for path in [
         database.to_path_buf(),
@@ -2324,15 +2299,6 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sqlcipher_raw_key_literal_is_exact_32_byte_hex_blob() {
-        let literal = sqlcipher_raw_key_literal(&[0xab; 32]);
-        assert_eq!(literal.len(), 67);
-        assert!(literal.starts_with("x'"));
-        assert!(literal.ends_with('\''));
-        assert_eq!(&literal[2..66], &"ab".repeat(32));
-    }
 
     #[test]
     fn rejects_outdated_derived_corpus_schema() {
