@@ -1874,7 +1874,7 @@ fn writer_lock_is_active(root: &Path) -> Result<bool> {
         }
     };
 
-    match file.try_lock_shared() {
+    match FileExt::try_lock_shared(&file) {
         Ok(()) => {
             FileExt::unlock(&file)
                 .with_context(|| format!("unlocking Mirrarium writer lock {}", path.display()))?;
