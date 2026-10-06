@@ -4,7 +4,7 @@
 
 Mirrarium is deliberately split into a thin Chromium extension and a durable local Rust system.
 
-The extension owns browser observation. Rust owns persistence, indexing, integrity, corpus construction, and later replay decisions.
+The extension owns browser observation. Rust owns persistence, indexing, integrity, corpus construction, and replay/revalidation decisions.
 
 ```text
 ChatGPT tab

@@ -2,7 +2,7 @@
 
 Mirrarium is a Chromium-first local recorder, cache, and corpus builder for ChatGPT.
 
-Its job is to observe normal ChatGPT use, preserve the site and account data the browser already receives, build a durable local corpus from that evidence, and eventually serve specifically approved reads from local storage.
+Its job is to observe normal ChatGPT use, preserve the site and account data the browser already receives, build a durable local corpus from that evidence, and serve specifically approved reads from local storage through conservative replay and revalidation policies.
 
 ## Core rule
 
@@ -39,10 +39,10 @@ mirrariumd (Rust)
     +-- content-addressed raw store
     +-- private store
     +-- derived corpus
-    +-- future replay engine
+    +-- replay / revalidation policy
 ```
 
-The browser extension stays thin. Durable storage, indexing, corpus construction, integrity, and future replay policy belong in Rust.
+The browser extension stays thin. Durable storage, indexing, corpus construction, integrity, and replay/revalidation policy belong in Rust.
 
 ## Storage boundaries
 
@@ -159,9 +159,9 @@ Use `mirrarium native-host status` to inspect whether the manifest exists and `m
 
 The data root is resolved from `MIRRARIUM_DATA_DIR`, then `XDG_DATA_HOME/mirrarium`, then `~/.local/share/mirrarium`.
 
-## MVP: Passive Recorder
+## Historical MVP: Passive Recorder
 
-The first milestone succeeds when:
+The original recorder-only milestone was defined by the following conditions and is now complete:
 
 1. an unpacked MV3 extension runs in isolated Chromium;
 2. it activates only for supported ChatGPT origins;
@@ -176,7 +176,9 @@ The first milestone succeeds when:
 11. capture survives navigation and reload;
 12. CLI inspection makes the capture auditable;
 13. Playwright exercises the pipeline against deterministic fixtures;
-14. Mirrarium does **not** substitute responses yet.
+14. response substitution was intentionally still disabled at that milestone.
+
+Mirrarium has since moved beyond this recorder-only baseline: immutable public replay and validator-backed private revalidation are implemented and covered by isolated Chromium integration tests.
 
 ## Replay safety
 
@@ -184,7 +186,7 @@ Unknown traffic always defaults to **network + record**.
 
 Mutations such as sending messages, editing, deleting, uploading, or changing account state are never satisfied from historical cache entries.
 
-Replay begins only with explicitly classified safe resources, starting with immutable/versioned assets and expanding later only when we can prove the semantics.
+Replay is granted only to explicitly classified safe resources, beginning with immutable/versioned assets and expanding only when captured evidence and tests justify the semantics.
 
 ## Relationship to Chatarium
 
