@@ -125,6 +125,23 @@ pub struct PrivateMigrationReport {
     pub migrated_objects: u64,
     pub migrated_body_bytes: u64,
     pub already_encrypted_objects: u64,
+    pub ledger_migrated: bool,
+    pub ledger_already_encrypted: bool,
+    pub ledger_plaintext_bytes: u64,
+}
+
+#[derive(Debug)]
+struct PrivateObjectMigrationReport {
+    migrated_objects: u64,
+    migrated_body_bytes: u64,
+    already_encrypted_objects: u64,
+}
+
+#[derive(Debug)]
+struct LedgerMigrationReport {
+    migrated: bool,
+    already_encrypted: bool,
+    plaintext_bytes: u64,
 }
 
 struct RequestBodyCapture {
@@ -713,8 +730,7 @@ impl CaptureStore {
         })
     }
 
-    pub fn migrate_private_storage(&self) -> Result<PrivateMigrationReport> {
-        let key_path = private_key_path(&self.root)?;
+    fn migrate_private_objects(&self) -> Result<PrivateObjectMigrationReport> {
         let mut statement = self.connection.prepare(
             "SELECT hash, bytes, relative_path FROM objects WHERE storage_class = 'private' ORDER BY hash",
         )?;
@@ -798,8 +814,7 @@ impl CaptureStore {
                 .context("migrated private byte count overflow")?;
         }
 
-        Ok(PrivateMigrationReport {
-            key_path: key_path.to_string_lossy().into_owned(),
+        Ok(PrivateObjectMigrationReport {
             migrated_objects,
             migrated_body_bytes,
             already_encrypted_objects,
@@ -1408,6 +1423,299 @@ fn open_raw_ledger_connection(root: &Path, read_only: bool) -> Result<Connection
     }
 
     Ok(connection)
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn database_user_table_counts(connection: &Connection) -> Result<BTreeMap<String, u64>> {
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut counts = BTreeMap::new();
+    for table in tables {
+        let quoted = table.replace('"', """");
+        let count: i64 = connection.query_row(
+            &format!("SELECT COUNT(*) FROM \"{quoted}\""),
+            [],
+            |row| row.get(0),
+        )?;
+        let count: u64 = count
+            .try_into()
+            .with_context(|| format!("negative row count in table {table:?}"))?;
+        counts.insert(table, count);
+    }
+    Ok(counts)
+}
+
+fn database_schema_fingerprint(connection: &Connection) -> Result<Vec<(String, String, String, Option<String>)>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type, name
+        "#,
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn verify_database_integrity(connection: &Connection) -> Result<()> {
+    let result: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .context("running SQLite integrity_check")?;
+    anyhow::ensure!(
+        result.eq_ignore_ascii_case("ok"),
+        "SQLite integrity_check failed: {result}"
+    );
+    Ok(())
+}
+
+fn remove_database_sidecars(database: &Path) -> Result<()> {
+    for path in [
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("removing database sidecar {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recover_interrupted_ledger_migration(root: &Path) -> Result<()> {
+    let database = root.join("ledger.sqlite3");
+    let backup = root.join(".incoming/ledger.sqlite3.plaintext-backup");
+    let encrypted_part = root.join(".incoming/ledger.sqlite3.encrypted.part");
+
+    if !database.exists() && backup.exists() {
+        fs::rename(&backup, &database).with_context(|| {
+            format!(
+                "restoring interrupted ledger migration backup {}",
+                backup.display()
+            )
+        })?;
+        remove_database_sidecars(&encrypted_part)?;
+        let _ = fs::remove_file(&encrypted_part);
+        return Ok(());
+    }
+
+    if database.exists() && backup.exists() {
+        if !database_has_plaintext_sqlite_header(&database)?
+            && open_raw_ledger_connection(root, true).is_ok()
+        {
+            fs::remove_file(&backup).with_context(|| {
+                format!("removing completed ledger migration backup {}", backup.display())
+            })?;
+        } else {
+            anyhow::bail!(
+                "raw ledger migration backup {} exists; refusing to overwrite recovery evidence",
+                backup.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
+    recover_interrupted_ledger_migration(root)?;
+
+    let database = root.join("ledger.sqlite3");
+    anyhow::ensure!(
+        database.is_file(),
+        "raw ledger does not exist: {}",
+        database.display()
+    );
+
+    if !database_has_plaintext_sqlite_header(&database)? {
+        let connection = open_raw_ledger_connection(root, true)?;
+        verify_database_integrity(&connection)?;
+        return Ok(LedgerMigrationReport {
+            migrated: false,
+            already_encrypted: true,
+            plaintext_bytes: 0,
+        });
+    }
+
+    let plaintext_bytes = fs::metadata(&database)
+        .with_context(|| format!("reading raw ledger metadata {}", database.display()))?
+        .len();
+
+    let source = Connection::open(&database)
+        .with_context(|| format!("opening plaintext raw ledger {}", database.display()))?;
+    verify_database_integrity(&source)?;
+
+    let checkpoint: (i64, i64, i64) = source
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .context("checkpointing plaintext raw ledger before migration")?;
+    anyhow::ensure!(
+        checkpoint.0 == 0,
+        "raw ledger WAL checkpoint is busy; close other Mirrarium processes before migration"
+    );
+
+    let source_counts = database_user_table_counts(&source)?;
+    let source_schema = database_schema_fingerprint(&source)?;
+    let source_user_version: i64 =
+        source.pragma_query_value(None, "user_version", |row| row.get(0))?;
+
+    let target = root.join(".incoming/ledger.sqlite3.encrypted.part");
+    let backup = root.join(".incoming/ledger.sqlite3.plaintext-backup");
+    anyhow::ensure!(
+        !backup.exists(),
+        "raw ledger migration backup {} already exists",
+        backup.display()
+    );
+    let _ = fs::remove_file(&target);
+    remove_database_sidecars(&target)?;
+
+    let key = private_database_key(root, LEDGER_KEY_PURPOSE, true)?;
+    let key_literal = sqlcipher_raw_key_literal(&key);
+    let target_literal = sql_string_literal(&target.to_string_lossy());
+
+    source
+        .execute_batch(&format!(
+            "ATTACH DATABASE {target_literal} AS encrypted KEY \"{key_literal}\";"
+        ))
+        .context("attaching encrypted raw-ledger migration target")?;
+    let export_result = source.query_row(
+        "SELECT sqlcipher_export('encrypted')",
+        [],
+        |_row| Ok(()),
+    );
+    if let Err(error) = export_result {
+        let _ = source.execute_batch("DETACH DATABASE encrypted;");
+        return Err(error).context("exporting plaintext raw ledger into SQLCipher");
+    }
+    source
+        .execute_batch(&format!(
+            "PRAGMA encrypted.user_version = {source_user_version};"
+        ))
+        .context("copying raw ledger user_version")?;
+    source
+        .execute_batch("DETACH DATABASE encrypted;")
+        .context("detaching encrypted raw-ledger migration target")?;
+    harden_file(&target)?;
+
+    let target_connection = Connection::open_with_flags(
+        &target,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening encrypted migration target {}", target.display()))?;
+    apply_private_database_key(
+        &target_connection,
+        root,
+        LEDGER_KEY_PURPOSE,
+        false,
+    )
+    .context("verifying encrypted raw-ledger migration target")?;
+    verify_database_integrity(&target_connection)?;
+    let target_counts = database_user_table_counts(&target_connection)?;
+    let target_schema = database_schema_fingerprint(&target_connection)?;
+    let target_user_version: i64 =
+        target_connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    anyhow::ensure!(
+        target_counts == source_counts,
+        "encrypted raw-ledger migration changed table row counts"
+    );
+    anyhow::ensure!(
+        target_schema == source_schema,
+        "encrypted raw-ledger migration changed database schema"
+    );
+    anyhow::ensure!(
+        target_user_version == source_user_version,
+        "encrypted raw-ledger migration changed user_version"
+    );
+    drop(target_connection);
+    drop(source);
+
+    remove_database_sidecars(&database)?;
+    fs::rename(&database, &backup).with_context(|| {
+        format!(
+            "moving plaintext raw ledger {} to migration backup {}",
+            database.display(),
+            backup.display()
+        )
+    })?;
+
+    if let Err(error) = fs::rename(&target, &database) {
+        let _ = fs::rename(&backup, &database);
+        return Err(error).with_context(|| {
+            format!(
+                "installing encrypted raw ledger {}",
+                database.display()
+            )
+        });
+    }
+    harden_file(&database)?;
+
+    let final_connection = match open_raw_ledger_connection(root, true) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let _ = fs::remove_file(&database);
+            let _ = fs::rename(&backup, &database);
+            return Err(error).context("verifying installed encrypted raw ledger");
+        }
+    };
+    verify_database_integrity(&final_connection)?;
+    anyhow::ensure!(
+        database_user_table_counts(&final_connection)? == source_counts,
+        "installed encrypted raw ledger changed table row counts"
+    );
+    drop(final_connection);
+
+    fs::remove_file(&backup).with_context(|| {
+        format!(
+            "removing plaintext raw-ledger migration backup {}",
+            backup.display()
+        )
+    })?;
+
+    Ok(LedgerMigrationReport {
+        migrated: true,
+        already_encrypted: false,
+        plaintext_bytes,
+    })
+}
+
+pub fn migrate_private_storage(root: impl AsRef<Path>) -> Result<PrivateMigrationReport> {
+    let root = root.as_ref();
+    let key_path = private_key_path(root)?;
+    let store = CaptureStore::open(root)?;
+    let objects = store.migrate_private_objects()?;
+    drop(store);
+    let ledger = migrate_raw_ledger(root)?;
+
+    Ok(PrivateMigrationReport {
+        key_path: key_path.to_string_lossy().into_owned(),
+        migrated_objects: objects.migrated_objects,
+        migrated_body_bytes: objects.migrated_body_bytes,
+        already_encrypted_objects: objects.already_encrypted_objects,
+        ledger_migrated: ledger.migrated,
+        ledger_already_encrypted: ledger.already_encrypted,
+        ledger_plaintext_bytes: ledger.plaintext_bytes,
+    })
 }
 
 pub fn open_raw_ledger_read_only(root: impl AsRef<Path>) -> Result<Connection> {
@@ -2534,7 +2842,7 @@ mod tests {
         assert_eq!(before.legacy_plaintext_private_objects, 1);
         assert!(before.migration_needed);
 
-        let report = store.migrate_private_storage().unwrap();
+        let report = store.migrate_private_objects().unwrap();
         assert_eq!(report.migrated_objects, 1);
         assert_eq!(report.migrated_body_bytes, plaintext.len() as u64);
 
@@ -2550,9 +2858,47 @@ mod tests {
         assert_eq!(after.legacy_plaintext_private_objects, 0);
         assert!(!after.migration_needed);
 
-        let second = store.migrate_private_storage().unwrap();
+        let second = store.migrate_private_objects().unwrap();
         assert_eq!(second.migrated_objects, 0);
         assert_eq!(second.already_encrypted_objects, 1);
+    }
+
+    #[test]
+    fn private_storage_migration_exports_plaintext_ledger_to_sqlcipher() {
+        let directory = tempdir().unwrap();
+        let ledger = directory.path().join("ledger.sqlite3");
+        let plain = Connection::open(&ledger).unwrap();
+        plain
+            .execute_batch(
+                "PRAGMA user_version = 7;
+                 CREATE TABLE probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO probe (value) VALUES ('alpha'), ('beta');",
+            )
+            .unwrap();
+        drop(plain);
+        assert!(database_has_plaintext_sqlite_header(&ledger).unwrap());
+
+        let report = migrate_private_storage(directory.path()).unwrap();
+        assert!(report.ledger_migrated);
+        assert!(!report.ledger_already_encrypted);
+        assert!(report.ledger_plaintext_bytes > 0);
+        assert!(!database_has_plaintext_sqlite_header(&ledger).unwrap());
+
+        let encrypted = open_raw_ledger_read_only(directory.path()).unwrap();
+        let values: i64 = encrypted
+            .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(values, 2);
+        let version: i64 = encrypted
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+        drop(encrypted);
+
+        let second = migrate_private_storage(directory.path()).unwrap();
+        assert!(!second.ledger_migrated);
+        assert!(second.ledger_already_encrypted);
+        assert_eq!(second.ledger_plaintext_bytes, 0);
     }
 
     #[test]

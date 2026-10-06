@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use mirrarium_cache as cache;
 use mirrarium_corpus as corpus;
-use mirrarium_store::{default_data_root, CaptureStore};
+use mirrarium_store::{default_data_root, migrate_private_storage, CaptureStore};
 
 const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
@@ -31,6 +31,17 @@ fn run() -> Result<()> {
     }
 
     let root = default_data_root()?;
+
+    if arguments.first().map(String::as_str) == Some("privacy")
+        && arguments.get(1).map(String::as_str) == Some("migrate")
+    {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&migrate_private_storage(&root)?)?
+        );
+        return Ok(());
+    }
+
     let store = CaptureStore::open(&root)?;
 
     match arguments.first().map(String::as_str) {
@@ -66,12 +77,7 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&store.private_storage_status()?)?
                 );
             }
-            Some("migrate") => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&store.migrate_private_storage()?)?
-                );
-            }
+            Some("migrate") => unreachable!("privacy migrate is handled before store open"),
             Some(command) => anyhow::bail!(
                 "unknown privacy command {command:?}; use status or migrate"
             ),
