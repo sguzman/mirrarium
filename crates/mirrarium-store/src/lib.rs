@@ -2991,7 +2991,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let writer = CaptureStore::open(directory.path()).unwrap();
 
-        let error = CaptureStore::open(directory.path()).unwrap_err();
+        let error = CaptureStore::open(directory.path())
+            .err()
+            .expect("second writable store should be rejected");
         assert!(error.to_string().contains("another Mirrarium writer"));
 
         let reader = CaptureStore::open_read_only(directory.path()).unwrap();
