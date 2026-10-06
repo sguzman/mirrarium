@@ -73,9 +73,10 @@ fn run() -> Result<()> {
             let report = store.verify()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             anyhow::ensure!(
-                report.corrupt_objects == 0,
-                "{} corrupt object(s) found",
-                report.corrupt_objects
+                report.corrupt_objects == 0 && report.invalid_captures == 0,
+                "{} corrupt object(s), {} invalid capture(s) found",
+                report.corrupt_objects,
+                report.invalid_captures
             );
         }
         Some("maintenance") => match arguments.get(1).map(String::as_str) {

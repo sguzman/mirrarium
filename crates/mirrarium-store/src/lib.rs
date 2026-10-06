@@ -112,6 +112,8 @@ pub struct CaptureSummary {
 pub struct VerifyReport {
     pub checked_objects: u64,
     pub corrupt_objects: u64,
+    pub checked_capture_invariants: u64,
+    pub invalid_captures: u64,
     pub errors: Vec<String>,
 }
 
@@ -1151,6 +1153,8 @@ impl CaptureStore {
         let mut report = VerifyReport {
             checked_objects: 0,
             corrupt_objects: 0,
+            checked_capture_invariants: 0,
+            invalid_captures: 0,
             errors: Vec::new(),
         };
 
@@ -1206,6 +1210,62 @@ impl CaptureStore {
                         .errors
                         .push(format!("{storage_class}/{hash}: {error:#}"));
                 }
+            }
+        }
+
+        let mut websocket_statement = self.connection.prepare(
+            "SELECT capture_id, method, url, privacy_class FROM captures WHERE resource_type = 'WebSocketFrame' ORDER BY capture_id",
+        )?;
+        let websocket_rows = websocket_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        for row in websocket_rows {
+            let (capture_id, method, url, privacy_class) = row?;
+            report.checked_capture_invariants = report
+                .checked_capture_invariants
+                .checked_add(1)
+                .context("capture invariant count overflow")?;
+            let mut violations = Vec::new();
+
+            if privacy_class != "private" {
+                violations.push(format!("WebSocketFrame has privacy class {privacy_class:?}"));
+            }
+            if method != "WS_SEND" && method != "WS_RECV" {
+                violations.push(format!("WebSocketFrame has invalid method {method:?}"));
+            }
+
+            match Url::parse(&url) {
+                Ok(parsed) => {
+                    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+                    if parsed.scheme() != "wss" || !is_chatgpt_host(&host) {
+                        violations.push(format!("WebSocketFrame has invalid URL identity {url:?}"));
+                    }
+                    for (key, value) in parsed.query_pairs() {
+                        if is_sensitive_query_key(&key) && value != "[REDACTED]" {
+                            violations.push(format!(
+                                "WebSocketFrame sensitive query key {key:?} is not redacted"
+                            ));
+                        }
+                    }
+                }
+                Err(_) => violations.push(format!("WebSocketFrame URL is invalid: {url:?}")),
+            }
+
+            if !violations.is_empty() {
+                report.invalid_captures = report
+                    .invalid_captures
+                    .checked_add(1)
+                    .context("invalid capture count overflow")?;
+                report.errors.push(format!(
+                    "capture {capture_id}: {}",
+                    violations.join("; ")
+                ));
             }
         }
 
@@ -3271,6 +3331,60 @@ mod tests {
         assert_eq!(stats.private_captures, 2);
         assert_eq!(stats.private_objects, 1);
     }
+    #[test]
+    fn verify_rejects_websocket_privacy_direction_and_url_invariant_breaks() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+
+        let mut item = metadata(
+            "ws-verify",
+            "wss://chatgpt.com/backend-api/ws?token=%5BREDACTED%5D&keep=yes",
+            "WebSocketFrame",
+        );
+        item.method = "WS_RECV".to_owned();
+        item.mime_type = "application/json".to_owned();
+        store.begin(item).unwrap();
+        let body = br#"{"message":"verified"}"#;
+        store
+            .append_chunk("ws-verify", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish("ws-verify", Some(body.len() as u64), None)
+            .unwrap();
+
+        let clean = store.verify().unwrap();
+        assert_eq!(clean.checked_capture_invariants, 1);
+        assert_eq!(clean.invalid_captures, 0);
+
+        store
+            .connection
+            .execute(
+                "UPDATE captures SET method = 'GET', url = 'https://example.test/socket?token=secret', privacy_class = 'public' WHERE capture_id = 'ws-verify'",
+                [],
+            )
+            .unwrap();
+
+        let broken = store.verify().unwrap();
+        assert_eq!(broken.checked_capture_invariants, 1);
+        assert_eq!(broken.invalid_captures, 1);
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("privacy class")));
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid method")));
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid URL identity")));
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("not redacted")));
+    }
+
     #[test]
     fn missing_master_key_is_not_replaced_when_encrypted_private_objects_exist() {
         let directory = tempdir().unwrap();
