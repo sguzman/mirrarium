@@ -97,6 +97,9 @@ Implemented:
 - Rust native host framing and typed protocol;
 - SHA-256 content-addressed storage;
 - privacy-scoped deduplication;
+- versioned XChaCha20-Poly1305 encryption for newly persisted private CAS response/request-body payloads while preserving plaintext SHA-256 object identity;
+- transparent legacy-plaintext compatibility plus idempotent verified in-place private-CAS migration;
+- private encryption status/key-location CLI and isolated Chromium proof that raw private CAS files contain no known fixture plaintext;
 - SQLite request ledger;
 - body-read failure recording;
 - Unix permission hardening;
@@ -116,6 +119,7 @@ Implemented:
 - immutable public-resource replay candidate inventory and policy auditing;
 - explicit separation between immutable/stable public evidence, currently supported replay scope, and safe host/path expansion candidates with byte totals;
 - aggregate public replay-coverage audit by host, so new static origins can be justified by observed eligible bytes rather than guessed;
+- evidence-ranked cache opportunity summary that identifies the largest unsupported public host/private MIME family only when captured bytes justify expansion;
 - verified public-CAS replay lookup with URL/type restrictions, 16 MiB ceiling, path/length/SHA-256 validation;
 - chunked native-host replay transport kept below Chrome's per-message host-to-extension limit;
 - fail-open CDP Fetch replay for exact query-free ChatGPT `/_next/static/` scripts, stylesheets, images, and fonts;
@@ -138,4 +142,4 @@ Next:
 - cautiously evaluate additional already-classified exact public static hosts only when `cache public-coverage` shows meaningful immutable/stable expansion bytes;
 - deeper redirect/body semantics where Chromium exposes safe evidence;
 - extension packaging/update ergonomics for normal Edge deployment;
-- encryption/key management for private storage.
+- encrypt private SQLite ledger/derived-corpus state and eliminate plaintext in-flight private capture files without weakening recoverability/migration semantics.

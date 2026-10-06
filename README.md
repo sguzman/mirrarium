@@ -64,6 +64,9 @@ The Rust CLI reads the same local store as the native host:
 mirrarium stats
 mirrarium captures 20
 mirrarium verify
+mirrarium privacy status
+mirrarium privacy migrate
+mirrarium cache opportunities
 mirrarium cache stats
 mirrarium cache replay-stats
 mirrarium cache revalidation-stats
@@ -82,7 +85,15 @@ mirrarium native-host install
 mirrarium native-host status
 ```
 
-`verify` re-hashes every indexed content-addressed object and checks its class/path and byte count. It exits unsuccessfully if corruption is found.
+`verify` re-hashes every indexed content-addressed object and checks its class/path and logical byte count. Private CAS objects are transparently decrypted before verification.
+
+`privacy status` reports the private-CAS key path, whether the key exists, and encrypted/legacy/missing private-object counts. New private response bodies and captured request bodies are stored as versioned XChaCha20-Poly1305 envelopes; the CAS key remains the SHA-256 of the decrypted logical bytes, so deduplication and provenance identities do not change. Existing plaintext private objects remain readable for backward compatibility until migrated.
+
+`privacy migrate` verifies each legacy private object against its indexed logical byte count and SHA-256, then atomically replaces it with an encrypted envelope. The command is idempotent. The default key lives outside the data archive under `XDG_CONFIG_HOME/mirrarium/private.key` or `~/.config/mirrarium/private.key`; `MIRRARIUM_PRIVATE_KEY_FILE` can override it. **Back up the key separately. Losing it makes encrypted private CAS objects unrecoverable.**
+
+This currently protects persisted private CAS payloads, not every private byte Mirrarium owns. The raw SQLite ledger, rebuildable derived corpus database, and in-flight temporary capture files are still plaintext (with existing permission hardening and secret redaction). Full SQLite/temp at-rest encryption remains separate work.
+
+`cache opportunities` combines public/private coverage with runtime savings and, when evidence exists, names the largest currently unsupported public host and private MIME/resource family plus the policy gate blocking each. A null lead means captured evidence does not justify widening that side yet.
 
 `cache stats` and `cache candidates` audit the public replay surface. A candidate must be a successful public GET with a stored body, a static resource type, explicit `Cache-Control: immutable`, and exactly one observed body hash for its URL. Evidence eligibility is distinct from replay policy: candidates now report whether the current exact-host/path policy actually permits replay, whether they are safe scope-expansion candidates, and why a byte-stable asset remains outside policy. Replay is stricter still: v1 fulfills exact query-free ChatGPT `/_next/static/` script, stylesheet, image, and font URLs plus exact query-free `cdn.oaistatic.com` static resources. Bodies are capped at 16 MiB, the public CAS path, byte count, and SHA-256 are re-verified before serving, and every miss, timeout, corruption, ambiguity, or native-host error fails open to the network.
 
