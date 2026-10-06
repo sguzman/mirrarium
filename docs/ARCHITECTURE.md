@@ -104,6 +104,7 @@ Implemented:
 - private encryption status/key-location CLI and isolated Chromium proof that raw private CAS files contain no known fixture plaintext;
 - SQLite request ledger;
 - body-read failure recording;
+- protocol-aware no-body handling for HEAD and 1xx/204/205/304 responses, recorded as intentional suppression without calling `Network.getResponseBody`;
 - Unix permission hardening;
 - CLI-readable JSON store statistics;
 - local ChatGPT-shaped fixture traffic;

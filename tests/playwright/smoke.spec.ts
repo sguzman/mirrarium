@@ -978,6 +978,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         request_body_hash?: string;
         request_body_bytes: number;
         request_body_error?: string;
+        body_hash?: string;
+        body_bytes: number;
+        body_error?: string;
         provenance: {
           lifecycle_id?: string;
           redirect_hop?: number;
@@ -1039,6 +1042,24 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ),
       );
       expect(redirectHeaders.location).not.toContain("fixture-redirect-secret");
+
+      for (const [urlFragment, method, status] of [
+        ["/backend-api/no-content-fixture", "GET", 204],
+        ["/backend-api/head-fixture", "HEAD", 200],
+      ] as const) {
+        const noBodyCapture = captures.find(
+          (capture) =>
+            capture.url.includes(urlFragment) &&
+            capture.method === method &&
+            capture.status === status,
+        );
+        expect(noBodyCapture, `missing no-body capture for ${urlFragment}`).toBeTruthy();
+        expect(noBodyCapture?.body_hash).toBeFalsy();
+        expect(noBodyCapture?.body_bytes).toBe(0);
+        expect(noBodyCapture?.body_error).toBe(
+          "suppressed:no_response_body_expected",
+        );
+      }
 
       const uploadCapture = captures.find((capture) =>
         capture.url.includes("/backend-api/upload-fixture"),

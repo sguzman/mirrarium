@@ -1145,6 +1145,16 @@ function secondsToMilliseconds(value: number | undefined): number | undefined {
   return Math.trunc(value * 1000);
 }
 
+function responseMustNotHaveBody(
+  method: string | undefined,
+  status: number | undefined,
+): boolean {
+  if (method?.toUpperCase() === "HEAD") return true;
+  if (status === undefined) return false;
+  const code = Math.trunc(status);
+  return (code >= 100 && code < 200) || code === 204 || code === 205 || code === 304;
+}
+
 function shouldSuppressResponseBody(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
@@ -1532,6 +1542,19 @@ async function captureBody(
       capture_id: captureId,
       encoded_data_length: encodedDataLength,
       body_error: failure,
+    });
+    return;
+  }
+
+  if (responseMustNotHaveBody(request?.method, response?.status)) {
+    postNative({
+      type: "capture_finish",
+      capture_id: captureId,
+      encoded_data_length:
+        encodedDataLength === undefined
+          ? undefined
+          : Math.max(0, Math.trunc(encodedDataLength)),
+      body_error: "suppressed:no_response_body_expected",
     });
     return;
   }

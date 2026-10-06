@@ -92,6 +92,10 @@ Promise.all([
       ),
     ),
   fetch("/backend-api/redirect-start").then((response) => response.text()),
+  fetch("/backend-api/no-content-fixture").then((response) => response.text()),
+  fetch("/backend-api/head-fixture", { method: "HEAD" }).then((response) =>
+    response.text(),
+  ),
   fetch("/backend-api/upload-fixture", {
     method: "POST",
     body: (() => {
@@ -352,6 +356,24 @@ const fixtureServer = https.createServer(
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true }));
       });
+      return;
+    }
+
+    if (request.url === "/backend-api/no-content-fixture") {
+      response.writeHead(204, {
+        "x-mirrarium-no-body": "204",
+      });
+      response.end();
+      return;
+    }
+
+    if (request.url === "/backend-api/head-fixture" && request.method === "HEAD") {
+      response.writeHead(200, {
+        "content-type": "text/plain",
+        "content-length": "123",
+        "x-mirrarium-no-body": "head",
+      });
+      response.end();
       return;
     }
 

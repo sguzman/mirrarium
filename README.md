@@ -56,6 +56,8 @@ Raw evidence is preserved. Derived representations may be deleted and rebuilt as
 
 Reusable authentication secrets are not archival data and must not be persisted. Credential-bearing auth/session bodies are suppressed, credential-like query parameters are redacted before URLs are written to the ledger, request bodies are sanitized before persistence, and sensitive request/response headers are redacted before transport provenance is stored.
 
+Mirrarium also distinguishes protocol-level absence from capture failure. HEAD responses and 1xx/204/205/304 statuses are recorded as `suppressed:no_response_body_expected` without calling `Network.getResponseBody`, so legitimate no-body responses do not inflate body-read error telemetry.
+
 ## Inspection CLI
 
 The Rust CLI reads the same local store as the native host:
