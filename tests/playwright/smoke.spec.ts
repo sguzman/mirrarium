@@ -44,6 +44,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   const browserHome = join(root, "home");
   const userDataDir = join(root, "chromium-profile");
   const dataDir = join(root, "data");
+  const privateKeyFile = join(root, "private.key");
+  const childEnv = {
+    ...process.env,
+    MIRRARIUM_PRIVATE_KEY_FILE: privateKeyFile,
+  };
   const extensionPath = resolve("extension/dist");
   const daemonPath = resolve("target/debug/mirrariumd");
   const cliPath = resolve("target/debug/mirrarium");
@@ -51,7 +56,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
   async function readStats(): Promise<StoreStats> {
     const { stdout } = await execFileAsync(daemonPath, ["--stats"], {
       env: {
-        ...process.env,
+        ...childEnv,
         MIRRARIUM_DATA_DIR: dataDir,
       },
     });
@@ -67,7 +72,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       ["native-host", "install", "chrome-for-testing", daemonPath],
       {
         env: {
-          ...process.env,
+          ...childEnv,
           HOME: browserHome,
           XDG_CONFIG_HOME: join(browserHome, ".config"),
           MIRRARIUM_BROWSER_USER_DATA_DIR: userDataDir,
@@ -94,7 +99,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       headless: true,
       ignoreHTTPSErrors: true,
       env: {
-        ...process.env,
+        ...childEnv,
         HOME: browserHome,
         XDG_CONFIG_HOME: join(browserHome, ".config"),
         MIRRARIUM_DATA_DIR: dataDir,
@@ -183,7 +188,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           async () => {
             const { stdout } = await execFileAsync(cliPath, ["cache", "stats"], {
               env: {
-                ...process.env,
+                ...childEnv,
                 MIRRARIUM_DATA_DIR: dataDir,
               },
             });
@@ -198,7 +203,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["cache", "candidates", "50"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -234,7 +239,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["cache", "public-coverage"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -275,7 +280,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["cache", "private-reads", "50"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -371,7 +376,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["cache", "private-coverage"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -554,7 +559,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
                 ["cache", "private-reads", "50"],
                 {
                   env: {
-                    ...process.env,
+                    ...childEnv,
                     MIRRARIUM_DATA_DIR: dataDir,
                   },
                 },
@@ -691,7 +696,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           ["cache", "replay-stats"],
           {
             env: {
-              ...process.env,
+              ...childEnv,
               MIRRARIUM_DATA_DIR: dataDir,
             },
           },
@@ -724,7 +729,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           ["cache", "revalidation-stats"],
           {
             env: {
-              ...process.env,
+              ...childEnv,
               MIRRARIUM_DATA_DIR: dataDir,
             },
           },
@@ -748,7 +753,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["cache", "opportunities"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -801,7 +806,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["captures", "100"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -918,7 +923,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["privacy", "status"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -940,14 +945,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(privacyStatus.legacy_plaintext_private_objects).toBe(0);
       expect(privacyStatus.missing_or_invalid_private_objects).toBe(0);
       expect(privacyStatus.migration_needed).toBe(false);
-      expect(privacyStatus.key_path).toContain(dataDir);
+      expect(privacyStatus.key_path).toBe(privateKeyFile);
 
       const { stdout: privacyMigrationStdout } = await execFileAsync(
         cliPath,
         ["privacy", "migrate"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -968,7 +973,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "rebuild"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -999,7 +1004,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "attachments", "fixture-attachment-conversation", "20"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1058,7 +1063,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "conversations", "20"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1087,7 +1092,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "conversation", "fixture-conversation"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1119,7 +1124,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "conversation", "fixture-branched"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1139,7 +1144,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "canonical", "fixture-branched"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1175,7 +1180,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "stream-revisions", "fixture-stream-tail", "20"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1224,7 +1229,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "canonical", "fixture-stream-tail"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },
@@ -1262,7 +1267,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ["corpus", "conversation", "fixture-stream"],
         {
           env: {
-            ...process.env,
+            ...childEnv,
             MIRRARIUM_DATA_DIR: dataDir,
           },
         },

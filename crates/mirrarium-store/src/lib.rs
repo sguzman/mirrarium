@@ -1804,10 +1804,7 @@ fn private_key_path(root: &Path) -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    // An explicit data root is frequently used for isolated/disposable
-    // Mirrarium instances. Keep the key with that explicitly selected root so
-    // every cooperating process resolves the same key even when HOME differs.
-    if env::var_os("MIRRARIUM_DATA_DIR").is_some() || cfg!(test) {
+    if cfg!(test) {
         return Ok(root.join(".keys/private.key"));
     }
 
