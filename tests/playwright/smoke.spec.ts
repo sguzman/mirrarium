@@ -894,17 +894,24 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
 
       const privateObjects = await readFilesRecursively(join(dataDir, "private", "objects"));
-      const requestBodyObjects = privateObjects
-        .map((body) => body.toString("utf8"))
-        .filter((body) => body.includes("hello from request body"));
-      expect(requestBodyObjects.length).toBeGreaterThanOrEqual(1);
-      expect(requestBodyObjects.some((body) => body.includes("[REDACTED]"))).toBe(true);
-      expect(requestBodyObjects.some((body) => body.includes("fixture-secret-token"))).toBe(false);
+      expect(privateObjects.length).toBeGreaterThanOrEqual(1);
       expect(
-        privateObjects.some((body) =>
-          body.toString("utf8").includes("fixture-download-secret"),
+        privateObjects.every(
+          (body) => body.subarray(0, 8).toString("ascii") === "MIRRPV01",
         ),
-      ).toBe(false);
+      ).toBe(true);
+      for (const plaintext of [
+        "hello from request body",
+        "fixture-secret-token",
+        "fixture-download-secret",
+        "private corpus material",
+      ]) {
+        const needle = Buffer.from(plaintext, "utf8");
+        expect(
+          privateObjects.some((body) => body.includes(needle)),
+          `private CAS leaked plaintext: ${plaintext}`,
+        ).toBe(false);
+      }
 
       const { stdout: corpusStdout } = await execFileAsync(
         cliPath,
