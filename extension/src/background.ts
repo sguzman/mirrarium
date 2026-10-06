@@ -191,13 +191,7 @@ function handleNativeMessage(message: unknown): void {
       !extensionReloadRequested
     ) {
       extensionReloadRequested = true;
-      console.info(
-        "Mirrarium extension update detected",
-        RUNNING_BUILD_ID,
-        "->",
-        installedBuildId,
-      );
-      chrome.runtime.reload();
+      void reloadForInstalledBuild(installedBuildId);
     }
     return;
   }
@@ -1015,6 +1009,30 @@ async function detach(tabId: number): Promise<void> {
   } finally {
     attachedTabs.delete(tabId);
   }
+}
+
+async function reloadForInstalledBuild(installedBuildId: string): Promise<void> {
+  console.info(
+    "Mirrarium extension update detected",
+    RUNNING_BUILD_ID,
+    "->",
+    installedBuildId,
+  );
+
+  await Promise.all(Array.from(attachedTabs, (tabId) => detach(tabId)));
+
+  const port = nativePort;
+  nativePort = undefined;
+  if (port) {
+    try {
+      port.disconnect();
+    } catch {
+      // The native host may already be gone during extension teardown.
+    }
+  }
+  failAllCacheLookups();
+
+  chrome.runtime.reload();
 }
 
 function header(
