@@ -13,13 +13,17 @@ use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 
-const CORPUS_SCHEMA_VERSION: i64 = 1;
+const CORPUS_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
     pub stream_captures: u64,
     pub stream_events: u64,
     pub json_stream_events: u64,
+    pub eventsource_streams: u64,
+    pub eventsource_events: u64,
+    pub eventsource_json_events: u64,
+    pub eventsource_skipped_captures: u64,
     pub stream_message_revisions: u64,
     pub conversation_snapshots: u64,
     pub message_observations: u64,
@@ -57,6 +61,26 @@ pub struct AttachmentDownloadView {
 pub struct AttachmentView {
     pub observation: AttachmentObservationView,
     pub downloads: Vec<AttachmentDownloadView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventSourceStreamView {
+    pub lifecycle_id: String,
+    pub source_url: String,
+    pub privacy_class: String,
+    pub event_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventSourceEventView {
+    pub lifecycle_id: String,
+    pub transport_sequence: u64,
+    pub source_capture_id: String,
+    pub source_body_hash: String,
+    pub event_name: Option<String>,
+    pub event_id: Option<String>,
+    pub data: String,
+    pub json_valid: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +159,7 @@ pub struct CanonicalConversationView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SseEvent {
     event_name: Option<String>,
+    event_id: Option<String>,
     data: String,
 }
 
@@ -173,6 +198,34 @@ struct DownloadSource {
     privacy_class: String,
     body_hash: String,
     body_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct EventSourceSource {
+    capture_id: String,
+    source_url: String,
+    privacy_class: String,
+    body_hash: String,
+    provenance_json: String,
+}
+
+#[derive(Debug, Clone)]
+struct EventSourceDerivedEvent {
+    transport_sequence: u64,
+    source_capture_id: String,
+    source_body_hash: String,
+    event_name: Option<String>,
+    event_id: Option<String>,
+    data: String,
+    json_valid: bool,
+}
+
+#[derive(Debug)]
+struct EventSourceGroup {
+    source_url: String,
+    privacy_class: String,
+    events: BTreeMap<u64, EventSourceDerivedEvent>,
+    ambiguous_sequences: BTreeSet<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +273,9 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         PRAGMA synchronous = NORMAL;
         PRAGMA foreign_keys = ON;
 
+        DROP TABLE IF EXISTS eventsource_events;
+        DROP TABLE IF EXISTS eventsource_streams;
+        DROP TABLE IF EXISTS eventsource_skipped_captures;
         DROP TABLE IF EXISTS attachment_downloads;
         DROP TABLE IF EXISTS attachment_observations;
         DROP TABLE IF EXISTS message_observations;
@@ -342,6 +398,35 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             fragment_count INTEGER NOT NULL,
             PRIMARY KEY (capture_id, conversation_id)
         );
+
+        CREATE TABLE eventsource_streams (
+            lifecycle_id TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            privacy_class TEXT NOT NULL,
+            event_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE eventsource_events (
+            lifecycle_id TEXT NOT NULL
+                REFERENCES eventsource_streams(lifecycle_id) ON DELETE CASCADE,
+            transport_sequence INTEGER NOT NULL,
+            source_capture_id TEXT NOT NULL UNIQUE,
+            source_body_hash TEXT NOT NULL,
+            event_name TEXT,
+            event_id TEXT,
+            data TEXT NOT NULL,
+            json_valid INTEGER NOT NULL,
+            PRIMARY KEY (lifecycle_id, transport_sequence)
+        );
+
+        CREATE INDEX eventsource_events_capture_idx
+            ON eventsource_events(source_capture_id);
+
+        CREATE TABLE eventsource_skipped_captures (
+            capture_id TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            reason TEXT NOT NULL
+        );
         "#,
     )?;
     corpus.pragma_update(None, "user_version", CORPUS_SCHEMA_VERSION)?;
@@ -372,6 +457,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         "#,
     )?;
 
+    let eventsource_sources = collect_eventsource_sources(&raw)?;
     let download_sources = collect_download_sources(&raw)?;
 
     let transaction = corpus.transaction()?;
@@ -398,6 +484,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         )?;
     }
 
+    derive_eventsource_messages(&transaction, raw_root, eventsource_sources)?;
     correlate_attachment_downloads(&transaction, &download_sources)?;
 
     transaction.commit()?;
@@ -427,6 +514,9 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     for table in [
         "stream_captures",
         "stream_events",
+        "eventsource_streams",
+        "eventsource_events",
+        "eventsource_skipped_captures",
         "stream_message_revisions",
         "conversation_snapshots",
         "message_observations",
@@ -449,6 +539,22 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         json_stream_events: scalar_u64(
             &connection,
             "SELECT COUNT(*) FROM stream_events WHERE json_valid = 1",
+        )?,
+        eventsource_streams: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM eventsource_streams",
+        )?,
+        eventsource_events: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM eventsource_events",
+        )?,
+        eventsource_json_events: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM eventsource_events WHERE json_valid = 1",
+        )?,
+        eventsource_skipped_captures: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM eventsource_skipped_captures",
         )?,
         stream_message_revisions: scalar_u64(
             &connection,
@@ -475,6 +581,79 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             "SELECT COUNT(*) FROM attachment_downloads",
         )?,
     })
+}
+
+pub fn eventsource_streams(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<EventSourceStreamView>> {
+    anyhow::ensure!(limit > 0, "EventSource stream limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT lifecycle_id, source_url, privacy_class, event_count
+        FROM eventsource_streams
+        ORDER BY lifecycle_id
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok(EventSourceStreamView {
+                lifecycle_id: row.get(0)?,
+                source_url: row.get(1)?,
+                privacy_class: row.get(2)?,
+                event_count: row.get::<_, i64>(3)? as u64,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn eventsource_events(
+    raw_root: impl AsRef<Path>,
+    lifecycle_id: &str,
+    limit: u64,
+) -> Result<Vec<EventSourceEventView>> {
+    anyhow::ensure!(
+        !lifecycle_id.trim().is_empty(),
+        "EventSource lifecycle id must not be empty"
+    );
+    anyhow::ensure!(limit > 0, "EventSource event limit must be greater than zero");
+
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            lifecycle_id,
+            transport_sequence,
+            source_capture_id,
+            source_body_hash,
+            event_name,
+            event_id,
+            data,
+            json_valid
+        FROM eventsource_events
+        WHERE lifecycle_id = ?1
+        ORDER BY transport_sequence
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = statement
+        .query_map(params![lifecycle_id, limit as i64], |row| {
+            Ok(EventSourceEventView {
+                lifecycle_id: row.get(0)?,
+                transport_sequence: row.get::<_, i64>(1)? as u64,
+                source_capture_id: row.get(2)?,
+                source_body_hash: row.get(3)?,
+                event_name: row.get(4)?,
+                event_id: row.get(5)?,
+                data: row.get(6)?,
+                json_valid: row.get::<_, i64>(7)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn conversations(
@@ -1465,6 +1644,239 @@ fn correlate_attachment_downloads(
     Ok(())
 }
 
+fn collect_eventsource_sources(connection: &Connection) -> Result<Vec<EventSourceSource>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT capture_id, url, privacy_class, body_hash, provenance_json
+        FROM captures
+        WHERE resource_type = 'EventSourceMessage'
+          AND body_hash IS NOT NULL
+        ORDER BY captured_at_ms, capture_id
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(EventSourceSource {
+            capture_id: row.get(0)?,
+            source_url: row.get(1)?,
+            privacy_class: row.get(2)?,
+            body_hash: row.get(3)?,
+            provenance_json: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn insert_eventsource_skip(
+    transaction: &Transaction<'_>,
+    capture_id: &str,
+    source_url: &str,
+    reason: &str,
+) -> Result<()> {
+    transaction.execute(
+        r#"
+        INSERT OR REPLACE INTO eventsource_skipped_captures
+            (capture_id, source_url, reason)
+        VALUES
+            (?1, ?2, ?3)
+        "#,
+        params![capture_id, source_url, reason],
+    )?;
+    Ok(())
+}
+
+fn derive_eventsource_messages(
+    transaction: &Transaction<'_>,
+    raw_root: &Path,
+    sources: Vec<EventSourceSource>,
+) -> Result<()> {
+    let mut groups: BTreeMap<String, EventSourceGroup> = BTreeMap::new();
+
+    for source in sources {
+        let provenance = match serde_json::from_str::<Value>(&source.provenance_json) {
+            Ok(value) => value,
+            Err(_) => {
+                insert_eventsource_skip(
+                    transaction,
+                    &source.capture_id,
+                    &source.source_url,
+                    "invalid_provenance_json",
+                )?;
+                continue;
+            }
+        };
+        let lifecycle_id = provenance
+            .get("lifecycle_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let transport_sequence = provenance
+            .get("transport_sequence")
+            .and_then(Value::as_u64);
+
+        let (Some(lifecycle_id), Some(transport_sequence)) =
+            (lifecycle_id, transport_sequence)
+        else {
+            insert_eventsource_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "missing_transport_identity",
+            )?;
+            continue;
+        };
+
+        let bytes = read_verified_object(raw_root, &source.privacy_class, &source.body_hash)
+            .with_context(|| {
+                format!(
+                    "reading EventSource message body object {}",
+                    source.capture_id
+                )
+            })?;
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                insert_eventsource_skip(
+                    transaction,
+                    &source.capture_id,
+                    &source.source_url,
+                    "non_utf8_eventsource_message",
+                )?;
+                continue;
+            }
+        };
+        let mut events = parse_sse(text);
+        if events.len() != 1 {
+            insert_eventsource_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                &format!("expected_single_event_got_{}", events.len()),
+            )?;
+            continue;
+        }
+        let event = events.pop().expect("single EventSource event");
+
+        let group = groups
+            .entry(lifecycle_id.clone())
+            .or_insert_with(|| EventSourceGroup {
+                source_url: source.source_url.clone(),
+                privacy_class: source.privacy_class.clone(),
+                events: BTreeMap::new(),
+                ambiguous_sequences: BTreeSet::new(),
+            });
+
+        if group.source_url != source.source_url {
+            insert_eventsource_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "lifecycle_source_url_mismatch",
+            )?;
+            continue;
+        }
+        if group.privacy_class != source.privacy_class {
+            insert_eventsource_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "lifecycle_privacy_class_mismatch",
+            )?;
+            continue;
+        }
+        if group.ambiguous_sequences.contains(&transport_sequence) {
+            insert_eventsource_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "duplicate_transport_sequence",
+            )?;
+            continue;
+        }
+        if let Some(existing) = group.events.remove(&transport_sequence) {
+            insert_eventsource_skip(
+                transaction,
+                &existing.source_capture_id,
+                &group.source_url,
+                "duplicate_transport_sequence",
+            )?;
+            insert_eventsource_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "duplicate_transport_sequence",
+            )?;
+            group.ambiguous_sequences.insert(transport_sequence);
+            continue;
+        }
+
+        let json_valid = serde_json::from_str::<Value>(&event.data).is_ok();
+        group.events.insert(
+            transport_sequence,
+            EventSourceDerivedEvent {
+                transport_sequence,
+                source_capture_id: source.capture_id,
+                source_body_hash: source.body_hash,
+                event_name: event.event_name,
+                event_id: event.event_id,
+                data: event.data,
+                json_valid,
+            },
+        );
+    }
+
+    for (lifecycle_id, group) in groups {
+        if group.events.is_empty() {
+            continue;
+        }
+
+        transaction.execute(
+            r#"
+            INSERT INTO eventsource_streams
+                (lifecycle_id, source_url, privacy_class, event_count)
+            VALUES
+                (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                lifecycle_id,
+                group.source_url,
+                group.privacy_class,
+                group.events.len() as i64,
+            ],
+        )?;
+
+        for event in group.events.into_values() {
+            transaction.execute(
+                r#"
+                INSERT INTO eventsource_events (
+                    lifecycle_id,
+                    transport_sequence,
+                    source_capture_id,
+                    source_body_hash,
+                    event_name,
+                    event_id,
+                    data,
+                    json_valid
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+                )
+                "#,
+                params![
+                    lifecycle_id,
+                    event.transport_sequence as i64,
+                    event.source_capture_id,
+                    event.source_body_hash,
+                    event.event_name,
+                    event.event_id,
+                    event.data,
+                    if event.json_valid { 1_i64 } else { 0_i64 },
+                ],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 fn collect_sources(
     connection: &Connection,
     sql: &str,
@@ -2189,18 +2601,22 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = Vec::new();
     let mut event_name: Option<String> = None;
+    let mut event_id: Option<String> = None;
     let mut data_lines: Vec<String> = Vec::new();
 
     let flush = |events: &mut Vec<SseEvent>,
                  event_name: &mut Option<String>,
+                 event_id: &mut Option<String>,
                  data_lines: &mut Vec<String>| {
         if data_lines.is_empty() {
             *event_name = None;
+            *event_id = None;
             return;
         }
 
         events.push(SseEvent {
             event_name: event_name.take(),
+            event_id: event_id.take(),
             data: data_lines.join("\n"),
         });
         data_lines.clear();
@@ -2208,7 +2624,12 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
 
     for line in normalized.split('\n') {
         if line.is_empty() {
-            flush(&mut events, &mut event_name, &mut data_lines);
+            flush(
+                &mut events,
+                &mut event_name,
+                &mut event_id,
+                &mut data_lines,
+            );
             continue;
         }
 
@@ -2223,12 +2644,18 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
 
         match field {
             "event" => event_name = Some(value.to_owned()),
+            "id" => event_id = Some(value.to_owned()),
             "data" => data_lines.push(value.to_owned()),
             _ => {}
         }
     }
 
-    flush(&mut events, &mut event_name, &mut data_lines);
+    flush(
+        &mut events,
+        &mut event_name,
+        &mut event_id,
+        &mut data_lines,
+    );
     events
 }
 
@@ -2331,16 +2758,33 @@ mod tests {
             vec![
                 SseEvent {
                     event_name: Some("message".to_owned()),
+                    event_id: None,
                     data: "{\"a\":1,\n\"b\":2}".to_owned(),
                 },
                 SseEvent {
                     event_name: None,
+                    event_id: None,
                     data: "[DONE]".to_owned(),
                 },
             ]
         );
     }
 
+
+    #[test]
+    fn parses_eventsource_event_id() {
+        let events = parse_sse(
+            "event: delta\nid: event-17\ndata: {\"message\":\"hello\"}\n\n",
+        );
+        assert_eq!(
+            events,
+            vec![SseEvent {
+                event_name: Some("delta".to_owned()),
+                event_id: Some("event-17".to_owned()),
+                data: "{\"message\":\"hello\"}".to_owned(),
+            }]
+        );
+    }
 
     #[test]
     fn extracts_attachment_metadata_and_sanitizes_signed_url_identity() {

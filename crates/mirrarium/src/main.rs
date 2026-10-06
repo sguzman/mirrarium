@@ -245,6 +245,45 @@ fn run() -> Result<()> {
                     )?
                 );
             }
+            Some("eventsource-streams") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("EventSource stream limit must be a positive integer")?
+                    .unwrap_or(100);
+                anyhow::ensure!(
+                    limit > 0,
+                    "EventSource stream limit must be greater than zero"
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::eventsource_streams(&root, limit)?
+                    )?
+                );
+            }
+            Some("eventsource-events") => {
+                let lifecycle_id = arguments
+                    .get(2)
+                    .context("missing EventSource lifecycle id")?;
+                let limit = arguments
+                    .get(3)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("EventSource event limit must be a positive integer")?
+                    .unwrap_or(500);
+                anyhow::ensure!(
+                    limit > 0,
+                    "EventSource event limit must be greater than zero"
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::eventsource_events(&root, lifecycle_id, limit)?
+                    )?
+                );
+            }
             Some("stream-revisions") => {
                 let conversation_id = arguments
                     .get(2)
@@ -942,6 +981,8 @@ USAGE:
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>
   mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
+  mirrarium corpus eventsource-streams [LIMIT]
+  mirrarium corpus eventsource-events <LIFECYCLE_ID> [LIMIT]
   mirrarium corpus stream-revisions <CONVERSATION_ID> [LIMIT]
   mirrarium extension install [SOURCE_DIR]
   mirrarium extension status

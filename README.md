@@ -60,7 +60,7 @@ Mirrarium also distinguishes protocol-level absence from capture failure. HEAD r
 
 WebSocket JSON text frames on ChatGPT hosts are captured as private raw evidence through the same encrypted CAS pipeline. Sent and received frames use `WS_SEND` / `WS_RECV`, share a stable socket lifecycle ID, persist an explicit monotonic `transport_sequence`, preserve sanitized handshake provenance when Chromium exposes it, and redact credential-like JSON fields before persistence. JSON text frames are capped at 1 MiB both before extension-side parsing and again at the Rust archive boundary; oversized frames are observed as `suppressed:websocket_text_frame_too_large` but never enter CAS. Non-JSON text, binary, auth-endpoint, continuation/control-frame payloads are not archived as trusted content. WebSocket evidence is capture-only and is never replayed. `mirrarium stats` reports WebSocket frame count, archived frame bytes, errors, and suppressed frames separately.
 
-Long-lived browser `EventSource` traffic is also observable message-by-message through Chromium CDP rather than waiting for the HTTP stream to close. Mirrarium records each ChatGPT EventSource message as private `SSE_RECV` / `EventSourceMessage` raw evidence using a canonical single-event `text/event-stream` fragment, with a stable lifecycle ID plus explicit monotonic `transport_sequence`, the same structured secret redaction, encrypted CAS persistence, and mirrored 1 MiB extension/archive ceiling. EventSource message fragments are currently capture-only and deliberately excluded from generic corpus rebuild so they cannot double-count a later completed whole-stream response; sequence-aware EventSource derivation is a separate future step. `mirrarium stats` reports EventSource message count, archived bytes, errors, and suppressions separately.
+Long-lived browser `EventSource` traffic is also observable message-by-message through Chromium CDP rather than waiting for the HTTP stream to close. Mirrarium records each ChatGPT EventSource message as private `SSE_RECV` / `EventSourceMessage` raw evidence using a canonical single-event `text/event-stream` fragment, with a stable lifecycle ID plus explicit monotonic `transport_sequence`, the same structured secret redaction, encrypted CAS persistence, and mirrored 1 MiB extension/archive ceiling. EventSource message fragments are excluded from generic whole-response SSE derivation so they cannot double-count a later completed stream. `corpus rebuild` instead builds a dedicated sequence-aware EventSource view keyed by lifecycle ID plus `transport_sequence`, retaining source capture/hash, event name, event ID, data, and JSON validity. Missing or ambiguous transport identity is recorded in a derived skipped-capture table rather than guessed. `mirrarium stats` reports EventSource message count, archived bytes, errors, and suppressions separately.
 
 ## Inspection CLI
 
@@ -87,6 +87,8 @@ mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
 mirrarium corpus attachments [conversation-id] [limit]
+mirrarium corpus eventsource-streams [limit]
+mirrarium corpus eventsource-events <lifecycle-id> [limit]
 mirrarium corpus stream-revisions <conversation-id> [limit]
 mirrarium extension install [source-dir]
 mirrarium extension status
@@ -128,6 +130,8 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 `cache revalidation-stats` reports aggregate private revalidation outcomes without duplicating private URLs into the telemetry table: total candidate responses, origin `304` reuse, fresh `200` updates, fulfillment errors, and private response-body bytes avoided by successful 304 substitution.
 
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
+
+`corpus eventsource-streams` lists sequence-aware derived EventSource lifecycles; `corpus eventsource-events` returns the ordered message evidence for one lifecycle, including source capture/hash, transport sequence, event name/ID, data, and JSON-validity status. EventSource fragments remain separate from generic whole-response SSE tables to prevent duplicate derivation.
 
 `corpus attachments` lists attachment observations extracted from structured JSON and any captured download bodies correlated to them. Correlation requires the same sanitized URL identity; signed query credentials are redacted before persistence and are never treated as durable attachment identity.
 
