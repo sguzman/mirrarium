@@ -655,11 +655,59 @@ async function beginPrivateRevalidation(
   }
 }
 
+function privateRevalidationResponseHeaders(
+  originHeaders: Array<{ name: string; value: string }> | undefined,
+  hit: PrivateReadHit,
+): Array<{ name: string; value: string }> {
+  const replaced = new Set([
+    "content-type",
+    "cache-control",
+    "etag",
+    "last-modified",
+    "x-mirrarium-revalidated",
+  ]);
+  const invalidForRebuiltBody = new Set([
+    "content-length",
+    "content-encoding",
+    "transfer-encoding",
+  ]);
+  const responseHeaders: Array<{ name: string; value: string }> = [];
+
+  for (const item of originHeaders ?? []) {
+    const normalized = item.name.toLowerCase();
+    const value = safeReplayHeaderValue(item.value);
+    if (
+      !value ||
+      replaced.has(normalized) ||
+      invalidForRebuiltBody.has(normalized)
+    ) {
+      continue;
+    }
+    responseHeaders.push({ name: item.name, value });
+  }
+
+  responseHeaders.push(
+    { name: "Content-Type", value: hit.mimeType },
+    { name: "X-Mirrarium-Revalidated", value: "hit" },
+  );
+  for (const [name, rawValue] of [
+    ["Cache-Control", hit.cacheControl],
+    ["ETag", hit.etag],
+    ["Last-Modified", hit.lastModified],
+  ] as const) {
+    const value = safeReplayHeaderValue(rawValue);
+    if (value) responseHeaders.push({ name, value });
+  }
+
+  return responseHeaders;
+}
+
 async function finishPrivateRevalidation(
   tabId: number,
   event: {
     requestId: string;
     responseStatusCode?: number;
+    responseHeaders?: Array<{ name: string; value: string }>;
   },
 ): Promise<void> {
   const key = requestKey(tabId, event.requestId);
@@ -679,18 +727,10 @@ async function finishPrivateRevalidation(
     return;
   }
 
-  const responseHeaders: Array<{ name: string; value: string }> = [
-    { name: "Content-Type", value: hit.mimeType },
-    { name: "X-Mirrarium-Revalidated", value: "hit" },
-  ];
-  for (const [name, rawValue] of [
-    ["Cache-Control", hit.cacheControl],
-    ["ETag", hit.etag],
-    ["Last-Modified", hit.lastModified],
-  ] as const) {
-    const value = safeReplayHeaderValue(rawValue);
-    if (value) responseHeaders.push({ name, value });
-  }
+  const responseHeaders = privateRevalidationResponseHeaders(
+    event.responseHeaders,
+    hit,
+  );
 
   try {
     await chrome.debugger.sendCommand({ tabId }, "Fetch.fulfillRequest", {
@@ -715,6 +755,7 @@ async function handlePausedRequest(
     resourceType?: string;
     responseStatusCode?: number;
     responseErrorReason?: string;
+    responseHeaders?: Array<{ name: string; value: string }>;
     request: {
       method: string;
       url: string;
