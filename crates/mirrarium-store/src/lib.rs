@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     env,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, ErrorKind, Write},
+    io::{BufWriter, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -1840,6 +1840,12 @@ fn load_or_create_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
         Err(_) => {}
     }
 
+    anyhow::ensure!(
+        !encrypted_private_objects_exist(root)?,
+        "encrypted private objects already exist but Mirrarium key {} is missing; restore that key instead of generating a replacement",
+        path.display()
+    );
+
     let parent = path
         .parent()
         .context("Mirrarium private key path has no parent directory")?;
@@ -1860,6 +1866,41 @@ fn load_or_create_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
         Err(error) => Err(error)
             .with_context(|| format!("creating Mirrarium private key {}", path.display())),
     }
+}
+
+fn encrypted_private_objects_exist(root: &Path) -> Result<bool> {
+    let objects_root = root.join("private/objects");
+    if !objects_root.exists() {
+        return Ok(false);
+    }
+
+    let mut directories = vec![objects_root];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("reading private object directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                directories.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let mut file = File::open(entry.path())?;
+            let mut prefix = [0_u8; PRIVATE_OBJECT_MAGIC.len()];
+            match file.read_exact(&mut prefix) {
+                Ok(()) if &prefix == PRIVATE_OBJECT_MAGIC => return Ok(true),
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 fn load_existing_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
@@ -2208,6 +2249,26 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn missing_master_key_is_not_replaced_when_encrypted_private_objects_exist() {
+        let directory = tempdir().unwrap();
+        let plaintext = b"existing encrypted bytes";
+        let hash = sha256_hex(plaintext);
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let envelope =
+            encrypt_private_object_bytes(&[9_u8; PRIVATE_KEY_BYTES], &hash, plaintext).unwrap();
+        fs::write(&path, envelope).unwrap();
+
+        let key_path = private_key_path(directory.path()).unwrap();
+        assert!(!key_path.exists());
+        let error = load_or_create_private_key(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("restore that key"));
+        assert!(!key_path.exists());
     }
 
     #[test]
