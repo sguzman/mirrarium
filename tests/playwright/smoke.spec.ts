@@ -1025,6 +1025,51 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         message: "server websocket fixture",
       });
 
+      const eventSourceRoundTrip = await page.evaluate(
+        () =>
+          new Promise<{ delta?: string; done?: string }>((resolve, reject) => {
+            const source = new EventSource(
+              "https://chatgpt.com:43117/backend-api/eventsource-fixture?token=fixture-eventsource-query-secret&keep=yes",
+            );
+            const root = globalThis as typeof globalThis & {
+              __mirrariumEventSource?: EventSource;
+            };
+            root.__mirrariumEventSource = source;
+
+            let delta: string | undefined;
+            let done: string | undefined;
+            const timeout = setTimeout(() => {
+              source.close();
+              reject(new Error("eventsource fixture timed out"));
+            }, 5_000);
+
+            const maybeResolve = () => {
+              if (delta === undefined || done === undefined) return;
+              clearTimeout(timeout);
+              resolve({ delta, done });
+            };
+
+            source.addEventListener("delta", (event) => {
+              delta = (event as MessageEvent<string>).data;
+              maybeResolve();
+            });
+            source.addEventListener("done", (event) => {
+              done = (event as MessageEvent<string>).data;
+              maybeResolve();
+            });
+            source.addEventListener("error", () => {
+              clearTimeout(timeout);
+              source.close();
+              reject(new Error("eventsource fixture failed"));
+            });
+          }),
+      );
+      expect(JSON.parse(eventSourceRoundTrip.delta ?? "{}")).toMatchObject({
+        message: "long-lived eventsource fixture",
+        access_token: "fixture-eventsource-secret",
+      });
+      expect(eventSourceRoundTrip.done).toBe("[DONE]");
+
       await expect
         .poll(
           async () => {
@@ -1040,6 +1085,22 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           { timeout: 10_000 },
         )
         .toBeGreaterThanOrEqual(5);
+
+      await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(cliPath, ["stats"], {
+              env: {
+                ...childEnv,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            });
+            return (JSON.parse(stdout) as { eventsource_messages: number })
+              .eventsource_messages;
+          },
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThanOrEqual(2);
 
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
@@ -1297,6 +1358,64 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(websocketStats.websocket_frame_body_bytes).toBeGreaterThan(0);
       expect(websocketStats.websocket_frame_errors).toBe(0);
       expect(websocketStats.suppressed_websocket_frames).toBe(3);
+
+      const eventSourceMessages = captures.filter(
+        (capture) =>
+          capture.method === "SSE_RECV" &&
+          capture.resource_type === "EventSourceMessage" &&
+          capture.url.includes("/backend-api/eventsource-fixture"),
+      );
+      expect(eventSourceMessages).toHaveLength(2);
+      expect(eventSourceMessages.every((capture) => !!capture.body_hash)).toBe(true);
+      expect(eventSourceMessages.every((capture) => capture.body_bytes > 0)).toBe(true);
+      expect(eventSourceMessages.every((capture) => !capture.body_error)).toBe(true);
+      expect(eventSourceMessages.every((capture) => capture.status === 200)).toBe(true);
+      expect(
+        eventSourceMessages.every(
+          (capture) => capture.mime_type === "text/event-stream; charset=utf-8",
+        ),
+      ).toBe(true);
+      expect(
+        eventSourceMessages.every(
+          (capture) => !capture.url.includes("fixture-eventsource-query-secret"),
+        ),
+      ).toBe(true);
+      expect(eventSourceMessages.every((capture) => capture.url.includes("keep=yes"))).toBe(
+        true,
+      );
+      const eventSourceLifecycle = eventSourceMessages[0]?.provenance.lifecycle_id;
+      expect(eventSourceLifecycle).toBeTruthy();
+      expect(
+        eventSourceMessages.every(
+          (capture) => capture.provenance.lifecycle_id === eventSourceLifecycle,
+        ),
+      ).toBe(true);
+
+      const unfinishedEventSourceResponse = captures.find(
+        (capture) =>
+          capture.resource_type === "EventSource" &&
+          capture.url.includes("/backend-api/eventsource-fixture"),
+      );
+      expect(unfinishedEventSourceResponse).toBeFalsy();
+
+      const eventSourceStats = JSON.parse(websocketStatsStdout) as {
+        eventsource_messages: number;
+        eventsource_message_body_bytes: number;
+        eventsource_message_errors: number;
+        suppressed_eventsource_messages: number;
+      };
+      expect(eventSourceStats.eventsource_messages).toBe(2);
+      expect(eventSourceStats.eventsource_message_body_bytes).toBeGreaterThan(0);
+      expect(eventSourceStats.eventsource_message_errors).toBe(0);
+      expect(eventSourceStats.suppressed_eventsource_messages).toBe(0);
+
+      await page.evaluate(() => {
+        const root = globalThis as typeof globalThis & {
+          __mirrariumEventSource?: EventSource;
+        };
+        root.__mirrariumEventSource?.close();
+        delete root.__mirrariumEventSource;
+      });
 
       const abortedCapture = captures.find(
         (capture) =>

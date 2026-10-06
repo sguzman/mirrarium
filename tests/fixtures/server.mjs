@@ -585,6 +585,36 @@ const fixtureServer = https.createServer(
       return;
     }
 
+    if (request.url?.startsWith("/backend-api/eventsource-fixture")) {
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+        "x-mirrarium-eventsource": "fixture",
+      });
+      response.flushHeaders();
+      response.write("event: delta\n");
+      response.write("id: fixture-event-1\n");
+      response.write(
+        'data: {"message":"long-lived eventsource fixture","access_token":"fixture-eventsource-secret"}\n\n',
+      );
+
+      const second = setTimeout(() => {
+        response.write("event: done\n");
+        response.write("id: fixture-event-2\n");
+        response.write("data: [DONE]\n\n");
+      }, 25);
+      const keepalive = setInterval(() => {
+        response.write(": keepalive\n\n");
+      }, 1000);
+
+      request.on("close", () => {
+        clearTimeout(second);
+        clearInterval(keepalive);
+      });
+      return;
+    }
+
     if (request.url === "/backend-api/conversation/stream-tail") {
       response.writeHead(200, {
         "content-type": "application/json",
