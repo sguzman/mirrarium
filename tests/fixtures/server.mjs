@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -48,6 +49,14 @@ const stressScriptTags = Array.from(
   (_, index) => `<script src="/_next/static/stress-${index}.js"></script>`,
 ).join("\n");
 
+function encodeWebSocketTextFrame(text) {
+  const payload = Buffer.from(text, "utf8");
+  if (payload.length >= 126) {
+    throw new Error("fixture WebSocket payload unexpectedly large");
+  }
+  return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+}
+
 const page = `<!doctype html>
 <meta charset="utf-8">
 <title>Mirrarium fixture</title>
@@ -62,7 +71,32 @@ const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
 const redirectPostSecret = ["fixture", "redirect", "post", "secret"].join("-");
 const abortPostSecret = ["fixture", "abort", "post", "secret"].join("-");
+const websocketFixture = new Promise((resolve, reject) => {
+  const socket = new WebSocket(
+    "wss://chatgpt.com:43117/backend-api/ws-fixture?token=fixture-ws-query-secret&keep=yes",
+  );
+  socket.addEventListener("open", () => {
+    socket.send(
+      JSON.stringify({
+        message: "client websocket fixture",
+        access_token: "fixture-ws-client-secret",
+      }),
+    );
+  });
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") {
+      reject(new Error("unexpected binary websocket fixture response"));
+      return;
+    }
+    socket.close();
+    resolve(event.data);
+  });
+  socket.addEventListener("error", () => {
+    reject(new Error("websocket fixture failed"));
+  });
+});
 Promise.all([
+  websocketFixture,
   fetch("/backend-api/conversation/test").then((response) => response.json()),
   fetch("/backend-api/conversations?offset=0&limit=2").then((response) =>
     response.json(),
@@ -674,6 +708,48 @@ const fixtureServer = https.createServer(
     response.end(page);
   },
 );
+
+fixtureServer.on("upgrade", (request, socket) => {
+  if (!request.url?.startsWith("/backend-api/ws-fixture")) {
+    socket.destroy();
+    return;
+  }
+
+  const key = request.headers["sec-websocket-key"];
+  if (typeof key !== "string") {
+    socket.destroy();
+    return;
+  }
+
+  const accept = createHash("sha1")
+    .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    .digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${accept}\r\n` +
+      "X-Mirrarium-WebSocket: fixture\r\n" +
+      "\r\n",
+  );
+
+  let replied = false;
+  socket.on("data", () => {
+    if (replied) {
+      socket.end();
+      return;
+    }
+    replied = true;
+    socket.write(
+      encodeWebSocketTextFrame(
+        JSON.stringify({
+          message: "server websocket fixture",
+          access_token: "fixture-ws-server-secret",
+        }),
+      ),
+    );
+  });
+});
 
 const healthServer = http.createServer((request, response) => {
   if (request.url === "/private-bump") {

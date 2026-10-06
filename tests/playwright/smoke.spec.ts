@@ -984,6 +984,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         method: string;
         url: string;
         status: number;
+        mime_type: string;
+        resource_type: string;
         request_body_kind?: string;
         request_body_content_type?: string;
         request_body_has_post_data?: boolean;
@@ -1133,6 +1135,39 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           "suppressed:no_response_body_expected",
         );
       }
+
+      const websocketSent = captures.find(
+        (capture) =>
+          capture.method === "WS_SEND" &&
+          capture.resource_type === "WebSocketFrame" &&
+          capture.url.includes("/backend-api/ws-fixture"),
+      );
+      const websocketReceived = captures.find(
+        (capture) =>
+          capture.method === "WS_RECV" &&
+          capture.resource_type === "WebSocketFrame" &&
+          capture.url.includes("/backend-api/ws-fixture"),
+      );
+      expect(websocketSent).toBeTruthy();
+      expect(websocketReceived).toBeTruthy();
+      expect(websocketSent?.status).toBe(101);
+      expect(websocketReceived?.status).toBe(101);
+      expect(websocketSent?.mime_type).toBe("application/json");
+      expect(websocketReceived?.mime_type).toBe("application/json");
+      expect(websocketSent?.body_hash).toBeTruthy();
+      expect(websocketReceived?.body_hash).toBeTruthy();
+      expect(websocketSent?.body_bytes).toBeGreaterThan(0);
+      expect(websocketReceived?.body_bytes).toBeGreaterThan(0);
+      expect(websocketSent?.body_error).toBeFalsy();
+      expect(websocketReceived?.body_error).toBeFalsy();
+      expect(websocketSent?.provenance.lifecycle_id).toBeTruthy();
+      expect(websocketReceived?.provenance.lifecycle_id).toBe(
+        websocketSent?.provenance.lifecycle_id,
+      );
+      expect(websocketSent?.provenance.response_protocol).toBe("websocket");
+      expect(websocketSent?.url).not.toContain("fixture-ws-query-secret");
+      expect(websocketReceived?.url).not.toContain("fixture-ws-query-secret");
+      expect(websocketSent?.url).toContain("keep=yes");
 
       const abortedCapture = captures.find(
         (capture) =>

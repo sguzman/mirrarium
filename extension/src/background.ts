@@ -84,6 +84,23 @@ type PendingPrivateReadLookup = {
   nextSequence: number;
 };
 
+type WebSocketMetadata = {
+  url: string;
+  lifecycleId: string;
+  initiatorType?: string;
+  requestWallTimeMs?: number;
+  requestHeaders: Record<string, string>;
+  responseHeaders: Record<string, string>;
+  status?: number;
+  nextFrameSequence: number;
+};
+
+type CdpWebSocketFrame = {
+  opcode: number;
+  mask: boolean;
+  payloadData: string;
+};
+
 type CdpResponse = {
   url: string;
   status: number;
@@ -101,6 +118,7 @@ const attachedTabs = new Set<number>();
 const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
+const webSockets = new Map<string, WebSocketMetadata>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
@@ -109,6 +127,20 @@ let staleInstalledBuildNotice: string | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
   return `${tabId}:${requestId}`;
+}
+
+function isSupportedChatGptSocketUrl(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false;
+
+  try {
+    const url = new URL(rawUrl);
+    return (
+      url.protocol === "wss:" &&
+      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com")
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isSupportedChatGptUrl(rawUrl: string | undefined): boolean {
@@ -134,6 +166,10 @@ function clearTabState(tabId: number): void {
 
   for (const key of responses.keys()) {
     if (key.startsWith(prefix)) responses.delete(key);
+  }
+
+  for (const key of webSockets.keys()) {
+    if (key.startsWith(prefix)) webSockets.delete(key);
   }
 
   for (const key of privateRevalidations.keys()) {
@@ -1481,6 +1517,84 @@ function postCaptureStart(
   });
 }
 
+function captureWebSocketFrame(
+  tabId: number,
+  requestId: string,
+  direction: "sent" | "received",
+  frame: CdpWebSocketFrame,
+): void {
+  if (!attachedTabs.has(tabId)) return;
+
+  const socket = webSockets.get(requestKey(tabId, requestId));
+  if (!socket) return;
+
+  const frameSequence = socket.nextFrameSequence;
+  socket.nextFrameSequence += 1;
+
+  const captureId = crypto.randomUUID();
+  const method = direction === "sent" ? "WS_SEND" : "WS_RECV";
+  let body: string | undefined;
+  let mimeType = "application/octet-stream";
+  let bodyError: string | null = null;
+
+  if (shouldSuppressResponseBody(socket.url)) {
+    bodyError = "suppressed:credential_endpoint";
+  } else if (frame.opcode === 1) {
+    mimeType = "application/json";
+    try {
+      const value: unknown = JSON.parse(frame.payloadData);
+      body = redactJsonSecrets(value) ? JSON.stringify(value) : frame.payloadData;
+    } catch {
+      bodyError = "suppressed:unparseable_websocket_text_frame";
+      mimeType = "text/plain; charset=utf-8";
+    }
+  } else if (frame.opcode === 2) {
+    bodyError = "suppressed:websocket_binary_frame_not_archived";
+  } else {
+    return;
+  }
+
+  postNative({
+    type: "capture_start",
+    metadata: {
+      capture_id: captureId,
+      tab_id: tabId,
+      request_id: `${requestId}:ws:${frameSequence}`,
+      method,
+      url: socket.url,
+      status: Math.trunc(socket.status ?? 0),
+      mime_type: mimeType,
+      resource_type: "WebSocketFrame",
+      provenance: {
+        lifecycle_id: socket.lifecycleId,
+        initiator_type: socket.initiatorType,
+        request_wall_time_ms: socket.requestWallTimeMs,
+        response_protocol: "websocket",
+        request_headers: socket.requestHeaders,
+        response_headers: socket.responseHeaders,
+      },
+    },
+  });
+
+  if (body === undefined || bodyError !== null) {
+    postNative({
+      type: "capture_finish",
+      capture_id: captureId,
+      encoded_data_length: undefined,
+      body_error: bodyError ?? "suppressed:websocket_frame_body_unavailable",
+    });
+    return;
+  }
+
+  postUtf8Body(captureId, body);
+  postNative({
+    type: "capture_finish",
+    capture_id: captureId,
+    encoded_data_length: new TextEncoder().encode(body).length,
+    body_error: null,
+  });
+}
+
 async function captureRedirectHop(
   tabId: number,
   requestId: string,
@@ -1626,6 +1740,77 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
 
   if (!attachedTabs.has(tabId)) return;
+
+  if (method === "Network.webSocketCreated") {
+    const event = params as {
+      requestId: string;
+      url: string;
+      initiator?: { type?: string };
+    };
+    if (!isSupportedChatGptSocketUrl(event.url)) return;
+    webSockets.set(requestKey(tabId, event.requestId), {
+      url: sanitizeUrlForStorage(event.url),
+      lifecycleId: crypto.randomUUID(),
+      initiatorType: event.initiator?.type,
+      requestHeaders: {},
+      responseHeaders: {},
+      nextFrameSequence: 0,
+    });
+    return;
+  }
+
+  if (method === "Network.webSocketWillSendHandshakeRequest") {
+    const event = params as {
+      requestId: string;
+      wallTime?: number;
+      request: { headers?: Record<string, string | number> };
+    };
+    const socket = webSockets.get(requestKey(tabId, event.requestId));
+    if (socket) {
+      socket.requestWallTimeMs = secondsToMilliseconds(event.wallTime);
+      socket.requestHeaders = sanitizeHeaders(event.request.headers);
+    }
+    return;
+  }
+
+  if (method === "Network.webSocketHandshakeResponseReceived") {
+    const event = params as {
+      requestId: string;
+      response: {
+        status?: number;
+        headers?: Record<string, string | number>;
+      };
+    };
+    const socket = webSockets.get(requestKey(tabId, event.requestId));
+    if (socket) {
+      socket.status = event.response.status;
+      socket.responseHeaders = sanitizeHeaders(event.response.headers);
+    }
+    return;
+  }
+
+  if (
+    method === "Network.webSocketFrameSent" ||
+    method === "Network.webSocketFrameReceived"
+  ) {
+    const event = params as {
+      requestId: string;
+      response: CdpWebSocketFrame;
+    };
+    captureWebSocketFrame(
+      tabId,
+      event.requestId,
+      method === "Network.webSocketFrameSent" ? "sent" : "received",
+      event.response,
+    );
+    return;
+  }
+
+  if (method === "Network.webSocketClosed") {
+    const event = params as { requestId: string };
+    webSockets.delete(requestKey(tabId, event.requestId));
+    return;
+  }
 
   if (method === "Network.requestWillBeSent") {
     const event = params as {
