@@ -1493,6 +1493,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         updateManifestPath,
         JSON.stringify(updateManifest, null, 2) + "\n",
       );
+      const updateBackgroundPath = join(updateSourcePath, "background.js");
+      await writeFile(
+        updateBackgroundPath,
+        (await readFile(updateBackgroundPath, "utf8")) +
+          `\n// Mirrarium hot-update fixture: ${updatedBuildId}\n`,
+      );
 
       const { stdout: updateInstallStdout } = await execFileAsync(
         cliPath,
