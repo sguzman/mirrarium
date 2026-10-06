@@ -344,10 +344,11 @@ mod tests {
         store.finish("public-script", None, None).unwrap();
         drop(store);
 
+        let cache_reader = cache::CacheReader::open(directory.path()).unwrap();
         let mut output = Vec::new();
         write_cache_lookup_responses(
             &mut output,
-            directory.path(),
+            &cache_reader,
             "lookup-1".to_owned(),
             "https://chatgpt.com/_next/static/replay.js",
             "Script",
@@ -414,10 +415,11 @@ mod tests {
         store.finish("private-json", None, None).unwrap();
         drop(store);
 
+        let cache_reader = cache::CacheReader::open(directory.path()).unwrap();
         let mut output = Vec::new();
         write_private_read_lookup_responses(
             &mut output,
-            directory.path(),
+            &cache_reader,
             "private-lookup-1".to_owned(),
             "https://chatgpt.com/backend-api/conversation/private",
         )
