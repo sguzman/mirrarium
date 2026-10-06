@@ -1504,7 +1504,8 @@ fn candidate_from_aggregate(url: String, aggregate: Aggregate) -> CacheCandidate
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
+    use std::fs;
+
     use rusqlite::params;
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
