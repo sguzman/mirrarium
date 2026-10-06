@@ -3239,7 +3239,7 @@ mod tests {
         archived.method = "WS_RECV".to_owned();
         archived.mime_type = "application/json".to_owned();
         store.begin(archived).unwrap();
-        let body = br#"{\"message\":\"hello\"}"#;
+        let body = br#"{"message":"hello"}"#;
         store
             .append_chunk("ws-archived", 0, &BASE64.encode(body))
             .unwrap();
