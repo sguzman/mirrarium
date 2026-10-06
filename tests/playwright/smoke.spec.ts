@@ -286,6 +286,44 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           cacheDisabled: true,
         });
 
+        const privateCountsBefore = (await fetch(
+          "http://127.0.0.1:43118/private-revalidation-counts",
+        ).then((response) => response.json())) as {
+          total: number;
+          conditional_304: number;
+        };
+
+        const privateRevalidation = await page.evaluate(async () => {
+          const response = await fetch("/backend-api/conversation/test", {
+            cache: "no-store",
+          });
+          return {
+            status: response.status,
+            marker: response.headers.get("x-mirrarium-revalidated"),
+            body: await response.json(),
+          };
+        });
+        expect(privateRevalidation).toEqual({
+          status: 200,
+          marker: "hit",
+          body: {
+            id: "fixture-conversation",
+            title: "Private fixture",
+            messages: [{ role: "user", content: "private corpus material" }],
+          },
+        });
+
+        const privateCountsAfter = (await fetch(
+          "http://127.0.0.1:43118/private-revalidation-counts",
+        ).then((response) => response.json())) as {
+          total: number;
+          conditional_304: number;
+        };
+        expect(privateCountsAfter.total).toBe(privateCountsBefore.total + 1);
+        expect(privateCountsAfter.conditional_304).toBe(
+          privateCountsBefore.conditional_304 + 1,
+        );
+
         const scriptHit = page.waitForResponse(
           (response) =>
             response.url().endsWith("/_next/static/app.js") &&

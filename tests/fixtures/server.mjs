@@ -15,6 +15,8 @@ let staticJsHits = 0;
 let staticImageHits = 0;
 let staticFontHits = 0;
 let cdnJsHits = 0;
+let privateConversationHits = 0;
+let privateConversationConditional304s = 0;
 
 execFileSync("openssl", [
   "req",
@@ -188,9 +190,22 @@ const fixtureServer = https.createServer(
     }
 
     if (request.url === "/backend-api/conversation/test") {
+      privateConversationHits += 1;
+      const etag = "\"fixture-conversation-v1\"";
+      if (request.headers["if-none-match"] === etag) {
+        privateConversationConditional304s += 1;
+        response.writeHead(304, {
+          etag,
+          "cache-control": "private, max-age=0, must-revalidate",
+        });
+        response.end();
+        return;
+      }
+
       response.writeHead(200, {
         "content-type": "application/json",
-        etag: "\"fixture-conversation-v1\"",
+        etag,
+        "cache-control": "private, max-age=0, must-revalidate",
       });
       response.end(JSON.stringify({
         id: "fixture-conversation",
@@ -411,6 +426,15 @@ const fixtureServer = https.createServer(
 );
 
 const healthServer = http.createServer((request, response) => {
+  if (request.url === "/private-revalidation-counts") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      total: privateConversationHits,
+      conditional_304: privateConversationConditional304s,
+    }));
+    return;
+  }
+
   if (request.url === "/replay-counts") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
