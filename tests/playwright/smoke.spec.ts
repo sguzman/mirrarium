@@ -1131,6 +1131,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         body_error?: string;
         provenance: {
           lifecycle_id?: string;
+          transport_sequence?: number;
           redirect_hop?: number;
           redirected_from_url?: string;
           initiator_type?: string;
@@ -1328,6 +1329,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         "suppressed:websocket_text_frame_too_large",
       );
       expect(websocketSent?.provenance.lifecycle_id).toBeTruthy();
+      expect(websocketSent?.provenance.transport_sequence).toBe(0);
+      expect(
+        websocketReceived
+          .map((capture) => capture.provenance.transport_sequence)
+          .sort((left, right) => (left ?? 0) - (right ?? 0)),
+      ).toEqual([1, 2, 3, 4]);
       for (const received of websocketReceived) {
         expect(received.provenance.lifecycle_id).toBe(
           websocketSent?.provenance.lifecycle_id,
@@ -1390,6 +1397,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           (capture) => capture.provenance.lifecycle_id === eventSourceLifecycle,
         ),
       ).toBe(true);
+      expect(
+        eventSourceMessages
+          .map((capture) => capture.provenance.transport_sequence)
+          .sort((left, right) => (left ?? 0) - (right ?? 0)),
+      ).toEqual([0, 1]);
 
       const unfinishedEventSourceResponse = captures.find(
         (capture) =>

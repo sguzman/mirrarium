@@ -8,6 +8,7 @@ pub struct CaptureProvenance {
     pub frame_id: Option<String>,
     pub loader_id: Option<String>,
     pub lifecycle_id: Option<String>,
+    pub transport_sequence: Option<u64>,
     pub redirect_hop: Option<u32>,
     pub redirected_from_url: Option<String>,
     pub document_url: Option<String>,

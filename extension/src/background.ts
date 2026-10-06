@@ -1529,6 +1529,7 @@ function postCaptureStart(
         frame_id: request?.frameId,
         loader_id: request?.loaderId,
         lifecycle_id: request?.lifecycleId,
+        transport_sequence: sequence,
         redirect_hop: request?.redirectHop,
         redirected_from_url: request?.redirectedFromUrl,
         document_url: request?.documentUrl,
@@ -1606,6 +1607,7 @@ function captureWebSocketFrame(
       resource_type: "WebSocketFrame",
       provenance: {
         lifecycle_id: socket.lifecycleId,
+        transport_sequence: frameSequence,
         initiator_type: socket.initiatorType,
         request_wall_time_ms: socket.requestWallTimeMs,
         response_protocol: "websocket",
