@@ -567,6 +567,19 @@ impl CaptureStore {
         if final_path.exists() {
             fs::remove_file(&capture.temp_path)?;
         } else {
+            if privacy == PrivacyClass::Private {
+                let plaintext = fs::read(&capture.temp_path)
+                    .with_context(|| format!("reading private temp object {}", capture.temp_path.display()))?;
+                anyhow::ensure!(
+                    plaintext.len() as u64 == capture.bytes,
+                    "private temp object byte count changed before encryption"
+                );
+                let key = load_or_create_private_key(&self.root)?;
+                let envelope = encrypt_private_object_bytes(&key, &body_hash, &plaintext)?;
+                fs::write(&capture.temp_path, &envelope)
+                    .with_context(|| format!("encrypting {}", capture.temp_path.display()))?;
+                harden_file(&capture.temp_path)?;
+            }
             fs::rename(&capture.temp_path, &final_path).with_context(|| {
                 format!(
                     "moving {} to {}",
@@ -890,41 +903,21 @@ impl CaptureStore {
                 continue;
             }
 
-            let path = self.root.join(&expected_relative_path);
-            let file = match File::open(&path) {
-                Ok(file) => file,
-                Err(error) => {
+            match read_verified_object(&self.root, &storage_class, &hash) {
+                Ok(bytes) if bytes.len() as i64 == expected_bytes => {}
+                Ok(bytes) => {
                     report.corrupt_objects += 1;
                     report.errors.push(format!(
-                        "{storage_class}/{hash}: cannot open {}: {error}",
-                        path.display()
+                        "{storage_class}/{hash}: expected {expected_bytes} logical bytes, got {}",
+                        bytes.len()
                     ));
-                    continue;
                 }
-            };
-
-            let mut reader = BufReader::new(file);
-            let mut hasher = Sha256::new();
-            let mut actual_bytes = 0_u64;
-            let mut buffer = [0_u8; 64 * 1024];
-
-            loop {
-                let read = reader.read(&mut buffer)?;
-                if read == 0 {
-                    break;
+                Err(error) => {
+                    report.corrupt_objects += 1;
+                    report
+                        .errors
+                        .push(format!("{storage_class}/{hash}: {error:#}"));
                 }
-                hasher.update(&buffer[..read]);
-                actual_bytes = actual_bytes
-                    .checked_add(read as u64)
-                    .context("verified byte count overflow")?;
-            }
-
-            let actual_hash = format!("{:x}", hasher.finalize());
-            if actual_hash != hash || actual_bytes != expected_bytes as u64 {
-                report.corrupt_objects += 1;
-                report.errors.push(format!(
-                    "{storage_class}/{hash}: expected {expected_bytes} bytes/{hash}, got {actual_bytes} bytes/{actual_hash}"
-                ));
             }
         }
 
@@ -973,7 +966,9 @@ impl CaptureStore {
                     .open(&temp_path)
                     .with_context(|| format!("creating {}", temp_path.display()))?;
                 harden_file(&temp_path)?;
-                file.write_all(&request_body.bytes)?;
+                let key = load_or_create_private_key(&self.root)?;
+                let envelope = encrypt_private_object_bytes(&key, &hash, &request_body.bytes)?;
+                file.write_all(&envelope)?;
                 file.flush()?;
                 drop(file);
 
@@ -1778,9 +1773,16 @@ pub fn read_verified_object(
     );
 
     let relative_path = object_relative_path(class, hash);
-    let path = root.as_ref().join(&relative_path);
-    let bytes = fs::read(&path)
+    let root = root.as_ref();
+    let path = root.join(&relative_path);
+    let stored = fs::read(&path)
         .with_context(|| format!("reading stored object {}", path.display()))?;
+    let bytes = if class == PrivacyClass::Private && stored.starts_with(PRIVATE_OBJECT_MAGIC) {
+        let key = load_existing_private_key(root)?;
+        decrypt_private_object_bytes(&key, hash, &stored)?
+    } else {
+        stored
+    };
     let actual_hash = sha256_hex(&bytes);
     anyhow::ensure!(
         actual_hash == hash,
@@ -2044,6 +2046,23 @@ mod tests {
     }
 
     #[test]
+    fn verified_object_reader_keeps_legacy_private_plaintext_compatible() {
+        let directory = tempdir().unwrap();
+        let plaintext = b"legacy private bytes";
+        let hash = sha256_hex(plaintext);
+        let path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, plaintext).unwrap();
+
+        assert_eq!(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+            plaintext
+        );
+    }
+
+    #[test]
     fn verified_object_reader_rejects_corruption() {
         let directory = tempdir().unwrap();
         let mut store = CaptureStore::open(directory.path()).unwrap();
@@ -2177,7 +2196,13 @@ mod tests {
         let path = directory
             .path()
             .join(object_relative_path(PrivacyClass::Private, &hash));
-        let stored = fs::read_to_string(path).unwrap();
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.starts_with(PRIVATE_OBJECT_MAGIC));
+        assert!(!String::from_utf8_lossy(&raw).contains("top-secret"));
+        let stored = String::from_utf8(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+        )
+        .unwrap();
 
         assert!(!stored.contains("top-secret"));
         assert!(!stored.contains("signed-secret"));
@@ -2220,7 +2245,12 @@ mod tests {
         let path = directory
             .path()
             .join(object_relative_path(PrivacyClass::Private, &hash));
-        let stored = fs::read_to_string(path).unwrap();
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.starts_with(PRIVATE_OBJECT_MAGIC));
+        let stored = String::from_utf8(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+        )
+        .unwrap();
 
         assert!(!stored.contains("sse-secret"));
         assert!(stored.contains("%5BREDACTED%5D"));
@@ -2318,7 +2348,13 @@ mod tests {
         let path = directory
             .path()
             .join(object_relative_path(PrivacyClass::Private, &hash));
-        let persisted = fs::read_to_string(path).unwrap();
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.starts_with(PRIVATE_OBJECT_MAGIC));
+        assert!(!String::from_utf8_lossy(&raw).contains("hello from request body"));
+        let persisted = String::from_utf8(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+        )
+        .unwrap();
         assert!(persisted.contains("hello from request body"));
         assert!(persisted.contains("[REDACTED]"));
         assert!(!persisted.contains("fixture-secret-token"));
