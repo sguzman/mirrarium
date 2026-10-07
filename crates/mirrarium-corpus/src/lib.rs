@@ -575,10 +575,13 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
     )?;
     corpus.pragma_update(None, "user_version", CORPUS_SCHEMA_VERSION)?;
 
-    let raw = open_raw_ledger_read_only(raw_root)?;
+    let mut raw = open_raw_ledger_read_only(raw_root)?;
+    let raw_snapshot = raw
+        .transaction()
+        .context("starting coherent raw-ledger snapshot for corpus rebuild")?;
 
     let stream_sources = collect_sources(
-        &raw,
+        &raw_snapshot,
         r#"
         SELECT capture_id, url, privacy_class, body_hash
         FROM captures
@@ -590,7 +593,7 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
     )?;
 
     let json_sources = collect_sources(
-        &raw,
+        &raw_snapshot,
         r#"
         SELECT capture_id, url, privacy_class, body_hash
         FROM captures
@@ -601,9 +604,9 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
         "#,
     )?;
 
-    let websocket_sources = collect_websocket_sources(&raw)?;
-    let eventsource_sources = collect_eventsource_sources(&raw)?;
-    let download_sources = collect_download_sources(&raw)?;
+    let websocket_sources = collect_websocket_sources(&raw_snapshot)?;
+    let eventsource_sources = collect_eventsource_sources(&raw_snapshot)?;
+    let download_sources = collect_download_sources(&raw_snapshot)?;
 
     let transaction = corpus.transaction()?;
 
@@ -636,7 +639,7 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
 
     transaction.commit()?;
 
-    let report = verify_corpus_connections(&corpus, &raw)?;
+    let report = verify_corpus_connections(&corpus, &raw_snapshot)?;
     anyhow::ensure!(
         report.sqlite_integrity_ok
             && report.foreign_key_violations == 0
@@ -646,6 +649,9 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
         report.errors.len()
     );
     let stats = corpus_stats_from_connection(&corpus)?;
+    raw_snapshot
+        .commit()
+        .context("closing coherent raw-ledger snapshot for corpus rebuild")?;
     Ok(stats)
 }
 
