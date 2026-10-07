@@ -1445,6 +1445,47 @@ fn verified_materialized_export_index(
     Ok((manifest, cached_index))
 }
 
+pub fn write_conversation_sync_state_json<W: Write>(
+    raw_root: impl AsRef<Path>,
+    writer: &mut W,
+) -> Result<u64> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let (_manifest, cached_index) = verified_materialized_export_index(&corpus)?;
+
+    write!(
+        writer,
+        "{{\"schema\":\"mirrarium.corpus.sync-state\",\"schema_version\":{},\"records\":{{",
+        CORPUS_SYNC_STATE_SCHEMA_VERSION
+    )
+    .context("writing corpus sync-state header")?;
+
+    let mut count = 0_u64;
+    for (index, (conversation_id, record_sha256)) in cached_index.iter().enumerate() {
+        if index > 0 {
+            writer
+                .write_all(b",")
+                .context("writing corpus sync-state separator")?;
+        }
+        serde_json::to_writer(&mut *writer, conversation_id)
+            .context("serializing corpus sync-state conversation id")?;
+        writer
+            .write_all(b":")
+            .context("writing corpus sync-state key separator")?;
+        serde_json::to_writer(&mut *writer, record_sha256)
+            .context("serializing corpus sync-state record hash")?;
+        count = count
+            .checked_add(1)
+            .context("corpus sync-state record count overflow")?;
+    }
+
+    writer
+        .write_all(b"}}\n")
+        .context("writing corpus sync-state terminator")?;
+    Ok(count)
+}
+
 pub fn export_sync_state(raw_root: impl AsRef<Path>) -> Result<ConversationSyncState> {
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
