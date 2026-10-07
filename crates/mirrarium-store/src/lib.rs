@@ -915,13 +915,19 @@ impl CaptureStore {
             fs::write(&temp_path, &envelope)
                 .with_context(|| format!("writing private migration file {}", temp_path.display()))?;
             harden_file(&temp_path)?;
-            fs::rename(&temp_path, &final_path).with_context(|| {
+            sync_file(&temp_path)?;
+            replace_staged_file(&temp_path, &final_path).with_context(|| {
                 format!(
                     "replacing legacy private object {} with encrypted envelope",
                     final_path.display()
                 )
             })?;
             harden_file(&final_path)?;
+            sync_directory(
+                final_path
+                    .parent()
+                    .context("private migration object path has no parent directory")?,
+            )?;
 
             migrated_objects = migrated_objects
                 .checked_add(1)
@@ -1888,8 +1894,9 @@ fn remove_database_sidecars(database: &Path) -> Result<()> {
 
 fn recover_interrupted_ledger_migration(root: &Path) -> Result<()> {
     let database = root.join("ledger.sqlite3");
-    let backup = root.join(".incoming/ledger.sqlite3.plaintext-backup");
-    let encrypted_part = root.join(".incoming/ledger.sqlite3.encrypted.part");
+    let incoming = root.join(".incoming");
+    let backup = incoming.join("ledger.sqlite3.plaintext-backup");
+    let encrypted_part = incoming.join("ledger.sqlite3.encrypted.part");
 
     if !database.exists() && backup.exists() {
         fs::rename(&backup, &database).with_context(|| {
@@ -1898,8 +1905,21 @@ fn recover_interrupted_ledger_migration(root: &Path) -> Result<()> {
                 backup.display()
             )
         })?;
+        sync_directory(root)?;
+        sync_directory(&incoming)?;
         remove_database_sidecars(&encrypted_part)?;
-        let _ = fs::remove_file(&encrypted_part);
+        match fs::remove_file(&encrypted_part) {
+            Ok(()) => sync_directory(&incoming)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "removing interrupted encrypted ledger target {}",
+                        encrypted_part.display()
+                    )
+                });
+            }
+        }
         return Ok(());
     }
 
@@ -1910,6 +1930,7 @@ fn recover_interrupted_ledger_migration(root: &Path) -> Result<()> {
             fs::remove_file(&backup).with_context(|| {
                 format!("removing completed ledger migration backup {}", backup.display())
             })?;
+            sync_directory(&incoming)?;
         } else {
             anyhow::bail!(
                 "raw ledger migration backup {} exists; refusing to overwrite recovery evidence",
@@ -2001,6 +2022,12 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
         .execute_batch("DETACH DATABASE encrypted;")
         .context("detaching encrypted raw-ledger migration target")?;
     harden_file(&target)?;
+    sync_file(&target)?;
+    sync_directory(
+        target
+            .parent()
+            .context("raw-ledger migration target has no parent directory")?,
+    )?;
 
     let target_connection = Connection::open_with_flags(
         &target,
@@ -2033,8 +2060,11 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
     );
     drop(target_connection);
     drop(source);
+    sync_file(&database)?;
+    sync_directory(root)?;
 
     remove_database_sidecars(&database)?;
+    sync_directory(root)?;
     fs::rename(&database, &backup).with_context(|| {
         format!(
             "moving plaintext raw ledger {} to migration backup {}",
@@ -2042,9 +2072,19 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
             backup.display()
         )
     })?;
+    sync_directory(root)?;
+    sync_directory(
+        backup
+            .parent()
+            .context("raw-ledger migration backup has no parent directory")?,
+    )?;
 
     if let Err(error) = fs::rename(&target, &database) {
         let _ = fs::rename(&backup, &database);
+        let _ = sync_directory(root);
+        if let Some(parent) = backup.parent() {
+            let _ = sync_directory(parent);
+        }
         return Err(error).with_context(|| {
             format!(
                 "installing encrypted raw ledger {}",
@@ -2053,12 +2093,22 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
         });
     }
     harden_file(&database)?;
+    sync_directory(root)?;
+    sync_directory(
+        target
+            .parent()
+            .context("raw-ledger migration target has no parent directory")?,
+    )?;
 
     let final_connection = match open_raw_ledger_connection(root, true) {
         Ok(connection) => connection,
         Err(error) => {
             let _ = fs::remove_file(&database);
             let _ = fs::rename(&backup, &database);
+            let _ = sync_directory(root);
+            if let Some(parent) = backup.parent() {
+                let _ = sync_directory(parent);
+            }
             return Err(error).context("verifying installed encrypted raw ledger");
         }
     };
@@ -2075,6 +2125,11 @@ fn migrate_raw_ledger(root: &Path) -> Result<LedgerMigrationReport> {
             backup.display()
         )
     })?;
+    sync_directory(
+        backup
+            .parent()
+            .context("raw-ledger migration backup has no parent directory")?,
+    )?;
 
     Ok(LedgerMigrationReport {
         migrated: true,
@@ -4505,6 +4560,42 @@ mod tests {
         assert_eq!(report.already_encrypted_objects, 1);
         assert!(!report.ledger_migrated);
         assert!(report.ledger_already_encrypted);
+    }
+
+    #[test]
+    fn interrupted_ledger_migration_restores_plaintext_backup_and_discards_target() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let incoming = root.join(".incoming");
+        fs::create_dir_all(&incoming).unwrap();
+
+        let ledger = root.join("ledger.sqlite3");
+        let original = Connection::open(&ledger).unwrap();
+        original
+            .execute_batch(
+                "CREATE TABLE probe (value TEXT NOT NULL);
+                 INSERT INTO probe (value) VALUES ('recovered');",
+            )
+            .unwrap();
+        drop(original);
+
+        let backup = incoming.join("ledger.sqlite3.plaintext-backup");
+        fs::rename(&ledger, &backup).unwrap();
+        let target = incoming.join("ledger.sqlite3.encrypted.part");
+        fs::write(&target, b"stale encrypted migration target").unwrap();
+
+        recover_interrupted_ledger_migration(root).unwrap();
+
+        assert!(ledger.is_file());
+        assert!(!backup.exists());
+        assert!(!target.exists());
+        assert!(database_has_plaintext_sqlite_header(&ledger).unwrap());
+
+        let restored = Connection::open(&ledger).unwrap();
+        let value: String = restored
+            .query_row("SELECT value FROM probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "recovered");
     }
 
     #[test]
