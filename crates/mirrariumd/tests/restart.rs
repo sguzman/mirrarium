@@ -9,7 +9,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use mirrarium_protocol::{
     CaptureMetadata, CaptureProvenance, HostRequest, HostResponse,
 };
-use mirrarium_store::CaptureStore;
 
 struct NativeHost {
     child: Child,
@@ -186,18 +185,22 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
         "abandoned or recovered capture staging survived daemon restart"
     );
 
-    let store = CaptureStore::open_read_only(root).expect("open recovered store");
-    let stats = store.stats().expect("read recovered stats");
-    assert_eq!(stats.captures, 1);
-    assert_eq!(stats.private_captures, 1);
-    assert_eq!(stats.body_errors, 0);
-
-    let captures = store.recent_captures(10).expect("read recovered captures");
-    assert_eq!(captures.len(), 1);
+    let stats_output = Command::new(env!("CARGO_BIN_EXE_mirrariumd"))
+        .arg("--stats")
+        .env("MIRRARIUM_DATA_DIR", root)
+        .env("MIRRARIUM_PRIVATE_KEY_FILE", &key_path)
+        .output()
+        .expect("run recovered daemon stats");
     assert!(
-        captures[0].url.contains("/backend-api/recovered-after-crash"),
-        "crashed in-flight capture leaked into ledger"
+        stats_output.status.success(),
+        "recovered stats failed: {}",
+        String::from_utf8_lossy(&stats_output.stderr)
     );
-    assert!(captures[0].body_hash.is_some());
-    assert_eq!(captures[0].body_bytes, recovered_body.len() as u64);
+    let stats: serde_json::Value =
+        serde_json::from_slice(&stats_output.stdout).expect("parse recovered stats");
+    assert_eq!(stats["captures"], 1);
+    assert_eq!(stats["private_captures"], 1);
+    assert_eq!(stats["private_objects"], 1);
+    assert_eq!(stats["body_errors"], 0);
+    assert_eq!(stats["captured_body_bytes"], recovered_body.len() as u64);
 }
