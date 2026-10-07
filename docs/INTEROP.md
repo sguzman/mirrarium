@@ -6,7 +6,7 @@
 
 `mirrarium corpus export-manifest` emits a tiny deterministic JSON object containing the full exported conversation count and SHA-256 of the exact complete `corpus export-index` JSONL bytes (including newline framing). Its normative contract is `schemas/mirrarium-corpus-export-manifest-v1.schema.json` and `mirrarium corpus export-manifest-schema`. Consumers can compare this fingerprint first and skip all further synchronization work when it is unchanged.
 
-`mirrarium corpus export-index [limit]` writes a lightweight JSONL synchronization index in the same deterministic conversation-ID order. Each index line carries the conversation ID and the exact v1 `record_sha256`, allowing a consumer to compare local state before requesting changed records with `export-one`. Its normative contract is `schemas/mirrarium-corpus-conversation-index-v1.schema.json` and `mirrarium corpus export-index-schema`.
+`mirrarium corpus export-index [limit]` writes a lightweight JSONL synchronization index in the same deterministic conversation-ID order. Each index line carries the conversation ID and the exact v1 `record_sha256`, allowing a consumer to compare local state before requesting changed records with `export-one`. `mirrarium corpus export-one <conversation-id> [expected-record-sha256]` may be given the hash from that index; when supplied, it refuses to emit if the current pinned generation produces a different record hash. Its normative contract is `schemas/mirrarium-corpus-conversation-index-v1.schema.json` and `mirrarium corpus export-index-schema`.
 
 A full successful index export (no limit) is authoritative for the current exported conversation set, so a consumer may treat previously known IDs absent from that complete set as deletions from the current derived generation. A limited index is only a prefix and must never be used to infer deletions.
 
@@ -47,12 +47,14 @@ Canonicalization is not authoritative over evidence. If canonicalization of one 
 
 ## Incremental synchronization
 
-A downstream consumer can synchronize without re-ingesting unchanged conversation text:
+A downstream consumer can synchronize without re-ingesting unchanged conversation text while remaining safe against a rebuild between commands:
 
-1. Read `corpus export-manifest`. If its `index_sha256` matches the consumer's previously completed synchronization, stop: the exported conversation set and every v1 record hash are unchanged.
-2. Otherwise read a complete `corpus export-index`.
+1. Read `corpus export-manifest` as M1. If its `index_sha256` matches the consumer's previously completed synchronization, stop: the exported conversation set and every v1 record hash were unchanged at that observation point.
+2. Otherwise read a complete `corpus export-index`, hash its exact stdout bytes, and require that SHA-256 to equal M1.`index_sha256`. If it differs, a rebuild raced the commands; discard the index and restart from step 1.
 3. Compare each `conversation_id` / `record_sha256` pair with the consumer's local state.
-4. Fetch new or changed records with `corpus export-one <conversation-id>`.
-5. After the complete index command exits successfully, remove or retire local records whose IDs are absent from the authoritative index set and persist the new manifest fingerprint.
+4. Stage new or changed records using `corpus export-one <conversation-id> <record-sha256>`. If any command rejects the expected hash, a newer generation raced the sync; discard staged changes and restart.
+5. Read `corpus export-manifest` again as M2 and require M2.`index_sha256` to equal M1.`index_sha256`. Only then commit staged records, retire local IDs absent from the authoritative index, and persist the manifest fingerprint. If the final fingerprint differs, discard the staged synchronization and restart.
 
 The index is a bandwidth optimization, not a weaker identity. Its `record_sha256` is copied from the exact v1 conversation record produced by the same pinned generation and record builder.
+
+Each individual command pins one corpus generation, but the lock intentionally does not span multiple CLI processes. The hash checks above are therefore part of the interoperability protocol, not optional diagnostics: they turn independent read-only commands into a coherent optimistic snapshot transaction without blocking browser capture or requiring a long-lived Mirrarium service.

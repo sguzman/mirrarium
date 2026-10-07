@@ -2407,7 +2407,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const { stdout: singleConversationExportStdout } = await execFileAsync(
         cliPath,
-        ["corpus", "export-one", "fixture-conversation"],
+        [
+          "corpus",
+          "export-one",
+          "fixture-conversation",
+          exportedConversation?.record_sha256 as string,
+        ],
         {
           env: {
             ...childEnv,
@@ -2422,6 +2427,29 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         validateCorpusExport(JSON.parse(singleConversationExportStdout)),
         JSON.stringify(validateCorpusExport.errors),
       ).toBe(true);
+
+      let staleExportRejected = false;
+      try {
+        await execFileAsync(
+          cliPath,
+          [
+            "corpus",
+            "export-one",
+            "fixture-conversation",
+            "0".repeat(64),
+          ],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+      } catch (error) {
+        staleExportRejected = true;
+        expect(String(error)).toContain("changed since the export index");
+      }
+      expect(staleExportRejected).toBe(true);
       expect(exportedConversation?.canonical_error ?? null).toBeNull();
       expect(exportedConversation?.canonical?.basis_capture_id.length).toBeGreaterThan(0);
       expect(exportedConversation?.canonical?.basis_source_body_hash).toMatch(

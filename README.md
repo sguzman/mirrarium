@@ -90,7 +90,7 @@ mirrarium corpus export-index-schema
 mirrarium corpus export-manifest-schema
 mirrarium corpus export-manifest
 mirrarium corpus export-index [limit]
-mirrarium corpus export-one <conversation-id>
+mirrarium corpus export-one <conversation-id> [expected-record-sha256]
 mirrarium corpus export [limit]
 mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>

@@ -269,8 +269,25 @@ fn run() -> Result<()> {
                 let conversation_id = arguments
                     .get(2)
                     .context("missing conversation id")?;
+                let expected_record_sha256 = arguments.get(3).map(String::as_str);
+                if let Some(expected) = expected_record_sha256 {
+                    anyhow::ensure!(
+                        expected.len() == 64
+                            && expected.bytes().all(|byte| {
+                                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                            }),
+                        "expected record SHA-256 must be 64 lowercase hexadecimal characters"
+                    );
+                }
                 let record = corpus::export_conversation(&root, conversation_id)?
                     .with_context(|| format!("conversation {conversation_id:?} not found"))?;
+                if let Some(expected) = expected_record_sha256 {
+                    anyhow::ensure!(
+                        record.record_sha256 == expected,
+                        "conversation {conversation_id:?} changed since the export index: expected record SHA-256 {expected}, current {}; refresh corpus export-manifest/export-index",
+                        record.record_sha256
+                    );
+                }
                 println!("{}", serde_json::to_string(&record)?);
             }
             Some("export") => {
@@ -1366,7 +1383,7 @@ USAGE:
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-manifest
   mirrarium corpus export-index [LIMIT]
-  mirrarium corpus export-one <CONVERSATION_ID>
+  mirrarium corpus export-one <CONVERSATION_ID> [EXPECTED_RECORD_SHA256]
   mirrarium corpus export [LIMIT]
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
