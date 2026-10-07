@@ -1648,6 +1648,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         stream_captures: number;
         stream_events: number;
         json_stream_events: number;
+        websocket_streams: number;
+        websocket_frames: number;
+        websocket_skipped_captures: number;
         eventsource_streams: number;
         eventsource_events: number;
         eventsource_json_events: number;
@@ -1662,6 +1665,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
       expect(corpusStats.json_stream_events).toBeGreaterThanOrEqual(2);
+      expect(corpusStats.websocket_streams).toBe(1);
+      expect(corpusStats.websocket_frames).toBe(2);
+      expect(corpusStats.websocket_skipped_captures).toBe(0);
       expect(corpusStats.eventsource_streams).toBe(3);
       expect(corpusStats.eventsource_events).toBe(4);
       expect(corpusStats.eventsource_json_events).toBe(3);
@@ -1672,6 +1678,91 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.stream_reconstructions).toBeGreaterThanOrEqual(1);
       expect(corpusStats.attachment_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.attachment_downloads).toBeGreaterThanOrEqual(1);
+
+      const { stdout: webSocketStreamsStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "websocket-streams", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const webSocketStreams = JSON.parse(webSocketStreamsStdout) as Array<{
+        lifecycle_id: string;
+        source_url: string;
+        privacy_class: string;
+        frame_count: number;
+      }>;
+      const derivedWebSocket = webSocketStreams.find((stream) =>
+        stream.source_url.includes("/backend-api/ws-fixture"),
+      );
+      expect(derivedWebSocket).toBeTruthy();
+      expect(derivedWebSocket?.privacy_class).toBe("private");
+      expect(derivedWebSocket?.frame_count).toBe(2);
+      expect(derivedWebSocket?.source_url).not.toContain("fixture-ws-query-secret");
+      expect(derivedWebSocket?.source_url).toContain("keep=yes");
+
+      const { stdout: webSocketFramesStdout } = await execFileAsync(
+        cliPath,
+        [
+          "corpus",
+          "websocket-frames",
+          derivedWebSocket?.lifecycle_id ?? "",
+          "20",
+        ],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const derivedWebSocketFrames = JSON.parse(webSocketFramesStdout) as Array<{
+        lifecycle_id: string;
+        transport_sequence: number;
+        direction: string;
+        source_capture_id: string;
+        source_body_hash: string;
+        data: string;
+      }>;
+      expect(derivedWebSocketFrames).toHaveLength(2);
+      expect(
+        derivedWebSocketFrames.map((frame) => frame.transport_sequence),
+      ).toEqual([0, 1]);
+      expect(derivedWebSocketFrames.map((frame) => frame.direction)).toEqual([
+        "sent",
+        "received",
+      ]);
+      expect(
+        derivedWebSocketFrames.every(
+          (frame) =>
+            frame.lifecycle_id === derivedWebSocket?.lifecycle_id &&
+            !!frame.source_capture_id &&
+            !!frame.source_body_hash &&
+            !frame.data.includes("fixture-ws-client-secret") &&
+            !frame.data.includes("fixture-ws-server-secret"),
+        ),
+      ).toBe(true);
+      expect(
+        JSON.parse(
+          derivedWebSocketFrames.find((frame) => frame.direction === "sent")
+            ?.data ?? "{}",
+        ),
+      ).toMatchObject({
+        message: "client websocket fixture",
+        access_token: "[REDACTED]",
+      });
+      expect(
+        JSON.parse(
+          derivedWebSocketFrames.find((frame) => frame.direction === "received")
+            ?.data ?? "{}",
+        ),
+      ).toMatchObject({
+        message: "server websocket fixture",
+        access_token: "[REDACTED]",
+      });
 
       const { stdout: eventSourceStreamsStdout } = await execFileAsync(
         cliPath,

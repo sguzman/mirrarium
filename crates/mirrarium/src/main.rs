@@ -245,6 +245,45 @@ fn run() -> Result<()> {
                     )?
                 );
             }
+            Some("websocket-streams") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("WebSocket stream limit must be a positive integer")?
+                    .unwrap_or(100);
+                anyhow::ensure!(
+                    limit > 0,
+                    "WebSocket stream limit must be greater than zero"
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::websocket_streams(&root, limit)?
+                    )?
+                );
+            }
+            Some("websocket-frames") => {
+                let lifecycle_id = arguments
+                    .get(2)
+                    .context("missing WebSocket lifecycle id")?;
+                let limit = arguments
+                    .get(3)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("WebSocket frame limit must be a positive integer")?
+                    .unwrap_or(500);
+                anyhow::ensure!(
+                    limit > 0,
+                    "WebSocket frame limit must be greater than zero"
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::websocket_frames(&root, lifecycle_id, limit)?
+                    )?
+                );
+            }
             Some("eventsource-streams") => {
                 let limit = arguments
                     .get(2)
@@ -981,6 +1020,8 @@ USAGE:
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>
   mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
+  mirrarium corpus websocket-streams [LIMIT]
+  mirrarium corpus websocket-frames <LIFECYCLE_ID> [LIMIT]
   mirrarium corpus eventsource-streams [LIMIT]
   mirrarium corpus eventsource-events <LIFECYCLE_ID> [LIMIT]
   mirrarium corpus stream-revisions <CONVERSATION_ID> [LIMIT]
