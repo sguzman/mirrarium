@@ -37,7 +37,9 @@ The export schema version is independent of Mirrarium's internal SQLite schema v
 
 For a fixed published corpus generation, repeated exports are byte-for-byte deterministic. `record_sha256` therefore gives downstream consumers an idempotent content identity for each conversation record; a consumer can key updates by `conversation_id` and skip work when the hash is unchanged.
 
-Internal corpus schema v5 materializes those exact v1 record hashes during `corpus rebuild`. The candidate generation computes each hash from the full record while the rebuild's coherent raw snapshot is pinned, then recomputes every record and verifies the materialized index before publication. `corpus verify` repeats that consistency check. The cache is therefore a rebuildable performance index, not a second authority.
+The current internal corpus schema materializes those exact v1 record hashes during `corpus rebuild`. The candidate generation computes each hash from the full record while the rebuild's coherent raw snapshot is pinned, then recomputes every record and verifies the materialized index before publication. `corpus verify` repeats that consistency check. The cache is therefore a rebuildable performance index, not a second authority.
+
+Because `producer_corpus_schema_version` is itself part of the v1 record bytes and therefore part of the hash preimage, an internal corpus-schema bump can legitimately change every `record_sha256` even when the higher-level conversation content is otherwise identical. That does **not** change the export JSON Schema contract, but it can cause a one-time full downstream upsert after such a producer-schema migration. Consumers must key correctness to the returned hashes/schema fields rather than assuming internal-schema upgrades are hash-neutral.
 
 ### v1 record hash verification
 
