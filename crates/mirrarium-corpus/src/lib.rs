@@ -5081,6 +5081,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sync_state_validation_rejects_noncanonical_input() {
+        let valid_hash = "a".repeat(64);
+
+        let wrong_schema = ConversationSyncState {
+            schema: "mirrarium.corpus.other".to_owned(),
+            schema_version: 1,
+            records: BTreeMap::new(),
+        };
+        assert!(validate_sync_state(&wrong_schema)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported sync-state schema"));
+
+        let wrong_version = ConversationSyncState {
+            schema: "mirrarium.corpus.sync-state".to_owned(),
+            schema_version: 2,
+            records: BTreeMap::new(),
+        };
+        assert!(validate_sync_state(&wrong_version)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported sync-state schema version"));
+
+        let mut empty_id_records = BTreeMap::new();
+        empty_id_records.insert("".to_owned(), valid_hash.clone());
+        let empty_id = ConversationSyncState {
+            schema: "mirrarium.corpus.sync-state".to_owned(),
+            schema_version: 1,
+            records: empty_id_records,
+        };
+        assert!(validate_sync_state(&empty_id)
+            .unwrap_err()
+            .to_string()
+            .contains("conversation id must not be empty"));
+
+        let mut uppercase_hash_records = BTreeMap::new();
+        uppercase_hash_records.insert("fixture".to_owned(), "A".repeat(64));
+        let uppercase_hash = ConversationSyncState {
+            schema: "mirrarium.corpus.sync-state".to_owned(),
+            schema_version: 1,
+            records: uppercase_hash_records,
+        };
+        assert!(validate_sync_state(&uppercase_hash)
+            .unwrap_err()
+            .to_string()
+            .contains("64 lowercase hexadecimal characters"));
+
+        let mut valid_records = BTreeMap::new();
+        valid_records.insert("fixture".to_owned(), valid_hash);
+        validate_sync_state(&ConversationSyncState {
+            schema: "mirrarium.corpus.sync-state".to_owned(),
+            schema_version: 1,
+            records: valid_records,
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn conversation_identity_includes_revision_and_attachment_only_evidence() {
         let connection = Connection::open_in_memory().unwrap();
         connection
