@@ -74,6 +74,8 @@ If the consumer requires all raw evidence captured before synchronization to hav
 
 For consumers that want one producer-generated persistence object, `mirrarium corpus export-sync-checkpoint` emits a source-bound checkpoint containing the stable `archive_id`, the published export manifest, and the exact sync-state. Its normative contract is `schemas/mirrarium-corpus-sync-checkpoint-v1.schema.json` and `mirrarium corpus export-sync-checkpoint-schema`. After successfully applying a delta, a consumer may fetch a checkpoint and persist it only if the checkpoint `archive_id` matches the bound source and checkpoint `manifest.index_sha256` equals the delta manifest fingerprint; a mismatch means a rebuild raced the commands and synchronization must retry. The nested sync-state is constrained to the same 64 MiB ceiling accepted by `export-delta`.
 
+For the stronger one-command path, use `mirrarium corpus export-sync`. Empty stdin performs a bootstrap synchronization. Otherwise stdin must be a previously persisted v1 source-bound checkpoint. Mirrarium validates the checkpoint wire contract, nested sync-state, conversation count, manifest/index fingerprint, and `archive_id` before emitting anything. A checkpoint from another archive is rejected. The command emits one v1 source-bound sync transaction containing both the delta and the next checkpoint from the same pinned corpus generation. Its normative contract is `schemas/mirrarium-corpus-sync-transaction-v1.schema.json` and `mirrarium corpus export-sync-schema`. Apply the delta atomically, then persist the returned checkpoint; no second producer command or manifest recheck is required.
+
 The sync-state v1 contract is `schemas/mirrarium-corpus-sync-state-v1.schema.json` and is emitted by `mirrarium corpus export-sync-state-schema`. `mirrarium corpus export-sync-state` emits the exact current checkpoint from the verified materialized conversation hash index under one shared generation lock; its `records` object is equivalent to converting the complete `export-index` JSONL stream into conversation-ID→record-hash pairs. For an unchanged published generation, repeated checkpoint output is byte-for-byte deterministic, including key order and trailing newline framing. The emitter first verifies manifest/index agreement, then serializes directly from that ordered index into one capped output buffer rather than materializing a second conversation map. It enforces the same 64 MiB byte ceiling as `export-delta`, so every successfully emitted checkpoint is guaranteed to be acceptable as a later delta input. If a future archive exceeds that checkpoint size, use the manifest/index/`export-one` protocol instead:
 
 ```json
@@ -91,6 +93,14 @@ A consumer should apply the delta atomically: stage all `upserts`, remove the ex
 The sync-state request contains only conversation IDs and content hashes, but the delta response contains the same private derived conversation text as ordinary export records. Treat stdout as sensitive plaintext at the interoperability boundary.
 
 For operational safety, `export-delta` accepts at most 64 MiB of UTF-8 sync-state JSON on stdin and rejects larger or non-UTF-8 input before JSON parsing. This byte ceiling is intentionally separate from the semantic JSON Schema contract; it does not impose a fixed conversation-count limit on normal sync states.
+
+## Preferred source-bound synchronization
+
+For a new consumer, run `mirrarium corpus export-sync` with empty stdin. Apply the returned `delta`, then persist the returned `checkpoint`.
+
+For every later synchronization, pipe that exact checkpoint back to `mirrarium corpus export-sync`. Mirrarium refuses checkpoints belonging to a different raw archive and refuses internally inconsistent/torn checkpoints before emitting private upsert content. On success, the response's top-level `archive_id`, nested checkpoint `archive_id`, delta manifest, and checkpoint manifest all describe one pinned generation.
+
+The legacy `export-delta` + separate source/checkpoint protocol remains supported for consumers that already manage source binding themselves.
 
 ## Incremental synchronization
 

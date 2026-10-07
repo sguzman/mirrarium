@@ -19,7 +19,9 @@ use sha2::{Digest, Sha256};
 
 const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
-const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = corpus::CORPUS_SYNC_STATE_MAX_BYTES;
+const MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES: u64 =
+    corpus::CORPUS_SYNC_STATE_MAX_BYTES + 1024 * 1024;
 
 struct BoundedBuffer {
     bytes: Vec<u8>,
@@ -363,6 +365,12 @@ fn run() -> Result<()> {
                     "writing corpus sync-checkpoint schema",
                 )?;
             }
+            Some("export-sync-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_SYNC_TRANSACTION_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus sync-transaction schema",
+                )?;
+            }
             Some("export-delta-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON.as_bytes(),
@@ -383,6 +391,31 @@ fn run() -> Result<()> {
                         .context("serializing corpus sync checkpoint")?,
                     "writing corpus sync checkpoint",
                 )?;
+            }
+            Some("export-sync") => {
+                let input = read_bounded_utf8_input(
+                    std::io::stdin().lock(),
+                    MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES,
+                )
+                .context("reading source-bound corpus sync checkpoint from stdin")?;
+                let checkpoint = if input.trim().is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<corpus::ConversationSyncCheckpoint>(&input)
+                            .context("parsing source-bound corpus sync checkpoint JSON")?,
+                    )
+                };
+                let stdout = std::io::stdout();
+                let mut stdout = std::io::BufWriter::new(stdout.lock());
+                corpus::write_conversation_sync_transaction_json(
+                    &root,
+                    checkpoint.as_ref(),
+                    &mut stdout,
+                )?;
+                stdout
+                    .flush()
+                    .context("flushing source-bound corpus sync transaction JSON")?;
             }
             Some("export-sync-state") => {
                 let mut output = BoundedBuffer::new(MAX_CORPUS_SYNC_STATE_INPUT_BYTES);
@@ -1570,7 +1603,9 @@ USAGE:
   mirrarium corpus export-status-schema
   mirrarium corpus export-sync-state-schema
   mirrarium corpus export-sync-checkpoint-schema
+  mirrarium corpus export-sync-schema
   mirrarium corpus export-sync-checkpoint
+  mirrarium corpus export-sync
   mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta
