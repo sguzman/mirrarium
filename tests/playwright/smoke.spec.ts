@@ -1743,6 +1743,14 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const corpusVerify = JSON.parse(corpusVerifyStdout) as {
         sqlite_integrity_ok: boolean;
         foreign_key_violations: number;
+        stream_captures_checked: number;
+        stream_events_checked: number;
+        stream_message_revisions_checked: number;
+        conversation_snapshots_checked: number;
+        message_observations_checked: number;
+        stream_reconstructions_checked: number;
+        attachment_observations_checked: number;
+        attachment_downloads_checked: number;
         websocket_streams_checked: number;
         websocket_frames_checked: number;
         eventsource_streams_checked: number;
@@ -1750,14 +1758,32 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         raw_source_links_checked: number;
         errors: string[];
       };
+      const expectedRawSourceLinks =
+        corpusStats.stream_captures +
+        corpusStats.stream_message_revisions +
+        corpusStats.conversation_snapshots +
+        corpusStats.message_observations +
+        corpusStats.stream_reconstructions +
+        corpusStats.attachment_observations +
+        corpusStats.attachment_downloads +
+        corpusStats.websocket_frames +
+        corpusStats.eventsource_events;
       expect(corpusVerify).toEqual({
         sqlite_integrity_ok: true,
         foreign_key_violations: 0,
-        websocket_streams_checked: 1,
-        websocket_frames_checked: 2,
-        eventsource_streams_checked: 3,
-        eventsource_events_checked: 4,
-        raw_source_links_checked: 6,
+        stream_captures_checked: corpusStats.stream_captures,
+        stream_events_checked: corpusStats.stream_events,
+        stream_message_revisions_checked: corpusStats.stream_message_revisions,
+        conversation_snapshots_checked: corpusStats.conversation_snapshots,
+        message_observations_checked: corpusStats.message_observations,
+        stream_reconstructions_checked: corpusStats.stream_reconstructions,
+        attachment_observations_checked: corpusStats.attachment_observations,
+        attachment_downloads_checked: corpusStats.attachment_downloads,
+        websocket_streams_checked: corpusStats.websocket_streams,
+        websocket_frames_checked: corpusStats.websocket_frames,
+        eventsource_streams_checked: corpusStats.eventsource_streams,
+        eventsource_events_checked: corpusStats.eventsource_events,
+        raw_source_links_checked: expectedRawSourceLinks,
         errors: [],
       });
 
