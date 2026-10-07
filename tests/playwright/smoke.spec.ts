@@ -2450,6 +2450,68 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(String(error)).toContain("changed since the export index");
       }
       expect(staleExportRejected).toBe(true);
+
+      const canonicalBodyHash =
+        exportedConversation?.canonical?.basis_source_body_hash as string;
+      const canonicalObjectPath = join(
+        dataDir,
+        "private",
+        "objects",
+        canonicalBodyHash.slice(0, 2),
+        canonicalBodyHash,
+      );
+      const canonicalObjectBytes = await readFile(canonicalObjectPath);
+      let damagedCanonicalRejected = false;
+      try {
+        await writeFile(
+          canonicalObjectPath,
+          Buffer.from("intentional damaged canonical fixture", "utf8"),
+        );
+        try {
+          await execFileAsync(
+            cliPath,
+            [
+              "corpus",
+              "export-one",
+              "fixture-conversation",
+              exportedConversation?.record_sha256 as string,
+            ],
+            {
+              env: {
+                ...childEnv,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            },
+          );
+        } catch (error) {
+          damagedCanonicalRejected = true;
+          expect(String(error)).toContain("canonicalizing conversation");
+        }
+      } finally {
+        await writeFile(canonicalObjectPath, canonicalObjectBytes);
+      }
+      expect(damagedCanonicalRejected).toBe(true);
+
+      const { stdout: restoredConversationExportStdout } =
+        await execFileAsync(
+          cliPath,
+          [
+            "corpus",
+            "export-one",
+            "fixture-conversation",
+            exportedConversation?.record_sha256 as string,
+          ],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+      expect(restoredConversationExportStdout.trimEnd()).toBe(
+        exportedConversationLine,
+      );
+
       expect(exportedConversation?.canonical_error ?? null).toBeNull();
       expect(exportedConversation?.canonical?.basis_capture_id.length).toBeGreaterThan(0);
       expect(exportedConversation?.canonical?.basis_source_body_hash).toMatch(
