@@ -144,6 +144,7 @@ fn capture_body_mime_is_textual(mime_type: Option<&str>) -> bool {
         || essence == "application/xml"
         || essence.ends_with("+xml")
         || essence == "application/x-ndjson"
+        || essence == "application/x-www-form-urlencoded"
 }
 
 fn capture_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureSummary> {
@@ -3935,6 +3936,53 @@ mod tests {
             .capture_body_by_id("missing-capture", "response")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn capture_body_lookup_renders_sanitized_form_request_as_utf8() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let capture_id = "capture-form-body";
+        let mut item = metadata(
+            capture_id,
+            "https://chatgpt.com/backend-api/form",
+            "Fetch",
+        );
+        item.method = "POST".to_owned();
+        store.begin(item).unwrap();
+        store
+            .begin_request_body(
+                capture_id,
+                RequestBodyMetadata {
+                    content_type: Some(
+                        "application/x-www-form-urlencoded; charset=utf-8".to_owned(),
+                    ),
+                    has_post_data: true,
+                    post_data_entry_count: Some(1),
+                    declared_content_length: None,
+                },
+            )
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                capture_id,
+                0,
+                &BASE64.encode(b"message=hello&access_token=secret"),
+            )
+            .unwrap();
+        store.finish_request_body(capture_id, None).unwrap();
+        store
+            .finish(capture_id, Some(0), Some("fixture response unavailable"))
+            .unwrap();
+
+        let body = store
+            .capture_body_by_id(capture_id, "request")
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.encoding, "utf8");
+        assert!(body.data.contains("message=hello"));
+        assert!(body.data.contains("access_token=%5BREDACTED%5D"));
+        assert!(!body.data.contains("secret"));
     }
 
     #[test]
