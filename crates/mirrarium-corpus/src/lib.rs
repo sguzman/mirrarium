@@ -1370,7 +1370,7 @@ pub fn export_delta(
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
     let cached_index = conversation_export_index_records_for_connection(&corpus, -1)?;
-    let raw = open_raw_ledger_read_only(raw_root)?;
+    let mut raw: Option<Connection> = None;
 
     let mut current_ids = BTreeSet::new();
     let mut upserts = Vec::new();
@@ -1386,10 +1386,13 @@ pub fn export_delta(
         if state.records.get(&conversation_id).map(String::as_str)
             != Some(record_sha256.as_str())
         {
+            if raw.is_none() {
+                raw = Some(open_raw_ledger_read_only(raw_root)?);
+            }
             let record = conversation_export_record_for_connections(
                 raw_root,
                 &corpus,
-                &raw,
+                raw.as_ref().expect("raw ledger opened for sync upsert"),
                 conversation_id.clone(),
             )?;
             ensure_record_matches_cached_hash(&record, &record_sha256)?;

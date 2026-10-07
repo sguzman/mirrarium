@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -3612,6 +3612,81 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         { timeout: 10_000 },
       )
       .toBe(false);
+
+    const { stdout: closedWriterIndexStdout } = await execFileAsync(
+      cliPath,
+      ["corpus", "export-index"],
+      {
+        env: {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      },
+    );
+    const closedWriterIndex = closedWriterIndexStdout
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line)) as Array<{
+      conversation_id: string;
+      record_sha256: string;
+    }>;
+    const closedWriterSyncState = {
+      schema: "mirrarium.corpus.sync-state",
+      schema_version: 1,
+      records: Object.fromEntries(
+        closedWriterIndex.map((record) => [
+          record.conversation_id,
+          record.record_sha256,
+        ]),
+      ),
+    };
+
+    const rawLedgerPath = join(dataDir, "ledger.sqlite3");
+    const rawLedgerProbePath = join(dataDir, "ledger.sqlite3.delta-probe");
+    await rename(rawLedgerPath, rawLedgerProbePath);
+    try {
+      const { stdout: noRawNoChangeDeltaStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-delta"],
+        JSON.stringify(closedWriterSyncState),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const noRawNoChangeDelta = JSON.parse(noRawNoChangeDeltaStdout) as {
+        upserts: unknown[];
+        deleted_conversation_ids: string[];
+      };
+      expect(noRawNoChangeDelta.upserts).toEqual([]);
+      expect(noRawNoChangeDelta.deleted_conversation_ids).toEqual([]);
+
+      const staleWithoutRaw = {
+        ...closedWriterSyncState,
+        records: { ...closedWriterSyncState.records },
+      };
+      delete staleWithoutRaw.records["fixture-conversation"];
+
+      let missingRawUpsertRejected = false;
+      try {
+        await execFileWithInput(
+          cliPath,
+          ["corpus", "export-delta"],
+          JSON.stringify(staleWithoutRaw),
+          {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        );
+      } catch (error) {
+        missingRawUpsertRejected = true;
+        expect(String(error)).toContain("raw ledger");
+      }
+      expect(missingRawUpsertRejected).toBe(true);
+    } finally {
+      await rename(rawLedgerProbePath, rawLedgerPath);
+    }
 
     const pruneFixtureBytes = Buffer.from(
       "fixture orphan crash residue",
