@@ -100,7 +100,7 @@ mirrarium native-host install
 mirrarium native-host status
 ```
 
-`verify` re-hashes every indexed content-addressed object and checks its class/path and logical byte count. Private CAS objects are transparently decrypted before verification.
+`verify` re-hashes every indexed content-addressed object and checks its class/path and logical byte count. Private CAS objects are transparently decrypted before verification. It also scans the CAS trees for unindexed crash residue: well-formed orphan objects are reported separately by count and stored-on-disk bytes without failing verification, while malformed paths, files, symlinks, or unexpected nesting are reported as verification errors. Mirrarium never deletes orphan CAS objects automatically.
 
 `privacy status` reports the private-CAS key path, whether the key exists, and encrypted/legacy/missing private-object counts. New private response bodies and captured request bodies are stored as versioned XChaCha20-Poly1305 envelopes; the CAS key remains the SHA-256 of the decrypted logical bytes, so deduplication and provenance identities do not change. Existing plaintext private objects remain readable for backward compatibility until migrated.
 
