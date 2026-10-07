@@ -1197,12 +1197,18 @@ pub fn export_conversation(
     );
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
-    let connection = open_corpus_read_only(raw_root)?;
-    if conversation_summary(&connection, conversation_id)?.is_none() {
+    let corpus = open_corpus_read_only(raw_root)?;
+    if conversation_summary(&corpus, conversation_id)?.is_none() {
         return Ok(None);
     }
-    drop(connection);
-    conversation_export_record(raw_root, conversation_id.to_owned()).map(Some)
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    conversation_export_record_for_connections(
+        raw_root,
+        &corpus,
+        &raw,
+        conversation_id.to_owned(),
+    )
+    .map(Some)
 }
 
 pub fn export_conversations(
@@ -1268,9 +1274,9 @@ pub fn export_delta(
     validate_sync_state(state)?;
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
-    let connection = open_corpus_read_only(raw_root)?;
-    let conversation_ids = conversation_ids_for_connection(&connection, -1)?;
-    drop(connection);
+    let corpus = open_corpus_read_only(raw_root)?;
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    let conversation_ids = conversation_ids_for_connection(&corpus, -1)?;
 
     let mut current_ids = BTreeSet::new();
     let mut upserts = Vec::new();
@@ -1279,7 +1285,12 @@ pub fn export_delta(
 
     for conversation_id in conversation_ids {
         current_ids.insert(conversation_id.clone());
-        let record = conversation_export_record(raw_root, conversation_id.clone())?;
+        let record = conversation_export_record_for_connections(
+            raw_root,
+            &corpus,
+            &raw,
+            conversation_id.clone(),
+        )?;
         let index_line = conversation_export_index_line(&record)?;
         index_hasher.update(&index_line);
         if state.records.get(&conversation_id).map(String::as_str)
@@ -1390,38 +1401,18 @@ where
         None => -1,
     };
 
-    let connection = open_corpus_read_only(raw_root)?;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT conversation_id
-        FROM (
-            SELECT conversation_id
-            FROM conversation_snapshots
-            UNION
-            SELECT conversation_id
-            FROM message_observations
-            WHERE conversation_id IS NOT NULL
-            UNION
-            SELECT conversation_id
-            FROM stream_reconstructions
-            UNION
-            SELECT conversation_id
-            FROM stream_message_revisions
-            UNION
-            SELECT conversation_id
-            FROM attachment_observations
-            WHERE conversation_id IS NOT NULL
-        )
-        ORDER BY conversation_id
-        LIMIT ?1
-        "#,
-    )?;
-    let mut rows = statement.query([sql_limit])?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    let conversation_ids = conversation_ids_for_connection(&corpus, sql_limit)?;
     let mut written = 0_u64;
 
-    while let Some(row) = rows.next()? {
-        let conversation_id = row.get::<_, String>(0)?;
-        let record = conversation_export_record(raw_root, conversation_id)?;
+    for conversation_id in conversation_ids {
+        let record = conversation_export_record_for_connections(
+            raw_root,
+            &corpus,
+            &raw,
+            conversation_id,
+        )?;
         visit(record)?;
         written = written
             .checked_add(1)
@@ -1476,26 +1467,29 @@ fn conversation_export_record_sha256(
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
-fn conversation_export_record(
+fn conversation_export_record_for_connections(
     raw_root: &Path,
+    corpus: &Connection,
+    raw: &Connection,
     conversation_id: String,
 ) -> Result<ConversationExportRecord> {
-    let evidence = conversation(raw_root, &conversation_id, i64::MAX as u64)?
+    let evidence = conversation_for_connection(corpus, &conversation_id, -1)?
         .with_context(|| {
             format!(
                 "conversation {conversation_id:?} disappeared while exporting corpus"
             )
         })?;
-    let canonical = canonical(raw_root, &conversation_id).with_context(|| {
-        format!(
-            "canonicalizing conversation {conversation_id:?} while exporting corpus"
-        )
-    })?;
+    let canonical = canonical_for_connections(raw_root, corpus, raw, &conversation_id)
+        .with_context(|| {
+            format!(
+                "canonicalizing conversation {conversation_id:?} while exporting corpus"
+            )
+        })?;
     let canonical_error = None;
     let stream_revisions =
-        stream_message_revisions(raw_root, &conversation_id, i64::MAX as u64)?;
+        stream_message_revisions_for_connection(corpus, &conversation_id, -1)?;
     let attachments =
-        attachments(raw_root, Some(&conversation_id), i64::MAX as u64)?;
+        attachments_for_connection(corpus, Some(&conversation_id), -1)?;
     let source_capture_ids = export_source_capture_ids(
         &evidence,
         &canonical,
@@ -1536,6 +1530,7 @@ fn conversation_export_record(
     })
 }
 
+
 pub fn conversation(
     raw_root: impl AsRef<Path>,
     conversation_id: &str,
@@ -1549,9 +1544,18 @@ pub fn conversation(
         message_limit > 0,
         "message observation limit must be greater than zero"
     );
-
+    let limit = i64::try_from(message_limit)
+        .context("message observation limit is too large")?;
     let connection = open_corpus_read_only(raw_root)?;
-    let Some(summary) = conversation_summary(&connection, conversation_id)? else {
+    conversation_for_connection(&connection, conversation_id, limit)
+}
+
+fn conversation_for_connection(
+    connection: &Connection,
+    conversation_id: &str,
+    limit: i64,
+) -> Result<Option<ConversationView>> {
+    let Some(summary) = conversation_summary(connection, conversation_id)? else {
         return Ok(None);
     };
 
@@ -1573,7 +1577,7 @@ pub fn conversation(
         "#,
     )?;
     let messages = message_statement
-        .query_map(params![conversation_id, message_limit as i64], |row| {
+        .query_map(params![conversation_id, limit], |row| {
             Ok(MessageObservationView {
                 capture_id: row.get(0)?,
                 source_kind: row.get(1)?,
@@ -1587,7 +1591,7 @@ pub fn conversation(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let streams = stream_views_for_conversation(&connection, conversation_id)?;
+    let streams = stream_views_for_conversation(connection, conversation_id)?;
 
     Ok(Some(ConversationView {
         summary,
@@ -1608,8 +1612,9 @@ pub fn stream_message_revisions(
     );
     anyhow::ensure!(limit > 0, "stream revision limit must be greater than zero");
 
+    let limit = i64::try_from(limit).context("stream revision limit is too large")?;
     let connection = open_corpus_read_only(raw_root)?;
-    stream_message_revisions_for_connection(&connection, conversation_id, limit as i64)
+    stream_message_revisions_for_connection(&connection, conversation_id, limit)
 }
 
 fn stream_message_revisions_for_connection(
@@ -1658,8 +1663,16 @@ pub fn attachments(
     limit: u64,
 ) -> Result<Vec<AttachmentView>> {
     anyhow::ensure!(limit > 0, "attachment limit must be greater than zero");
+    let limit = i64::try_from(limit).context("attachment limit is too large")?;
     let connection = open_corpus_read_only(raw_root)?;
+    attachments_for_connection(&connection, conversation_id, limit)
+}
 
+fn attachments_for_connection(
+    connection: &Connection,
+    conversation_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<AttachmentView>> {
     let mut statement = connection.prepare(
         r#"
         SELECT
@@ -1681,7 +1694,7 @@ pub fn attachments(
         "#,
     )?;
     let observations = statement
-        .query_map(params![conversation_id, limit as i64], |row| {
+        .query_map(params![conversation_id, limit], |row| {
             Ok(AttachmentObservationView {
                 capture_id: row.get(0)?,
                 sequence: row.get::<_, i64>(1)? as u64,
@@ -1742,6 +1755,7 @@ pub fn attachments(
         .collect()
 }
 
+
 pub fn canonical(
     raw_root: impl AsRef<Path>,
     conversation_id: &str,
@@ -1752,8 +1766,18 @@ pub fn canonical(
     );
 
     let raw_root = raw_root.as_ref();
-    let connection = open_corpus_read_only(raw_root)?;
-    let snapshot = connection
+    let corpus = open_corpus_read_only(raw_root)?;
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    canonical_for_connections(raw_root, &corpus, &raw, conversation_id)
+}
+
+fn canonical_for_connections(
+    raw_root: &Path,
+    corpus: &Connection,
+    raw: &Connection,
+    conversation_id: &str,
+) -> Result<Option<CanonicalConversationView>> {
+    let snapshot = corpus
         .query_row(
             r#"
             SELECT
@@ -1803,16 +1827,15 @@ pub fn canonical(
         }
     }
 
-    let raw_connection = open_raw_ledger_read_only(raw_root)?;
-    let basis_order = capture_row_order(&raw_connection, &capture_id)?
+    let basis_order = capture_row_order(raw, &capture_id)?
         .context("canonical basis capture is missing from the raw ledger")?;
 
     let all_revisions =
-        stream_message_revisions_for_connection(&connection, conversation_id, -1)?;
+        stream_message_revisions_for_connection(corpus, conversation_id, -1)?;
     let mut revisions = Vec::new();
     let mut excluded_revision_count = 0_u64;
     for revision in all_revisions {
-        match capture_row_order(&raw_connection, &revision.capture_id)? {
+        match capture_row_order(raw, &revision.capture_id)? {
             Some(order) if order > basis_order => revisions.push(revision),
             _ => excluded_revision_count += 1,
         }
@@ -1827,12 +1850,12 @@ pub fn canonical(
         &revisions,
     ));
 
-    let all_streams = stream_views_for_conversation(&connection, conversation_id)?;
+    let all_streams = stream_views_for_conversation(corpus, conversation_id)?;
     let mut eligible_streams = Vec::new();
     let mut unlinked_streams = Vec::new();
     let mut excluded_stream_count = 0_u64;
     for stream in all_streams {
-        match capture_row_order(&raw_connection, &stream.capture_id)? {
+        match capture_row_order(raw, &stream.capture_id)? {
             Some(order) if order > basis_order => eligible_streams.push(stream),
             _ => {
                 excluded_stream_count += 1;
@@ -1871,6 +1894,7 @@ pub fn canonical(
         warnings,
     }))
 }
+
 
 fn stream_views_for_conversation(
     connection: &Connection,
