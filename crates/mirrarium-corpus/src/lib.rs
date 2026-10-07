@@ -316,6 +316,13 @@ pub struct ConversationSyncDelta {
     pub deleted_conversation_ids: Vec<String>,
 }
 
+#[derive(Debug)]
+struct ConversationSyncDeltaPlan {
+    manifest: ConversationExportManifest,
+    changed_records: Vec<(String, String)>,
+    deleted_conversation_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct ConversationExportHashPayload<'a> {
     schema: &'a str,
@@ -1397,20 +1404,15 @@ fn validate_sync_state(state: &ConversationSyncState) -> Result<()> {
     Ok(())
 }
 
-pub fn export_delta(
-    raw_root: impl AsRef<Path>,
+fn conversation_sync_delta_plan(
+    corpus: &Connection,
     state: &ConversationSyncState,
-) -> Result<ConversationSyncDelta> {
-    validate_sync_state(state)?;
-    let raw_root = raw_root.as_ref();
-    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
-    let corpus = open_corpus_read_only(raw_root)?;
-    let cached_index = conversation_export_index_records_for_connection(&corpus, -1)?;
-    let manifest = materialized_export_manifest_for_connection(&corpus)?;
-    let mut raw: Option<Connection> = None;
+) -> Result<ConversationSyncDeltaPlan> {
+    let cached_index = conversation_export_index_records_for_connection(corpus, -1)?;
+    let manifest = materialized_export_manifest_for_connection(corpus)?;
 
     let mut current_ids = BTreeSet::new();
-    let mut upserts = Vec::new();
+    let mut changed_records = Vec::new();
     let mut index_hasher = Sha256::new();
     let mut conversation_count = 0_u64;
 
@@ -1423,30 +1425,13 @@ pub fn export_delta(
         if state.records.get(&conversation_id).map(String::as_str)
             != Some(record_sha256.as_str())
         {
-            if raw.is_none() {
-                raw = Some(open_raw_ledger_read_only(raw_root)?);
-            }
-            let record = conversation_export_record_for_connections(
-                raw_root,
-                &corpus,
-                raw.as_ref().expect("raw ledger opened for sync upsert"),
-                conversation_id.clone(),
-            )?;
-            ensure_record_matches_cached_hash(&record, &record_sha256)?;
-            upserts.push(record);
+            changed_records.push((conversation_id, record_sha256));
         }
 
         conversation_count = conversation_count
             .checked_add(1)
             .context("sync delta conversation count overflow")?;
     }
-
-    let deleted_conversation_ids = state
-        .records
-        .keys()
-        .filter(|conversation_id| !current_ids.contains(*conversation_id))
-        .cloned()
-        .collect();
 
     let computed_index_sha256 = format!("{:x}", index_hasher.finalize());
     anyhow::ensure!(
@@ -1455,6 +1440,46 @@ pub fn export_delta(
         "materialized export manifest disagrees with conversation export index; run 'mirrarium corpus verify' or 'mirrarium corpus rebuild'"
     );
 
+    let deleted_conversation_ids = state
+        .records
+        .keys()
+        .filter(|conversation_id| !current_ids.contains(*conversation_id))
+        .cloned()
+        .collect();
+
+    Ok(ConversationSyncDeltaPlan {
+        manifest,
+        changed_records,
+        deleted_conversation_ids,
+    })
+}
+
+pub fn export_delta(
+    raw_root: impl AsRef<Path>,
+    state: &ConversationSyncState,
+) -> Result<ConversationSyncDelta> {
+    validate_sync_state(state)?;
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let plan = conversation_sync_delta_plan(&corpus, state)?;
+    let mut raw: Option<Connection> = None;
+    let mut upserts = Vec::with_capacity(plan.changed_records.len());
+
+    for (conversation_id, record_sha256) in &plan.changed_records {
+        if raw.is_none() {
+            raw = Some(open_raw_ledger_read_only(raw_root)?);
+        }
+        let record = conversation_export_record_for_connections(
+            raw_root,
+            &corpus,
+            raw.as_ref().expect("raw ledger opened for sync upsert"),
+            conversation_id.clone(),
+        )?;
+        ensure_record_matches_cached_hash(&record, record_sha256)?;
+        upserts.push(record);
+    }
+
     Ok(ConversationSyncDelta {
         schema: "mirrarium.corpus.sync-delta".to_owned(),
         schema_version: CORPUS_SYNC_DELTA_SCHEMA_VERSION,
@@ -1462,10 +1487,70 @@ pub fn export_delta(
         conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
         producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
         record_type: "sync-delta".to_owned(),
-        manifest,
+        manifest: plan.manifest,
         upserts,
-        deleted_conversation_ids,
+        deleted_conversation_ids: plan.deleted_conversation_ids,
     })
+}
+
+pub fn write_conversation_sync_delta_json<W: Write>(
+    raw_root: impl AsRef<Path>,
+    state: &ConversationSyncState,
+    writer: &mut W,
+) -> Result<()> {
+    validate_sync_state(state)?;
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let plan = conversation_sync_delta_plan(&corpus, state)?;
+
+    write!(
+        writer,
+        "{{\"schema\":\"mirrarium.corpus.sync-delta\",\"schema_version\":{},\"sync_state_schema_version\":{},\"conversation_schema_version\":{},\"producer_corpus_schema_version\":{},\"record_type\":\"sync-delta\",\"manifest\":",
+        CORPUS_SYNC_DELTA_SCHEMA_VERSION,
+        CORPUS_SYNC_STATE_SCHEMA_VERSION,
+        CORPUS_EXPORT_SCHEMA_VERSION,
+        CORPUS_SCHEMA_VERSION,
+    )
+    .context("writing corpus sync-delta header")?;
+    serde_json::to_writer(&mut *writer, &plan.manifest)
+        .context("serializing corpus sync-delta manifest")?;
+    writer
+        .write_all(b",\"upserts\":[")
+        .context("writing corpus sync-delta upsert prefix")?;
+
+    let mut raw: Option<Connection> = None;
+    for (index, (conversation_id, record_sha256)) in
+        plan.changed_records.iter().enumerate()
+    {
+        if index > 0 {
+            writer
+                .write_all(b",")
+                .context("writing corpus sync-delta upsert separator")?;
+        }
+        if raw.is_none() {
+            raw = Some(open_raw_ledger_read_only(raw_root)?);
+        }
+        let record = conversation_export_record_for_connections(
+            raw_root,
+            &corpus,
+            raw.as_ref().expect("raw ledger opened for sync upsert"),
+            conversation_id.clone(),
+        )?;
+        ensure_record_matches_cached_hash(&record, record_sha256)?;
+        serde_json::to_writer(&mut *writer, &record)
+            .context("serializing corpus sync-delta upsert")?;
+    }
+
+    writer
+        .write_all(b"],\"deleted_conversation_ids\":")
+        .context("writing corpus sync-delta deletion prefix")?;
+    serde_json::to_writer(&mut *writer, &plan.deleted_conversation_ids)
+        .context("serializing corpus sync-delta deletions")?;
+    writer
+        .write_all(b"}\n")
+        .context("writing corpus sync-delta terminator")?;
+    Ok(())
 }
 
 pub fn export_manifest(raw_root: impl AsRef<Path>) -> Result<ConversationExportManifest> {
