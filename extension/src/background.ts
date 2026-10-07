@@ -944,6 +944,7 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
     await chrome.debugger.sendCommand({ tabId }, "Network.enable", {
       maxResourceBufferSize: CDP_MAX_RESOURCE_BUFFER_BYTES,
       maxTotalBufferSize: CDP_MAX_TOTAL_BUFFER_BYTES,
+      enableDurableMessages: true,
     });
     fetchSetupTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Fetch.enable", {
