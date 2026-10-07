@@ -2837,6 +2837,30 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(damagedNoChangeDelta.upserts).toEqual([]);
         expect(damagedNoChangeDelta.deleted_conversation_ids).toEqual([]);
 
+        let damagedStaleExpectedRejected = false;
+        try {
+          await execFileAsync(
+            cliPath,
+            [
+              "corpus",
+              "export-one",
+              "fixture-conversation",
+              "0".repeat(64),
+            ],
+            {
+              env: {
+                ...childEnv,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            },
+          );
+        } catch (error) {
+          damagedStaleExpectedRejected = true;
+          expect(String(error)).toContain("changed since the export index");
+          expect(String(error)).not.toContain("canonicalizing conversation");
+        }
+        expect(damagedStaleExpectedRejected).toBe(true);
+
         let damagedUpsertRejected = false;
         try {
           await execFileWithInput(

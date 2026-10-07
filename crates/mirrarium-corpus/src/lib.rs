@@ -1216,10 +1216,28 @@ pub fn export_conversation(
     raw_root: impl AsRef<Path>,
     conversation_id: &str,
 ) -> Result<Option<ConversationExportRecord>> {
+    export_conversation_checked(raw_root, conversation_id, None)
+}
+
+pub fn export_conversation_checked(
+    raw_root: impl AsRef<Path>,
+    conversation_id: &str,
+    expected_record_sha256: Option<&str>,
+) -> Result<Option<ConversationExportRecord>> {
     anyhow::ensure!(
         !conversation_id.trim().is_empty(),
         "conversation id must not be empty"
     );
+    if let Some(expected) = expected_record_sha256 {
+        anyhow::ensure!(
+            expected.len() == 64
+                && expected
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "expected record SHA-256 must be 64 lowercase hexadecimal characters"
+        );
+    }
+
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
@@ -1233,6 +1251,14 @@ pub fn export_conversation(
     let Some(cached_hash) = cached_hash else {
         return Ok(None);
     };
+
+    if let Some(expected) = expected_record_sha256 {
+        anyhow::ensure!(
+            cached_hash == expected,
+            "conversation {conversation_id:?} changed since the export index: expected record SHA-256 {expected}, current {cached_hash}; refresh corpus export-manifest/export-index"
+        );
+    }
+
     let raw = open_raw_ledger_read_only(raw_root)?;
     let record = conversation_export_record_for_connections(
         raw_root,

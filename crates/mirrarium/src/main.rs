@@ -308,15 +308,12 @@ fn run() -> Result<()> {
                         "expected record SHA-256 must be 64 lowercase hexadecimal characters"
                     );
                 }
-                let record = corpus::export_conversation(&root, conversation_id)?
-                    .with_context(|| format!("conversation {conversation_id:?} not found"))?;
-                if let Some(expected) = expected_record_sha256 {
-                    anyhow::ensure!(
-                        record.record_sha256 == expected,
-                        "conversation {conversation_id:?} changed since the export index: expected record SHA-256 {expected}, current {}; refresh corpus export-manifest/export-index",
-                        record.record_sha256
-                    );
-                }
+                let record = corpus::export_conversation_checked(
+                    &root,
+                    conversation_id,
+                    expected_record_sha256,
+                )?
+                .with_context(|| format!("conversation {conversation_id:?} not found"))?;
                 println!("{}", serde_json::to_string(&record)?);
             }
             Some("export") => {
