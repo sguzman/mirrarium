@@ -1098,6 +1098,7 @@ pub fn export_conversations(
     limit: Option<u64>,
 ) -> Result<Vec<ConversationExportRecord>> {
     let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     if let Some(limit) = limit {
         anyhow::ensure!(limit > 0, "export limit must be greater than zero");
     }
@@ -4496,6 +4497,44 @@ impl Drop for CorpusRebuildLock {
     }
 }
 
+#[derive(Debug)]
+struct CorpusExportLock {
+    file: fs::File,
+}
+
+impl Drop for CorpusExportLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn acquire_corpus_export_lock(derived_root: &Path) -> Result<CorpusExportLock> {
+    let lock_path = derived_root.join(".rebuild.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "opening corpus generation lock {}; run 'mirrarium corpus rebuild' if it is missing",
+                lock_path.display()
+            )
+        })?;
+    harden_file(&lock_path)?;
+
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(CorpusExportLock { file }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            anyhow::bail!(
+                "a 'mirrarium corpus rebuild' is active for {}; retry export after it completes",
+                derived_root.display()
+            )
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("locking corpus generation {}", lock_path.display())),
+    }
+}
+
 fn acquire_corpus_rebuild_lock(derived_root: &Path) -> Result<CorpusRebuildLock> {
     let lock_path = derived_root.join(".rebuild.lock");
     let file = fs::OpenOptions::new()
@@ -4990,6 +5029,26 @@ mod tests {
         assert_eq!(collect_sources(&snapshot, query).unwrap().len(), 1);
         snapshot.commit().unwrap();
         assert_eq!(collect_sources(&reader, query).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn corpus_export_lock_pins_generation_against_rebuild() {
+        let directory = tempfile::tempdir().unwrap();
+        let derived_root = directory.path().join("derived");
+        fs::create_dir_all(&derived_root).unwrap();
+
+        let seed = acquire_corpus_rebuild_lock(&derived_root).unwrap();
+        drop(seed);
+
+        let first_reader = acquire_corpus_export_lock(&derived_root).unwrap();
+        let second_reader = acquire_corpus_export_lock(&derived_root).unwrap();
+        let writer = acquire_corpus_rebuild_lock(&derived_root);
+        assert!(writer.is_err());
+
+        drop(second_reader);
+        drop(first_reader);
+        let writer = acquire_corpus_rebuild_lock(&derived_root).unwrap();
+        drop(writer);
     }
 
     #[test]
