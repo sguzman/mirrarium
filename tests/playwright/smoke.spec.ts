@@ -1451,6 +1451,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         );
       }
 
+      const oversizedResponseCapture = captures.find(
+        (capture) =>
+          capture.method === "GET" &&
+          capture.url.includes("/backend-api/oversized-response-fixture"),
+      );
+      expect(oversizedResponseCapture).toBeTruthy();
+      expect(oversizedResponseCapture?.body_hash).toBeFalsy();
+      expect(oversizedResponseCapture?.body_bytes).toBe(0);
+      expect(oversizedResponseCapture?.body_error).toBe(
+        "suppressed:response_body_too_large",
+      );
+
       const websocketSent = captures.find(
         (capture) =>
           capture.method === "WS_SEND" &&

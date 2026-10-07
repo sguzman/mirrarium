@@ -25,6 +25,7 @@ let privateQueryConditional304s = 0;
 let privateDocumentHits = 0;
 let privateDocumentConditional304s = 0;
 let eventSourceReconnectHits = 0;
+const oversizedResponseBody = Buffer.alloc(16 * 1024 * 1024 + 1, 0x78);
 
 execFileSync("openssl", [
   "req",
@@ -160,6 +161,9 @@ Promise.all([
   fetch("/backend-api/head-fixture", { method: "HEAD" }).then((response) =>
     response.text(),
   ),
+  fetch("/backend-api/oversized-response-fixture")
+    .then((response) => response.arrayBuffer())
+    .then((body) => body.byteLength),
   fetch("/backend-api/upload-fixture", {
     method: "POST",
     body: (() => {
@@ -496,6 +500,16 @@ const fixtureServer = https.createServer(
           response.socket?.destroy();
         }, 50);
       });
+      return;
+    }
+
+    if (request.url === "/backend-api/oversized-response-fixture") {
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "cache-control": "no-store",
+        "content-length": String(oversizedResponseBody.length),
+      });
+      response.end(oversizedResponseBody);
       return;
     }
 
