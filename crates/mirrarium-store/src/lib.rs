@@ -269,7 +269,7 @@ impl CaptureStore {
         connection.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
+            PRAGMA synchronous = FULL;
             PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS objects (
@@ -4256,6 +4256,18 @@ mod tests {
         assert_eq!(abandoned.inflight_capture_files, 0);
         assert_eq!(abandoned.abandoned_capture_files, 1);
         assert!(abandoned.cleanup_on_next_writer_start);
+    }
+
+    #[test]
+    fn writable_raw_ledger_uses_full_synchronous_durability() {
+        let directory = tempdir().unwrap();
+        let writer = CaptureStore::open(directory.path()).unwrap();
+
+        let synchronous: i64 = writer
+            .connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
     }
 
     #[test]
