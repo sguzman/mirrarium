@@ -101,6 +101,7 @@ Implemented:
 - native-host process-kill recovery proof over the SQLCipher/WAL raw store: a fully committed capture survives daemon death, an in-flight capture leaves only purgeable staging, and the restarted writer accepts a new capture without duplicating or losing the committed evidence;
 - sanitized transport provenance: request/response headers, frame and loader identity, initiator, wall-clock timing, response protocol, and browser-cache/service-worker/prefetch signals;
 - redirect-chain preservation with stable lifecycle IDs, hop numbers, and sanitized previous-URL provenance, including Chromium proof that POST→307→POST keeps the sanitized request body associated with both hops while POST→303→GET does not leak the prior body onto the GET hop;
+- mirrored ordinary-body resource ceilings: request and response bodies are capped at 16 MiB in both the extension and Rust archive; oversized responses are suppressed before `Network.getResponseBody` when Chromium's transferred size already proves overflow and are rechecked by actual decoded size otherwise, while oversized requests are rejected before sanitizer/chunk transport; archive-side enforcement guarantees no partial oversized body reaches CAS;
 - outbound JSON/form request-body capture with extension + daemon secret filtering;
 - metadata-only multipart/upload provenance without raw form/file archival;
 - completed response-body extraction;
