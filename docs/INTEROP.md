@@ -37,6 +37,8 @@ The export schema version is independent of Mirrarium's internal SQLite schema v
 
 For a fixed published corpus generation, repeated exports are byte-for-byte deterministic. `record_sha256` therefore gives downstream consumers an idempotent content identity for each conversation record; a consumer can key updates by `conversation_id` and skip work when the hash is unchanged.
 
+Internal corpus schema v5 materializes those exact v1 record hashes during `corpus rebuild`. The candidate generation computes each hash from the full record while the rebuild's coherent raw snapshot is pinned, then recomputes every record and verifies the materialized index before publication. `corpus verify` repeats that consistency check. The cache is therefore a rebuildable performance index, not a second authority.
+
 ### v1 record hash verification
 
 A consumer can verify `record_sha256` without parsing and reserializing JSON:
@@ -69,6 +71,8 @@ The sync-state v1 contract is `schemas/mirrarium-corpus-sync-state-v1.schema.jso
 For a first import, send an empty `records` object. For subsequent imports, `records` should describe the consumer's currently committed conversation state.
 
 The sync-delta v1 contract is `schemas/mirrarium-corpus-sync-delta-v1.schema.json` and is emitted by `mirrarium corpus export-delta-schema`. Its `manifest` is the authoritative manifest for the same pinned generation; `upserts` contains every current conversation whose hash is absent or different in the supplied state; and `deleted_conversation_ids` contains supplied IDs that no longer exist in the current export universe. Both arrays are deterministic in conversation-ID order.
+
+Manifest and index generation read only the verified materialized ID→hash index. `export-delta` likewise compares the supplied state against that index first and constructs full conversation records only for actual upserts. An unchanged sync therefore avoids canonical snapshot decryption/parsing and attachment/revision assembly for every conversation. Operations that emit a full record still reconstruct it and require its computed hash to equal the materialized hash; structural CAS/JSON damage therefore fails `export-one`, full export, or a changed-record delta even though a no-change manifest/index/delta can still report the last verified published identity.
 
 A consumer should apply the delta atomically: stage all `upserts`, remove the explicit deleted IDs, then persist the resulting ID→`record_sha256` map and the returned manifest fingerprint together. If the command fails, apply nothing. Because the entire response is generated under one shared generation lock, no second manifest recheck is needed for this one-command path.
 
