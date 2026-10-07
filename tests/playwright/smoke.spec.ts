@@ -2598,6 +2598,28 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         }),
       ).toBe(false);
 
+      const { stdout: corpusSyncCheckpointSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-checkpoint-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSyncCheckpointSchema = JSON.parse(
+        corpusSyncCheckpointSchemaStdout,
+      );
+      const syncCheckpointAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      syncCheckpointAjv.addSchema(corpusExportManifestSchema);
+      syncCheckpointAjv.addSchema(corpusSyncStateSchema);
+      const validateCorpusSyncCheckpoint =
+        syncCheckpointAjv.compile(corpusSyncCheckpointSchema);
+
       const { stdout: corpusSyncDeltaSchemaStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-delta-schema"],
@@ -2639,6 +2661,31 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           deleted_conversation_ids: ["   "],
         }),
       ).toBe(false);
+
+      const { stdout: corpusSyncTransactionSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSyncTransactionSchema = JSON.parse(
+        corpusSyncTransactionSchemaStdout,
+      );
+      const syncTransactionAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      syncTransactionAjv.addSchema(corpusExportSchema);
+      syncTransactionAjv.addSchema(corpusExportManifestSchema);
+      syncTransactionAjv.addSchema(corpusSyncStateSchema);
+      syncTransactionAjv.addSchema(corpusSyncCheckpointSchema);
+      syncTransactionAjv.addSchema(corpusSyncDeltaSchema);
+      const validateCorpusSyncTransaction =
+        syncTransactionAjv.compile(corpusSyncTransactionSchema);
 
       const exportHashVector = JSON.parse(
         await readFile(
@@ -2945,6 +2992,123 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(currentSyncDelta.manifest).toEqual(exportManifest);
       expect(currentSyncDelta.upserts).toEqual([]);
       expect(currentSyncDelta.deleted_conversation_ids).toEqual([]);
+
+      const { stdout: currentCheckpointStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-checkpoint"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const currentCheckpoint = JSON.parse(currentCheckpointStdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        archive_id: string;
+        manifest: typeof exportManifest;
+        sync_state: typeof currentSyncState;
+      };
+      expect(
+        validateCorpusSyncCheckpoint(currentCheckpoint),
+        JSON.stringify(validateCorpusSyncCheckpoint.errors),
+      ).toBe(true);
+      expect(currentCheckpoint.archive_id).toBe(exportSource.archive_id);
+      expect(currentCheckpoint.manifest).toEqual(exportManifest);
+      expect(currentCheckpoint.sync_state).toEqual(currentSyncState);
+
+      const { stdout: bootstrapSyncStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync"],
+        "",
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const bootstrapSync = JSON.parse(bootstrapSyncStdout) as {
+        archive_id: string;
+        delta: typeof emptySyncDelta;
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(
+        validateCorpusSyncTransaction(bootstrapSync),
+        JSON.stringify(validateCorpusSyncTransaction.errors),
+      ).toBe(true);
+      expect(bootstrapSync.archive_id).toBe(exportSource.archive_id);
+      expect(bootstrapSync.delta).toEqual(emptySyncDelta);
+      expect(bootstrapSync.checkpoint).toEqual(currentCheckpoint);
+
+      const { stdout: noopBoundSyncStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync"],
+        JSON.stringify(currentCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const noopBoundSync = JSON.parse(noopBoundSyncStdout) as {
+        archive_id: string;
+        delta: typeof currentSyncDelta;
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(
+        validateCorpusSyncTransaction(noopBoundSync),
+        JSON.stringify(validateCorpusSyncTransaction.errors),
+      ).toBe(true);
+      expect(noopBoundSync.archive_id).toBe(exportSource.archive_id);
+      expect(noopBoundSync.delta).toEqual(currentSyncDelta);
+      expect(noopBoundSync.checkpoint).toEqual(currentCheckpoint);
+
+      const wrongArchiveCheckpoint = {
+        ...currentCheckpoint,
+        archive_id:
+          exportSource.archive_id === "0".repeat(64)
+            ? "1".repeat(64)
+            : "0".repeat(64),
+      };
+      const wrongArchiveSync = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync"],
+        JSON.stringify(wrongArchiveCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(wrongArchiveSync.code).not.toBe(0);
+      expect(wrongArchiveSync.stdout).toBe("");
+      expect(wrongArchiveSync.stderr).toContain(
+        "refuse cross-archive synchronization",
+      );
+
+      const tornCheckpoint = {
+        ...currentCheckpoint,
+        manifest: {
+          ...currentCheckpoint.manifest,
+          index_sha256:
+            currentCheckpoint.manifest.index_sha256 === "0".repeat(64)
+              ? "1".repeat(64)
+              : "0".repeat(64),
+        },
+      };
+      const tornCheckpointSync = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync"],
+        JSON.stringify(tornCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(tornCheckpointSync.code).not.toBe(0);
+      expect(tornCheckpointSync.stdout).toBe("");
+      expect(tornCheckpointSync.stderr).toContain(
+        "manifest index SHA-256 disagrees",
+      );
 
       const staleSyncRecords = { ...currentSyncState.records };
       delete staleSyncRecords["fixture-conversation"];
