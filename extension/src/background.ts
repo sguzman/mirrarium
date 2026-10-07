@@ -3,6 +3,8 @@ const CDP_VERSION = "1.3";
 const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
+const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_WEBSOCKET_JSON_FRAME_BYTES = 1024 * 1024;
 const MAX_EVENTSOURCE_MESSAGE_BYTES = 1024 * 1024;
 const RUNNING_BUILD_ID =
@@ -1405,12 +1407,34 @@ async function captureRequestBody(
     return;
   }
 
+  if (
+    (request.declaredContentLength !== undefined &&
+      request.declaredContentLength > MAX_REQUEST_BODY_BYTES) ||
+    utf8ByteLength(body) > MAX_REQUEST_BODY_BYTES
+  ) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "suppressed:request_body_too_large",
+    });
+    return;
+  }
+
   const sanitized = sanitizeRequestBody(body, request.contentType);
   if (sanitized.error || sanitized.body === undefined) {
     postNative({
       type: "request_body_finish",
       capture_id: captureId,
       body_error: sanitized.error ?? "request body sanitizer failed",
+    });
+    return;
+  }
+
+  if (utf8ByteLength(sanitized.body) > MAX_REQUEST_BODY_BYTES) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "suppressed:request_body_too_large",
     });
     return;
   }
@@ -1459,6 +1483,19 @@ function utf8ByteLength(value: string): number {
     }
   }
   return bytes;
+}
+
+function base64DecodedByteLength(value: string): number | undefined {
+  if (value.length === 0) return 0;
+  if (value.length % 4 !== 0) return undefined;
+
+  let padding = 0;
+  if (value.endsWith("==")) {
+    padding = 2;
+  } else if (value.endsWith("=")) {
+    padding = 1;
+  }
+  return (value.length / 4) * 3 - padding;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -1844,12 +1881,45 @@ async function captureBody(
     return;
   }
 
+  const normalizedEncodedDataLength =
+    encodedDataLength === undefined
+      ? undefined
+      : Math.max(0, Math.trunc(encodedDataLength));
+  if (
+    normalizedEncodedDataLength !== undefined &&
+    normalizedEncodedDataLength > MAX_RESPONSE_BODY_BYTES
+  ) {
+    postNative({
+      type: "capture_finish",
+      capture_id: captureId,
+      encoded_data_length: normalizedEncodedDataLength,
+      body_error: "suppressed:response_body_too_large",
+    });
+    return;
+  }
+
   try {
     const result = (await chrome.debugger.sendCommand(
       { tabId },
       "Network.getResponseBody",
       { requestId },
     )) as { body: string; base64Encoded: boolean };
+
+    const actualBodyBytes = result.base64Encoded
+      ? base64DecodedByteLength(result.body)
+      : utf8ByteLength(result.body);
+    if (
+      actualBodyBytes !== undefined &&
+      actualBodyBytes > MAX_RESPONSE_BODY_BYTES
+    ) {
+      postNative({
+        type: "capture_finish",
+        capture_id: captureId,
+        encoded_data_length: normalizedEncodedDataLength,
+        body_error: "suppressed:response_body_too_large",
+      });
+      return;
+    }
 
     if (result.base64Encoded) {
       postBase64Body(captureId, result.body);
@@ -1860,20 +1930,14 @@ async function captureBody(
     postNative({
       type: "capture_finish",
       capture_id: captureId,
-      encoded_data_length:
-        encodedDataLength === undefined
-          ? undefined
-          : Math.max(0, Math.trunc(encodedDataLength)),
+      encoded_data_length: normalizedEncodedDataLength,
       body_error: null,
     });
   } catch (error) {
     postNative({
       type: "capture_finish",
       capture_id: captureId,
-      encoded_data_length:
-        encodedDataLength === undefined
-          ? undefined
-          : Math.max(0, Math.trunc(encodedDataLength)),
+      encoded_data_length: normalizedEncodedDataLength,
       body_error: String(error),
     });
   }
