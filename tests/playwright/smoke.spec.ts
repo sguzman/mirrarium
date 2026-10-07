@@ -1163,6 +1163,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         status: number;
         mime_type: string;
         resource_type: string;
+        privacy_class: string;
         request_body_kind?: string;
         request_body_content_type?: string;
         request_body_has_post_data?: boolean;
@@ -1786,6 +1787,76 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         raw_source_links_checked: expectedRawSourceLinks,
         errors: [],
       });
+
+      const rebuildFailureCapture = captures.find(
+        (capture) =>
+          capture.method === "GET" &&
+          capture.url.includes("/backend-api/conversation/test") &&
+          capture.privacy_class === "private" &&
+          !!capture.body_hash &&
+          !capture.body_error,
+      );
+      expect(rebuildFailureCapture?.body_hash).toMatch(/^[0-9a-f]{64}$/);
+      const rebuildFailureHash = rebuildFailureCapture?.body_hash as string;
+      const rebuildFailureObjectPath = join(
+        dataDir,
+        "private",
+        "objects",
+        rebuildFailureHash.slice(0, 2),
+        rebuildFailureHash,
+      );
+      const publishedCorpusPath = join(dataDir, "derived", "corpus.sqlite3");
+      const publishedCorpusBeforeFailedRebuild = await readFile(publishedCorpusPath);
+      const rawObjectBeforeFailure = await readFile(rebuildFailureObjectPath);
+
+      let failedRebuildObserved = false;
+      try {
+        await writeFile(
+          rebuildFailureObjectPath,
+          Buffer.from("intentional corpus rebuild failure", "utf8"),
+        );
+        try {
+          await execFileAsync(cliPath, ["corpus", "rebuild"], {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          });
+        } catch {
+          failedRebuildObserved = true;
+        }
+      } finally {
+        await writeFile(rebuildFailureObjectPath, rawObjectBeforeFailure);
+      }
+      expect(failedRebuildObserved).toBe(true);
+      expect(
+        (await readFile(publishedCorpusPath)).equals(
+          publishedCorpusBeforeFailedRebuild,
+        ),
+      ).toBe(true);
+      expect(await readdir(join(dataDir, "derived"))).not.toContain(
+        ".corpus.sqlite3.rebuild",
+      );
+
+      const { stdout: corpusStatsAfterFailedRebuildStdout } =
+        await execFileAsync(cliPath, ["corpus", "stats"], {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        });
+      expect(JSON.parse(corpusStatsAfterFailedRebuildStdout)).toEqual(corpusStats);
+
+      const { stdout: corpusVerifyAfterFailedRebuildStdout } =
+        await execFileAsync(cliPath, ["corpus", "verify"], {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        });
+      expect(JSON.parse(corpusVerifyAfterFailedRebuildStdout)).toEqual(
+        corpusVerify,
+      );
 
       const { stdout: webSocketStreamsStdout } = await execFileAsync(
         cliPath,
