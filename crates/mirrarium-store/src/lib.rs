@@ -115,6 +115,37 @@ pub struct CaptureSummary {
     pub provenance: CaptureProvenance,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CaptureBodyView {
+    pub capture_id: String,
+    pub body_kind: String,
+    pub storage_class: String,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    pub mime_type: Option<String>,
+    pub encoding: String,
+    pub data: String,
+}
+
+fn capture_body_mime_is_textual(mime_type: Option<&str>) -> bool {
+    let Some(mime_type) = mime_type else {
+        return false;
+    };
+    let essence = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    essence.starts_with("text/")
+        || essence == "application/json"
+        || essence.ends_with("+json")
+        || essence == "application/javascript"
+        || essence == "application/xml"
+        || essence.ends_with("+xml")
+        || essence == "application/x-ndjson"
+}
+
 fn capture_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureSummary> {
     Ok(CaptureSummary {
         capture_id: row.get(0)?,
@@ -1252,6 +1283,73 @@ impl CaptureStore {
             Some(row) => Ok(Some(capture_summary_from_row(row)?)),
             None => Ok(None),
         }
+    }
+
+    pub fn capture_body_by_id(
+        &self,
+        capture_id: &str,
+        body_kind: &str,
+    ) -> Result<Option<CaptureBodyView>> {
+        let capture = match self.capture_by_id(capture_id)? {
+            Some(capture) => capture,
+            None => return Ok(None),
+        };
+
+        let (storage_class, body_hash, expected_bytes, mime_type) = match body_kind {
+            "response" => {
+                let Some(body_hash) = capture.body_hash.clone() else {
+                    return Ok(None);
+                };
+                (
+                    capture.privacy_class.clone(),
+                    body_hash,
+                    capture.body_bytes,
+                    Some(capture.mime_type.clone()),
+                )
+            }
+            "request" => {
+                let Some(body_hash) = capture.request_body_hash.clone() else {
+                    return Ok(None);
+                };
+                (
+                    PrivacyClass::Private.as_str().to_owned(),
+                    body_hash,
+                    capture.request_body_bytes,
+                    capture.request_body_content_type.clone(),
+                )
+            }
+            other => anyhow::bail!(
+                "unknown capture body kind {other:?}; use response or request"
+            ),
+        };
+
+        let bytes = read_verified_object(&self.root, &storage_class, &body_hash)?;
+        anyhow::ensure!(
+            bytes.len() as u64 == expected_bytes,
+            "{body_kind} body byte count mismatch for capture {capture_id:?}: ledger={expected_bytes}, object={}",
+            bytes.len()
+        );
+
+        let textual = capture_body_mime_is_textual(mime_type.as_deref());
+        let (encoding, data) = if textual {
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => ("utf8".to_owned(), text.to_owned()),
+                Err(_) => ("base64".to_owned(), BASE64.encode(&bytes)),
+            }
+        } else {
+            ("base64".to_owned(), BASE64.encode(&bytes))
+        };
+
+        Ok(Some(CaptureBodyView {
+            capture_id: capture.capture_id,
+            body_kind: body_kind.to_owned(),
+            storage_class,
+            body_hash,
+            body_bytes: expected_bytes,
+            mime_type,
+            encoding,
+            data,
+        }))
     }
 
     pub fn verify(&self) -> Result<VerifyReport> {
@@ -3769,6 +3867,74 @@ mod tests {
             "Script",
         );
         assert_eq!(classify(&public_item), PrivacyClass::Public);
+    }
+
+    #[test]
+    fn capture_body_lookup_returns_utf8_response_and_redacted_request() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let capture_id = "capture-body-lookup";
+        let mut item = metadata(
+            capture_id,
+            "https://chatgpt.com/backend-api/conversation",
+            "Fetch",
+        );
+        item.method = "POST".to_owned();
+        store.begin(item).unwrap();
+        store
+            .begin_request_body(
+                capture_id,
+                RequestBodyMetadata {
+                    content_type: Some("application/json; charset=utf-8".to_owned()),
+                    has_post_data: true,
+                    post_data_entry_count: Some(1),
+                    declared_content_length: Some(73),
+                },
+            )
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                capture_id,
+                0,
+                &BASE64.encode(
+                    br#"{"message":"inspect me","access_token":"fixture-secret"}"#,
+                ),
+            )
+            .unwrap();
+        store.finish_request_body(capture_id, None).unwrap();
+
+        let response = br#"{"ok":true,"message":"response body"}"#;
+        store
+            .append_chunk(capture_id, 0, &BASE64.encode(response))
+            .unwrap();
+        store
+            .finish(capture_id, Some(response.len() as u64), None)
+            .unwrap();
+
+        let response_view = store
+            .capture_body_by_id(capture_id, "response")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response_view.body_kind, "response");
+        assert_eq!(response_view.storage_class, "private");
+        assert_eq!(response_view.encoding, "utf8");
+        assert_eq!(response_view.data, std::str::from_utf8(response).unwrap());
+
+        let request_view = store
+            .capture_body_by_id(capture_id, "request")
+            .unwrap()
+            .unwrap();
+        assert_eq!(request_view.body_kind, "request");
+        assert_eq!(request_view.storage_class, "private");
+        assert_eq!(request_view.encoding, "utf8");
+        assert!(request_view.data.contains("inspect me"));
+        assert!(request_view.data.contains("[REDACTED]"));
+        assert!(!request_view.data.contains("fixture-secret"));
+
+        assert!(store
+            .capture_body_by_id("missing-capture", "response")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
