@@ -4213,6 +4213,35 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         checkpointC1.sync_state.records,
       );
 
+      const { stdout: c1ToC2SyncRepeatStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync", "--require-fresh"],
+        JSON.stringify(checkpointC1),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(c1ToC2SyncRepeatStdout).toBe(c1ToC2SyncStdout);
+
+      const { stdout: standaloneC2CheckpointStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-checkpoint"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(standaloneC2CheckpointStdout.trimEnd()).toBe(
+        JSON.stringify(c1ToC2Sync.checkpoint),
+      );
+      expect(
+        validateCorpusSyncCheckpoint(JSON.parse(standaloneC2CheckpointStdout)),
+        JSON.stringify(validateCorpusSyncCheckpoint.errors),
+      ).toBe(true);
+
       const syncNewRecord = c1ToC2Sync.delta.upserts[0];
       expect(syncNewRecord?.evidence.summary).toMatchObject({
         conversation_id: "fixture-sync-new",
