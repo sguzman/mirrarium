@@ -32,7 +32,8 @@
     },
     "conversation_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "\\S"
     },
     "record_sha256": {
       "type": "string",

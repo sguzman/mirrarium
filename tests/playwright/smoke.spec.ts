@@ -2341,6 +2341,17 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         allErrors: true,
         strict: true,
       }).compile(corpusExportIndexSchema);
+      expect(
+        validateCorpusExportIndex({
+          schema: "mirrarium.corpus.conversation-index",
+          schema_version: 1,
+          conversation_schema_version: 1,
+          producer_corpus_schema_version: 1,
+          record_type: "conversation-index",
+          conversation_id: "   ",
+          record_sha256: "0".repeat(64),
+        }),
+      ).toBe(false);
 
       const { stdout: corpusExportManifestSchemaStdout } = await execFileAsync(
         cliPath,
@@ -2402,6 +2413,28 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       syncDeltaAjv.addSchema(corpusExportManifestSchema);
       const validateCorpusSyncDelta =
         syncDeltaAjv.compile(corpusSyncDeltaSchema);
+      expect(
+        validateCorpusSyncDelta({
+          schema: "mirrarium.corpus.sync-delta",
+          schema_version: 1,
+          sync_state_schema_version: 1,
+          conversation_schema_version: 1,
+          producer_corpus_schema_version: 1,
+          record_type: "sync-delta",
+          manifest: {
+            schema: "mirrarium.corpus.export-manifest",
+            schema_version: 1,
+            conversation_schema_version: 1,
+            index_schema_version: 1,
+            producer_corpus_schema_version: 1,
+            record_type: "export-manifest",
+            conversation_count: 0,
+            index_sha256: "0".repeat(64),
+          },
+          upserts: [],
+          deleted_conversation_ids: ["   "],
+        }),
+      ).toBe(false);
 
       const exportHashVector = JSON.parse(
         await readFile(
