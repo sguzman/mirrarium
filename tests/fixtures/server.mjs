@@ -376,6 +376,23 @@ const fixtureServer = https.createServer(
       return;
     }
 
+    if (request.url === "/backend-api/conversation/sync-new") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        etag: ""fixture-sync-new-v1"",
+      });
+      response.end(JSON.stringify({
+        id: "fixture-sync-new",
+        title: "Late sync fixture",
+        messages: [{
+          id: "sync-new-user",
+          role: "user",
+          content: "arrived after checkpoint c1",
+        }],
+      }));
+      return;
+    }
+
     if (request.url === "/backend-api/conversation/branch-fixture") {
       response.writeHead(200, {
         "content-type": "application/json",

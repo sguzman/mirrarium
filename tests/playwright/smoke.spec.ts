@@ -4058,6 +4058,155 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ]),
       );
 
+      const checkpointC1 = currentCheckpoint;
+      const manifestC1 = checkpointC1.manifest;
+
+      await page.evaluate(async () => {
+        const response = await fetch("/backend-api/conversation/sync-new");
+        if (!response.ok) throw new Error("late sync conversation fetch failed");
+        const value = await response.json();
+        if (value.id !== "fixture-sync-new") {
+          throw new Error("late sync conversation response mismatch");
+        }
+      });
+
+      await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(
+              cliPath,
+              ["captures", "250"],
+              {
+                env: {
+                  ...childEnv,
+                  MIRRARIUM_DATA_DIR: dataDir,
+                },
+              },
+            );
+            return (JSON.parse(stdout) as Array<{ url: string }>).some((capture) =>
+              capture.url.includes("/backend-api/conversation/sync-new"),
+            );
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+
+      const syncProgressStaleStatus = await readExportStatus();
+      expect(syncProgressStaleStatus.fresh).toBe(false);
+      expect(syncProgressStaleStatus.pending_raw_captures).toBeGreaterThanOrEqual(1);
+      expect(syncProgressStaleStatus.manifest).toEqual(manifestC1);
+
+      const staleProgressSync = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync", "--require-fresh"],
+        JSON.stringify(checkpointC1),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(staleProgressSync.code).not.toBe(0);
+      expect(staleProgressSync.stdout).toBe("");
+      expect(staleProgressSync.stderr).toContain("published corpus is stale by");
+
+      await execFileAsync(
+        cliPath,
+        ["corpus", "rebuild"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+
+      const syncProgressFreshStatus = await readExportStatus();
+      expect(syncProgressFreshStatus.fresh).toBe(true);
+      expect(syncProgressFreshStatus.pending_raw_captures).toBe(0);
+      expect(syncProgressFreshStatus.manifest.conversation_count).toBe(
+        manifestC1.conversation_count + 1,
+      );
+      expect(syncProgressFreshStatus.manifest.index_sha256).not.toBe(
+        manifestC1.index_sha256,
+      );
+
+      const { stdout: c1ToC2SyncStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync", "--require-fresh"],
+        JSON.stringify(checkpointC1),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const c1ToC2Sync = JSON.parse(c1ToC2SyncStdout) as {
+        archive_id: string;
+        delta: {
+          manifest: typeof exportManifest;
+          upserts: typeof exportRecords;
+          deleted_conversation_ids: string[];
+        };
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(
+        validateCorpusSyncTransaction(c1ToC2Sync),
+        JSON.stringify(validateCorpusSyncTransaction.errors),
+      ).toBe(true);
+      expect(c1ToC2Sync.archive_id).toBe(exportSource.archive_id);
+      expect(c1ToC2Sync.delta.manifest).toEqual(
+        syncProgressFreshStatus.manifest,
+      );
+      expect(
+        c1ToC2Sync.delta.upserts.map((record) => record.conversation_id),
+      ).toEqual(["fixture-sync-new"]);
+      expect(c1ToC2Sync.delta.deleted_conversation_ids).toEqual([]);
+      expect(c1ToC2Sync.checkpoint.archive_id).toBe(exportSource.archive_id);
+      expect(c1ToC2Sync.checkpoint.manifest).toEqual(
+        syncProgressFreshStatus.manifest,
+      );
+      expect(c1ToC2Sync.checkpoint.sync_state.records["fixture-sync-new"]).toMatch(
+        /^[0-9a-f]{64}$/,
+      );
+      expect(c1ToC2Sync.checkpoint.sync_state.records).toMatchObject(
+        checkpointC1.sync_state.records,
+      );
+
+      const syncNewRecord = c1ToC2Sync.delta.upserts[0];
+      expect(syncNewRecord?.evidence.summary).toMatchObject({
+        conversation_id: "fixture-sync-new",
+        title: "Late sync fixture",
+      });
+      expect(syncNewRecord?.evidence.messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            content_text: "arrived after checkpoint c1",
+            source_kind: "json_snapshot",
+          }),
+        ]),
+      );
+
+      const { stdout: c2NoopSyncStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync", "--require-fresh"],
+        JSON.stringify(c1ToC2Sync.checkpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const c2NoopSync = JSON.parse(c2NoopSyncStdout) as {
+        delta: {
+          manifest: typeof exportManifest;
+          upserts: typeof exportRecords;
+          deleted_conversation_ids: string[];
+        };
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(c2NoopSync.delta.manifest).toEqual(syncProgressFreshStatus.manifest);
+      expect(c2NoopSync.delta.upserts).toEqual([]);
+      expect(c2NoopSync.delta.deleted_conversation_ids).toEqual([]);
+      expect(c2NoopSync.checkpoint).toEqual(c1ToC2Sync.checkpoint);
+
       const updateSourcePath = join(root, "extension-update-source");
       await cp(extensionSourcePath, updateSourcePath, { recursive: true });
       const updateManifestPath = join(updateSourcePath, "manifest.json");
