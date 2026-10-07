@@ -39,6 +39,14 @@ pub struct CorpusStats {
 pub struct CorpusVerifyReport {
     pub sqlite_integrity_ok: bool,
     pub foreign_key_violations: u64,
+    pub stream_captures_checked: u64,
+    pub stream_events_checked: u64,
+    pub stream_message_revisions_checked: u64,
+    pub conversation_snapshots_checked: u64,
+    pub message_observations_checked: u64,
+    pub stream_reconstructions_checked: u64,
+    pub attachment_observations_checked: u64,
+    pub attachment_downloads_checked: u64,
     pub websocket_streams_checked: u64,
     pub websocket_frames_checked: u64,
     pub eventsource_streams_checked: u64,
@@ -48,11 +56,13 @@ pub struct CorpusVerifyReport {
 }
 
 #[derive(Debug, Clone)]
-struct RawTransportSource {
+struct RawSource {
     row_order: i64,
     url: String,
     privacy_class: String,
     body_hash: Option<String>,
+    body_bytes: u64,
+    mime_type: String,
     resource_type: String,
     method: String,
 }
@@ -711,7 +721,7 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
 pub fn verify(raw_root: impl AsRef<Path>) -> Result<CorpusVerifyReport> {
     let corpus = open_corpus_read_only(raw_root.as_ref())?;
     let raw = open_raw_ledger_read_only(raw_root.as_ref())?;
-    verify_transport_corpus(&corpus, &raw)
+    verify_corpus_connections(&corpus, &raw)
 }
 
 pub fn websocket_streams(
@@ -1685,9 +1695,9 @@ fn valid_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn collect_raw_transport_sources(
+fn collect_raw_sources(
     connection: &Connection,
-) -> Result<BTreeMap<String, RawTransportSource>> {
+) -> Result<BTreeMap<String, RawSource>> {
     let mut statement = connection.prepare(
         r#"
         SELECT
@@ -1696,10 +1706,11 @@ fn collect_raw_transport_sources(
             url,
             privacy_class,
             body_hash,
+            body_bytes,
+            mime_type,
             resource_type,
             method
         FROM captures
-        WHERE resource_type IN ('WebSocketFrame', 'EventSourceMessage')
         ORDER BY rowid
         "#,
     )?;
@@ -1710,8 +1721,10 @@ fn collect_raw_transport_sources(
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
-            row.get::<_, String>(5)?,
+            row.get::<_, i64>(5)?,
             row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
         ))
     })?;
 
@@ -1723,16 +1736,23 @@ fn collect_raw_transport_sources(
             url,
             privacy_class,
             body_hash,
+            body_bytes,
+            mime_type,
             resource_type,
             method,
         ) = row?;
+        let body_bytes: u64 = body_bytes
+            .try_into()
+            .with_context(|| format!("negative raw body byte count for {capture_id:?}"))?;
         sources.insert(
             capture_id,
-            RawTransportSource {
+            RawSource {
                 row_order,
                 url,
                 privacy_class,
                 body_hash,
+                body_bytes,
+                mime_type,
                 resource_type,
                 method,
             },
@@ -1741,7 +1761,84 @@ fn collect_raw_transport_sources(
     Ok(sources)
 }
 
-fn verify_transport_corpus(
+fn verify_raw_source_link(
+    raw_sources: &BTreeMap<String, RawSource>,
+    capture_id: &str,
+    expected_url: &str,
+    expected_privacy_class: Option<&str>,
+    expected_body_hash: Option<&str>,
+    expected_body_bytes: Option<u64>,
+    expected_mime_type: Option<&str>,
+    expected_resource_type: Option<&str>,
+    expected_method: Option<&str>,
+    label: &str,
+    raw_source_links_checked: &mut u64,
+    errors: &mut Vec<String>,
+) -> Result<()> {
+    let Some(source) = raw_sources.get(capture_id) else {
+        errors.push(format!("{label} {capture_id:?} has no raw source capture"));
+        return Ok(());
+    };
+    *raw_source_links_checked = raw_source_links_checked
+        .checked_add(1)
+        .context("raw source link count overflow")?;
+
+    if source.url != expected_url {
+        errors.push(format!(
+            "{label} {capture_id:?} source URL disagrees with raw evidence"
+        ));
+    }
+    if let Some(expected) = expected_privacy_class {
+        if source.privacy_class != expected {
+            errors.push(format!(
+                "{label} {capture_id:?} privacy class {:?} disagrees with raw evidence {:?}",
+                expected, source.privacy_class
+            ));
+        }
+    }
+    if let Some(expected) = expected_body_hash {
+        if source.body_hash.as_deref() != Some(expected) {
+            errors.push(format!(
+                "{label} {capture_id:?} source hash disagrees with raw evidence"
+            ));
+        }
+    }
+    if let Some(expected) = expected_body_bytes {
+        if source.body_bytes != expected {
+            errors.push(format!(
+                "{label} {capture_id:?} body byte count {expected} disagrees with raw evidence {}",
+                source.body_bytes
+            ));
+        }
+    }
+    if let Some(expected) = expected_mime_type {
+        if source.mime_type != expected {
+            errors.push(format!(
+                "{label} {capture_id:?} MIME type {expected:?} disagrees with raw evidence {:?}",
+                source.mime_type
+            ));
+        }
+    }
+    if let Some(expected) = expected_resource_type {
+        if source.resource_type != expected {
+            errors.push(format!(
+                "{label} {capture_id:?} resource type {expected:?} disagrees with raw evidence {:?}",
+                source.resource_type
+            ));
+        }
+    }
+    if let Some(expected) = expected_method {
+        if source.method != expected {
+            errors.push(format!(
+                "{label} {capture_id:?} method {expected:?} disagrees with raw evidence {:?}",
+                source.method
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_corpus_connections(
     corpus: &Connection,
     raw: &Connection,
 ) -> Result<CorpusVerifyReport> {
@@ -1779,12 +1876,353 @@ fn verify_transport_corpus(
         ));
     }
 
-    let raw_sources = collect_raw_transport_sources(raw)?;
+    let raw_sources = collect_raw_sources(raw)?;
+    let mut stream_captures_checked = 0_u64;
+    let mut stream_events_checked = 0_u64;
+    let mut stream_message_revisions_checked = 0_u64;
+    let mut conversation_snapshots_checked = 0_u64;
+    let mut message_observations_checked = 0_u64;
+    let mut stream_reconstructions_checked = 0_u64;
+    let mut attachment_observations_checked = 0_u64;
+    let mut attachment_downloads_checked = 0_u64;
     let mut websocket_streams_checked = 0_u64;
     let mut websocket_frames_checked = 0_u64;
     let mut eventsource_streams_checked = 0_u64;
     let mut eventsource_events_checked = 0_u64;
     let mut raw_source_links_checked = 0_u64;
+
+    let mut stream_capture_statement = corpus.prepare(
+        "SELECT capture_id, source_url, privacy_class, source_body_hash, event_count FROM stream_captures ORDER BY capture_id",
+    )?;
+    let stream_capture_rows = stream_capture_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    for row in stream_capture_rows {
+        let (capture_id, source_url, privacy_class, source_body_hash, declared_count) = row?;
+        stream_captures_checked = stream_captures_checked
+            .checked_add(1)
+            .context("stream capture count overflow")?;
+        if !valid_sha256_hex(&source_body_hash) {
+            errors.push(format!(
+                "stream capture {capture_id:?} has invalid source body hash {source_body_hash:?}"
+            ));
+        }
+        if declared_count < 0 {
+            errors.push(format!(
+                "stream capture {capture_id:?} has negative event_count {declared_count}"
+            ));
+        } else {
+            let (actual_count, min_sequence, max_sequence): (i64, Option<i64>, Option<i64>) =
+                corpus.query_row(
+                    "SELECT COUNT(*), MIN(sequence), MAX(sequence) FROM stream_events WHERE capture_id = ?1",
+                    [capture_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+            if actual_count != declared_count {
+                errors.push(format!(
+                    "stream capture {capture_id:?} declares {declared_count} events but has {actual_count}"
+                ));
+            }
+            if actual_count > 0
+                && (min_sequence != Some(0) || max_sequence != Some(actual_count - 1))
+            {
+                errors.push(format!(
+                    "stream capture {capture_id:?} event sequence is not contiguous from zero"
+                ));
+            }
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            Some(&privacy_class),
+            Some(&source_body_hash),
+            None,
+            None,
+            None,
+            None,
+            "stream capture",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
+    let mut stream_event_statement =
+        corpus.prepare("SELECT capture_id, sequence, data, json_valid FROM stream_events ORDER BY capture_id, sequence")?;
+    let stream_event_rows = stream_event_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in stream_event_rows {
+        let (capture_id, sequence, data, json_valid) = row?;
+        stream_events_checked = stream_events_checked
+            .checked_add(1)
+            .context("stream event count overflow")?;
+        if sequence < 0 {
+            errors.push(format!(
+                "stream event {capture_id:?}/{sequence} has negative sequence"
+            ));
+        }
+        if !matches!(json_valid, 0 | 1) {
+            errors.push(format!(
+                "stream event {capture_id:?}/{sequence} has invalid json_valid value {json_valid}"
+            ));
+        } else if serde_json::from_str::<Value>(&data).is_ok() != (json_valid == 1) {
+            errors.push(format!(
+                "stream event {capture_id:?}/{sequence} json_valid flag disagrees with data"
+            ));
+        }
+    }
+
+    let mut snapshot_statement = corpus.prepare(
+        "SELECT capture_id, source_url, privacy_class, source_body_hash FROM conversation_snapshots ORDER BY capture_id",
+    )?;
+    let snapshot_rows = snapshot_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in snapshot_rows {
+        let (capture_id, source_url, privacy_class, source_body_hash) = row?;
+        conversation_snapshots_checked = conversation_snapshots_checked
+            .checked_add(1)
+            .context("conversation snapshot count overflow")?;
+        if !valid_sha256_hex(&source_body_hash) {
+            errors.push(format!(
+                "conversation snapshot {capture_id:?} has invalid source body hash {source_body_hash:?}"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            Some(&privacy_class),
+            Some(&source_body_hash),
+            None,
+            None,
+            None,
+            None,
+            "conversation snapshot",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
+    let mut message_statement = corpus.prepare(
+        "SELECT capture_id, source_kind, sequence, source_url FROM message_observations ORDER BY capture_id, source_kind, sequence",
+    )?;
+    let message_rows = message_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in message_rows {
+        let (capture_id, source_kind, sequence, source_url) = row?;
+        message_observations_checked = message_observations_checked
+            .checked_add(1)
+            .context("message observation count overflow")?;
+        if sequence < 0 {
+            errors.push(format!(
+                "message observation {capture_id:?}/{source_kind:?}/{sequence} has negative sequence"
+            ));
+        }
+        if !matches!(source_kind.as_str(), "json_snapshot" | "sse") {
+            errors.push(format!(
+                "message observation {capture_id:?} has invalid source kind {source_kind:?}"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "message observation",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
+    let mut revision_statement = corpus.prepare(
+        "SELECT capture_id, sequence, source_url FROM stream_message_revisions ORDER BY capture_id, sequence, message_id",
+    )?;
+    let revision_rows = revision_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in revision_rows {
+        let (capture_id, sequence, source_url) = row?;
+        stream_message_revisions_checked = stream_message_revisions_checked
+            .checked_add(1)
+            .context("stream message revision count overflow")?;
+        if sequence < 0 {
+            errors.push(format!(
+                "stream message revision {capture_id:?}/{sequence} has negative sequence"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "stream message revision",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
+    let mut reconstruction_statement = corpus.prepare(
+        "SELECT capture_id, source_url, fragment_count FROM stream_reconstructions ORDER BY capture_id, conversation_id",
+    )?;
+    let reconstruction_rows = reconstruction_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in reconstruction_rows {
+        let (capture_id, source_url, fragment_count) = row?;
+        stream_reconstructions_checked = stream_reconstructions_checked
+            .checked_add(1)
+            .context("stream reconstruction count overflow")?;
+        if fragment_count <= 0 {
+            errors.push(format!(
+                "stream reconstruction {capture_id:?} has non-positive fragment_count {fragment_count}"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "stream reconstruction",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
+    let mut attachment_statement = corpus.prepare(
+        "SELECT capture_id, sequence, size_bytes, source_url FROM attachment_observations ORDER BY capture_id, sequence",
+    )?;
+    let attachment_rows = attachment_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in attachment_rows {
+        let (capture_id, sequence, size_bytes, source_url) = row?;
+        attachment_observations_checked = attachment_observations_checked
+            .checked_add(1)
+            .context("attachment observation count overflow")?;
+        if sequence < 0 {
+            errors.push(format!(
+                "attachment observation {capture_id:?}/{sequence} has negative sequence"
+            ));
+        }
+        if size_bytes.is_some_and(|size| size < 0) {
+            errors.push(format!(
+                "attachment observation {capture_id:?}/{sequence} has negative size"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "attachment observation",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
+    let mut download_statement = corpus.prepare(
+        "SELECT download_capture_id, source_url, mime_type, privacy_class, body_hash, body_bytes FROM attachment_downloads ORDER BY download_capture_id, attachment_capture_id, attachment_sequence",
+    )?;
+    let download_rows = download_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    for row in download_rows {
+        let (capture_id, source_url, mime_type, privacy_class, body_hash, body_bytes) = row?;
+        attachment_downloads_checked = attachment_downloads_checked
+            .checked_add(1)
+            .context("attachment download count overflow")?;
+        if !valid_sha256_hex(&body_hash) {
+            errors.push(format!(
+                "attachment download {capture_id:?} has invalid body hash {body_hash:?}"
+            ));
+        }
+        let body_bytes_u64 = if body_bytes < 0 {
+            errors.push(format!(
+                "attachment download {capture_id:?} has negative body byte count {body_bytes}"
+            ));
+            None
+        } else {
+            Some(body_bytes as u64)
+        };
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            Some(&privacy_class),
+            Some(&body_hash),
+            body_bytes_u64,
+            Some(&mime_type),
+            None,
+            None,
+            "attachment download",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
 
     let mut websocket_stream_statement = corpus.prepare(
         "SELECT lifecycle_id, source_url, privacy_class, frame_count FROM websocket_streams ORDER BY lifecycle_id",
@@ -2217,6 +2655,14 @@ fn verify_transport_corpus(
     Ok(CorpusVerifyReport {
         sqlite_integrity_ok,
         foreign_key_violations,
+        stream_captures_checked,
+        stream_events_checked,
+        stream_message_revisions_checked,
+        conversation_snapshots_checked,
+        message_observations_checked,
+        stream_reconstructions_checked,
+        attachment_observations_checked,
+        attachment_downloads_checked,
         websocket_streams_checked,
         websocket_frames_checked,
         eventsource_streams_checked,
@@ -3816,6 +4262,60 @@ mod tests {
                 r#"
                 PRAGMA foreign_keys = ON;
 
+                CREATE TABLE stream_captures (
+                    capture_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    source_body_hash TEXT NOT NULL,
+                    event_count INTEGER NOT NULL
+                );
+                CREATE TABLE stream_events (
+                    capture_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    json_valid INTEGER NOT NULL
+                );
+                CREATE TABLE stream_message_revisions (
+                    capture_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    message_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL
+                );
+                CREATE TABLE conversation_snapshots (
+                    capture_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    source_body_hash TEXT NOT NULL
+                );
+                CREATE TABLE message_observations (
+                    capture_id TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    source_url TEXT NOT NULL
+                );
+                CREATE TABLE stream_reconstructions (
+                    capture_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    fragment_count INTEGER NOT NULL
+                );
+                CREATE TABLE attachment_observations (
+                    capture_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    size_bytes INTEGER,
+                    source_url TEXT NOT NULL
+                );
+                CREATE TABLE attachment_downloads (
+                    attachment_capture_id TEXT NOT NULL,
+                    attachment_sequence INTEGER NOT NULL,
+                    download_capture_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    body_hash TEXT NOT NULL,
+                    body_bytes INTEGER NOT NULL
+                );
+
                 CREATE TABLE websocket_streams (
                     lifecycle_id TEXT PRIMARY KEY,
                     source_url TEXT NOT NULL,
@@ -3874,6 +4374,8 @@ mod tests {
                 url TEXT NOT NULL,
                 privacy_class TEXT NOT NULL,
                 body_hash TEXT,
+                body_bytes INTEGER NOT NULL,
+                mime_type TEXT NOT NULL,
                 resource_type TEXT NOT NULL,
                 method TEXT NOT NULL
             );
@@ -3885,17 +4387,17 @@ mod tests {
         let event_hash_1 = "b".repeat(64);
         let event_hash_2 = "c".repeat(64);
         raw.execute(
-            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, resource_type, method) VALUES (?1, ?2, 'private', ?3, 'WebSocketFrame', 'WS_RECV')",
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, body_bytes, mime_type, resource_type, method) VALUES (?1, ?2, 'private', ?3, 11, 'application/json', 'WebSocketFrame', 'WS_RECV')",
             params!["ws-capture", "wss://chatgpt.com/backend-api/ws", ws_hash],
         )
         .unwrap();
         raw.execute(
-            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, resource_type, method) VALUES (?1, ?2, 'private', ?3, 'EventSourceMessage', 'SSE_RECV')",
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, body_bytes, mime_type, resource_type, method) VALUES (?1, ?2, 'private', ?3, 11, 'text/event-stream; charset=utf-8', 'EventSourceMessage', 'SSE_RECV')",
             params!["event-capture-1", "https://chatgpt.com/backend-api/events", event_hash_1],
         )
         .unwrap();
         raw.execute(
-            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, resource_type, method) VALUES (?1, ?2, 'private', ?3, 'EventSourceMessage', 'SSE_RECV')",
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, body_bytes, mime_type, resource_type, method) VALUES (?1, ?2, 'private', ?3, 11, 'text/event-stream; charset=utf-8', 'EventSourceMessage', 'SSE_RECV')",
             params!["event-capture-2", "https://chatgpt.com/backend-api/events", event_hash_2],
         )
         .unwrap();
@@ -3932,7 +4434,7 @@ mod tests {
     #[test]
     fn transport_corpus_verify_accepts_consistent_derived_evidence() {
         let (corpus, raw) = open_transport_verify_fixture();
-        let report = verify_transport_corpus(&corpus, &raw).unwrap();
+        let report = verify_corpus_connections(&corpus, &raw).unwrap();
         assert!(report.sqlite_integrity_ok);
         assert_eq!(report.foreign_key_violations, 0);
         assert_eq!(report.websocket_streams_checked, 1);
@@ -3971,7 +4473,7 @@ mod tests {
             )
             .unwrap();
 
-        let report = verify_transport_corpus(&corpus, &raw).unwrap();
+        let report = verify_corpus_connections(&corpus, &raw).unwrap();
         assert!(!report.errors.is_empty());
         assert!(report
             .errors
