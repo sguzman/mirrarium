@@ -1219,6 +1219,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         },
       );
       const captures = JSON.parse(capturesStdout) as Array<{
+        capture_id: string;
         method: string;
         url: string;
         status: number;
@@ -1254,6 +1255,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           capture.url.includes("/backend-api/conversation/post"),
       );
       expect(postCapture).toBeTruthy();
+      expect(postCapture?.capture_id).toBeTruthy();
       expect(postCapture?.provenance.initiator_type).toBe("script");
       expect(postCapture?.provenance.request_wall_time_ms).toBeGreaterThan(0);
       expect(postCapture?.provenance.response_protocol).toBeTruthy();
@@ -2013,6 +2015,29 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         event_count: 3,
       });
       expect(completedStream?.source_body_hash).toMatch(/^[0-9a-f]{64}$/);
+
+      const { stdout: rawStreamCaptureStdout } = await execFileAsync(
+        cliPath,
+        ["capture", completedStream?.capture_id as string],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const rawStreamCapture = JSON.parse(rawStreamCaptureStdout) as {
+        capture_id: string;
+        url: string;
+        body_hash?: string;
+        privacy_class: string;
+      };
+      expect(rawStreamCapture).toMatchObject({
+        capture_id: completedStream?.capture_id,
+        url: completedStream?.source_url,
+        body_hash: completedStream?.source_body_hash,
+        privacy_class: "private",
+      });
 
       const { stdout: streamEventsStdout } = await execFileAsync(
         cliPath,

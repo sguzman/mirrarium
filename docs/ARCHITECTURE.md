@@ -122,6 +122,7 @@ Implemented:
 - conversation snapshots and message observations from ChatGPT-shaped JSON;
 - reconstructed stream text from conversation-tagged SSE deltas;
 - read-only conversation discovery and evidence inspection through the CLI;
+- exact raw-capture inspection by durable `capture_id`, with recent listings exposing the same ID so every derived provenance key can be resolved without raw SQL;
 - branch-aware canonical conversation views computed from immutable snapshot evidence;
 - per-event stream message revision history with explicit message/parent identity;
 - revision-aware canonical merging: exact-ID prefix refinement plus unambiguous exact-parent tail extension;

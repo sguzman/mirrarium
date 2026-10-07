@@ -70,6 +70,14 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&store.recent_captures(limit)?)?
             );
         }
+        Some("capture") => {
+            let capture_id = arguments.get(1).context("missing capture id")?;
+            let store = CaptureStore::open_read_only(&root)?;
+            let capture = store
+                .capture_by_id(capture_id)?
+                .with_context(|| format!("capture not found: {capture_id}"))?;
+            println!("{}", serde_json::to_string_pretty(&capture)?);
+        }
         Some("verify") => {
             let store = CaptureStore::open_read_only(&root)?;
             let report = store.verify()?;
@@ -1260,6 +1268,7 @@ fn print_help() {
 USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
+  mirrarium capture <CAPTURE_ID>
   mirrarium verify
   mirrarium maintenance incoming
   mirrarium privacy status
