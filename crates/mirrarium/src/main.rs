@@ -19,6 +19,20 @@ use sha2::{Digest, Sha256};
 
 const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
+const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_bounded_utf8_input<R: Read>(reader: R, max_bytes: u64) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .context("reading bounded input")?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "input exceeds maximum size of {max_bytes} bytes"
+    );
+    String::from_utf8(bytes).context("input is not valid UTF-8")
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -262,10 +276,11 @@ fn run() -> Result<()> {
                 print!("{}", corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON);
             }
             Some("export-delta") => {
-                let mut input = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut input)
-                    .context("reading corpus sync state from stdin")?;
+                let input = read_bounded_utf8_input(
+                    std::io::stdin().lock(),
+                    MAX_CORPUS_SYNC_STATE_INPUT_BYTES,
+                )
+                .context("reading corpus sync state from stdin")?;
                 anyhow::ensure!(
                     !input.trim().is_empty(),
                     "corpus export-delta requires a sync-state JSON object on stdin"
@@ -1474,6 +1489,23 @@ PRIVATE KEY:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn bounded_utf8_input_rejects_oversize_and_invalid_utf8() {
+        assert_eq!(
+            read_bounded_utf8_input(Cursor::new(b"small".to_vec()), 5).unwrap(),
+            "small"
+        );
+
+        let oversized = read_bounded_utf8_input(Cursor::new(b"too-large".to_vec()), 3)
+            .unwrap_err();
+        assert!(oversized.to_string().contains("maximum size of 3 bytes"));
+
+        let invalid = read_bounded_utf8_input(Cursor::new(vec![0xff, 0xfe]), 8)
+            .unwrap_err();
+        assert!(invalid.to_string().contains("not valid UTF-8"));
+    }
 
     #[test]
     fn extension_install_atomically_replaces_previous_tree() {

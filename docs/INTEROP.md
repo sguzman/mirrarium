@@ -78,6 +78,8 @@ A consumer should apply the delta atomically: stage all `upserts`, remove the ex
 
 The sync-state request contains only conversation IDs and content hashes, but the delta response contains the same private derived conversation text as ordinary export records. Treat stdout as sensitive plaintext at the interoperability boundary.
 
+For operational safety, `export-delta` accepts at most 64 MiB of UTF-8 sync-state JSON on stdin and rejects larger or non-UTF-8 input before JSON parsing. This byte ceiling is intentionally separate from the semantic JSON Schema contract; it does not impose a fixed conversation-count limit on normal sync states.
+
 ## Incremental synchronization
 
 A downstream consumer can synchronize without re-ingesting unchanged conversation text while remaining safe against a rebuild between commands:
