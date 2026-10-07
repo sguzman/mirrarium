@@ -2175,6 +2175,92 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(JSON.parse(eventSourceSkippedStdout)).toEqual([]);
 
+      const { stdout: corpusExportStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const exportRecords = corpusExportStdout
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line)) as Array<{
+        schema: string;
+        schema_version: number;
+        producer_corpus_schema_version: number;
+        record_type: string;
+        conversation_id: string;
+        evidence: {
+          summary: { conversation_id: string; title?: string };
+          messages: Array<{ capture_id: string }>;
+          streams: Array<{ capture_id: string }>;
+        };
+        canonical?: {
+          basis_capture_id: string;
+          basis_source_body_hash: string;
+        };
+        canonical_error?: string;
+        stream_revisions: Array<{ capture_id: string }>;
+        attachments: Array<{
+          observation: { capture_id: string };
+          downloads: Array<{ download_capture_id: string }>;
+        }>;
+      }>;
+      expect(exportRecords.length).toBeGreaterThan(0);
+      expect(
+        exportRecords.every(
+          (record) =>
+            record.schema === "mirrarium.corpus.conversation" &&
+            record.schema_version === 1 &&
+            record.producer_corpus_schema_version > 0 &&
+            record.record_type === "conversation" &&
+            record.conversation_id === record.evidence.summary.conversation_id,
+        ),
+      ).toBe(true);
+
+      const exportedConversation = exportRecords.find(
+        (record) => record.conversation_id === "fixture-conversation",
+      );
+      expect(exportedConversation?.canonical_error ?? null).toBeNull();
+      expect(exportedConversation?.canonical?.basis_capture_id.length).toBeGreaterThan(0);
+      expect(exportedConversation?.canonical?.basis_source_body_hash).toMatch(
+        /^[0-9a-f]{64}$/,
+      );
+      expect(
+        exportedConversation?.evidence.messages.every(
+          (message) => message.capture_id.length > 0,
+        ),
+      ).toBe(true);
+
+      const exportedStreamTail = exportRecords.find(
+        (record) => record.conversation_id === "fixture-stream-tail",
+      );
+      expect(exportedStreamTail?.stream_revisions.length).toBeGreaterThanOrEqual(2);
+      expect(
+        exportedStreamTail?.stream_revisions.every(
+          (revision) => revision.capture_id.length > 0,
+        ),
+      ).toBe(true);
+
+      const exportedAttachment = exportRecords.find(
+        (record) => record.conversation_id === "fixture-attachment-conversation",
+      );
+      expect(exportedAttachment?.attachments.length).toBeGreaterThanOrEqual(1);
+      expect(
+        exportedAttachment?.attachments.some(
+          (attachment) =>
+            attachment.observation.capture_id.length > 0 &&
+            attachment.downloads.some(
+              (download) => download.download_capture_id.length > 0,
+            ),
+        ),
+      ).toBe(true);
+
       const { stdout: webSocketStreamsStdout } = await execFileAsync(
         cliPath,
         ["corpus", "websocket-streams", "20"],

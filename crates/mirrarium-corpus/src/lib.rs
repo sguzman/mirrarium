@@ -15,6 +15,7 @@ use serde_json::Value;
 use url::Url;
 
 const CORPUS_SCHEMA_VERSION: i64 = 4;
+pub const CORPUS_EXPORT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
@@ -235,6 +236,20 @@ pub struct CanonicalConversationView {
     pub linked_streams: Vec<StreamReconstructionView>,
     pub unlinked_streams: Vec<StreamReconstructionView>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationExportRecord {
+    pub schema: String,
+    pub schema_version: u32,
+    pub producer_corpus_schema_version: i64,
+    pub record_type: String,
+    pub conversation_id: String,
+    pub evidence: ConversationView,
+    pub canonical: Option<CanonicalConversationView>,
+    pub canonical_error: Option<String>,
+    pub stream_revisions: Vec<StreamMessageRevisionView>,
+    pub attachments: Vec<AttachmentView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1076,6 +1091,52 @@ pub fn conversations(
                 .context("conversation disappeared while reading corpus")
         })
         .collect()
+}
+
+pub fn export_conversations(
+    raw_root: impl AsRef<Path>,
+    limit: Option<u64>,
+) -> Result<Vec<ConversationExportRecord>> {
+    let raw_root = raw_root.as_ref();
+    if let Some(limit) = limit {
+        anyhow::ensure!(limit > 0, "export limit must be greater than zero");
+    }
+    let effective_limit = limit.unwrap_or(i64::MAX as u64);
+    let summaries = conversations(raw_root, effective_limit)?;
+    let mut records = Vec::with_capacity(summaries.len());
+
+    for summary in summaries {
+        let conversation_id = summary.conversation_id.clone();
+        let evidence = conversation(raw_root, &conversation_id, i64::MAX as u64)?
+            .with_context(|| {
+                format!(
+                    "conversation {conversation_id:?} disappeared while exporting corpus"
+                )
+            })?;
+        let (canonical, canonical_error) = match canonical(raw_root, &conversation_id) {
+            Ok(canonical) => (canonical, None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        let stream_revisions =
+            stream_message_revisions(raw_root, &conversation_id, i64::MAX as u64)?;
+        let attachments =
+            attachments(raw_root, Some(&conversation_id), i64::MAX as u64)?;
+
+        records.push(ConversationExportRecord {
+            schema: "mirrarium.corpus.conversation".to_owned(),
+            schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+            producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+            record_type: "conversation".to_owned(),
+            conversation_id,
+            evidence,
+            canonical,
+            canonical_error,
+            stream_revisions,
+            attachments,
+        });
+    }
+
+    Ok(records)
 }
 
 pub fn conversation(

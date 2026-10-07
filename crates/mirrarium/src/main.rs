@@ -233,6 +233,19 @@ fn run() -> Result<()> {
                     report.errors.len() + report.foreign_key_violations as usize
                 );
             }
+            Some("export") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("export limit must be a positive integer")?;
+                if let Some(limit) = limit {
+                    anyhow::ensure!(limit > 0, "export limit must be greater than zero");
+                }
+                for record in corpus::export_conversations(&root, limit)? {
+                    println!("{}", serde_json::to_string(&record)?);
+                }
+            }
             Some("conversations") => {
                 let limit = arguments
                     .get(2)
@@ -1307,6 +1320,7 @@ USAGE:
   mirrarium corpus rebuild
   mirrarium corpus stats
   mirrarium corpus verify
+  mirrarium corpus export [LIMIT]
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>

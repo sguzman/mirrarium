@@ -85,6 +85,7 @@ mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
 mirrarium corpus verify
+mirrarium corpus export [limit]
 mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
@@ -219,4 +220,6 @@ Mirrarium observes and preserves the real ChatGPT site's ecology.
 
 Chatarium owns the local conversation ecology.
 
-A future bridge may let Chatarium consume Mirrarium's accumulated private corpus without independently crawling account history.
+`mirrarium corpus export [limit]` is the first explicit bridge between them. It emits versioned JSONL, one conversation record per line in deterministic conversation-ID order, containing the derived evidence view, a canonical view when safely derivable, canonicalization errors when it is not, stream revisions, attachment/download provenance, and the raw capture IDs needed to drill back into Mirrarium. The export does not expose Mirrarium's encrypted SQLite schema and does not add raw CAS payloads beyond content already present in the derived corpus.
+
+The v1 contract is documented in `docs/INTEROP.md`. Chatarium can consume that stream without independently crawling account history.
