@@ -275,6 +275,12 @@ fn run() -> Result<()> {
             Some("export-delta-schema") => {
                 print!("{}", corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON);
             }
+            Some("export-sync-state") => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&corpus::export_sync_state(&root)?)?
+                );
+            }
             Some("export-delta") => {
                 let input = read_bounded_utf8_input(
                     std::io::stdin().lock(),
@@ -1424,6 +1430,7 @@ USAGE:
   mirrarium corpus export-index-schema
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-sync-state-schema
+  mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta
   mirrarium corpus export-manifest

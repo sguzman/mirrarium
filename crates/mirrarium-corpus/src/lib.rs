@@ -1418,6 +1418,22 @@ fn ensure_record_matches_cached_hash(
     Ok(())
 }
 
+pub fn export_sync_state(raw_root: impl AsRef<Path>) -> Result<ConversationSyncState> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let records = conversation_export_index_records_for_connection(&corpus, -1)?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let state = ConversationSyncState {
+        schema: "mirrarium.corpus.sync-state".to_owned(),
+        schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+        records,
+    };
+    validate_sync_state(&state)?;
+    Ok(state)
+}
+
 fn validate_sync_state(state: &ConversationSyncState) -> Result<()> {
     anyhow::ensure!(
         state.schema == "mirrarium.corpus.sync-state",

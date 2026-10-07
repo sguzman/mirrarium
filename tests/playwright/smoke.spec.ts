@@ -2612,20 +2612,33 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       ).toEqual(exportRecords.map((record) => record.conversation_id));
       expect(emptySyncDelta.deleted_conversation_ids).toEqual([]);
 
-      const currentSyncState = {
-        schema: "mirrarium.corpus.sync-state",
-        schema_version: 1,
-        records: Object.fromEntries(
-          exportIndexRecords.map((record) => [
-            record.conversation_id,
-            record.record_sha256,
-          ]),
-        ),
+      const { stdout: currentSyncStateStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-state"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const currentSyncState = JSON.parse(currentSyncStateStdout) as {
+        schema: string;
+        schema_version: number;
+        records: Record<string, string>;
       };
       expect(
         validateCorpusSyncState(currentSyncState),
         JSON.stringify(validateCorpusSyncState.errors),
       ).toBe(true);
+      expect(currentSyncState.records).toEqual(
+        Object.fromEntries(
+          exportIndexRecords.map((record) => [
+            record.conversation_id,
+            record.record_sha256,
+          ]),
+        ),
+      );
       const { stdout: currentSyncDeltaStdout } = await execFileWithInput(
         cliPath,
         ["corpus", "export-delta"],
