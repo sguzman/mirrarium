@@ -727,38 +727,21 @@ impl CaptureStore {
                 return Ok(());
             }
         };
-        let relative_path = object_relative_path(privacy, &body_hash);
-        let final_path = self.root.join(&relative_path);
-
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)?;
-            if privacy == PrivacyClass::Private {
-                harden_directory(parent)?;
-            }
+        if privacy == PrivacyClass::Private {
+            let raw = fs::read(&capture.temp_path)
+                .with_context(|| format!("verifying private temp object {}", capture.temp_path.display()))?;
+            anyhow::ensure!(
+                raw.starts_with(PRIVATE_STREAM_MAGIC),
+                "private response temp object is not MIRRPV02 encrypted"
+            );
         }
-
-        if final_path.exists() {
-            fs::remove_file(&capture.temp_path)?;
-        } else {
-            if privacy == PrivacyClass::Private {
-                let raw = fs::read(&capture.temp_path)
-                    .with_context(|| format!("verifying private temp object {}", capture.temp_path.display()))?;
-                anyhow::ensure!(
-                    raw.starts_with(PRIVATE_STREAM_MAGIC),
-                    "private response temp object is not MIRRPV02 encrypted"
-                );
-            }
-            fs::rename(&capture.temp_path, &final_path).with_context(|| {
-                format!(
-                    "moving {} to {}",
-                    capture.temp_path.display(),
-                    final_path.display()
-                )
-            })?;
-            if privacy == PrivacyClass::Private {
-                harden_file(&final_path)?;
-            }
-        }
+        let relative_path = install_or_reuse_cas_object(
+            &self.root,
+            privacy,
+            &body_hash,
+            capture.bytes,
+            &capture.temp_path,
+        )?;
 
         let request_body = capture.request_body.take();
         let root = self.root.clone();
@@ -1549,46 +1532,31 @@ impl CaptureStore {
         if request_body.error.is_none() {
             body_bytes = request_body.bytes.len() as u64;
             let hash = sha256_hex(&request_body.bytes);
-            let relative_path = object_relative_path(PrivacyClass::Private, &hash);
-            let final_path = root.join(&relative_path);
+            let temp_name = format!(
+                "{}.request.part",
+                sha256_hex(format!("{capture_id}:request-body").as_bytes())
+            );
+            let temp_path = root.join(".incoming").join(temp_name);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&temp_path)
+                .with_context(|| format!("creating {}", temp_path.display()))?;
+            harden_file(&temp_path)?;
+            let key = load_or_create_private_key(root)?;
+            let envelope = encrypt_private_object_bytes(&key, &hash, &request_body.bytes)?;
+            file.write_all(&envelope)?;
+            file.flush()?;
+            drop(file);
 
-            if let Some(parent) = final_path.parent() {
-                fs::create_dir_all(parent)?;
-                harden_directory(parent)?;
-            }
-
-            if !final_path.exists() {
-                let temp_name = format!(
-                    "{}.request.part",
-                    sha256_hex(format!("{capture_id}:request-body").as_bytes())
-                );
-                let temp_path = root.join(".incoming").join(temp_name);
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&temp_path)
-                    .with_context(|| format!("creating {}", temp_path.display()))?;
-                harden_file(&temp_path)?;
-                let key = load_or_create_private_key(&root)?;
-                let envelope = encrypt_private_object_bytes(&key, &hash, &request_body.bytes)?;
-                file.write_all(&envelope)?;
-                file.flush()?;
-                drop(file);
-
-                if final_path.exists() {
-                    fs::remove_file(&temp_path)?;
-                } else {
-                    fs::rename(&temp_path, &final_path).with_context(|| {
-                        format!(
-                            "moving {} to {}",
-                            temp_path.display(),
-                            final_path.display()
-                        )
-                    })?;
-                    harden_file(&final_path)?;
-                }
-            }
+            let relative_path = install_or_reuse_cas_object(
+                root,
+                PrivacyClass::Private,
+                &hash,
+                body_bytes,
+                &temp_path,
+            )?;
 
             connection.execute(
                 r#"
@@ -2929,7 +2897,9 @@ fn load_or_create_private_key(root: &Path) -> Result<[u8; PRIVATE_KEY_BYTES]> {
         Ok(mut file) => {
             harden_file(&path)?;
             file.write_all(&key)?;
-            file.flush()?;
+            file.sync_all()
+                .with_context(|| format!("syncing Mirrarium private key {}", path.display()))?;
+            sync_directory(parent)?;
             Ok(key)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => read_private_key(&path),
@@ -3402,6 +3372,101 @@ fn audit_unindexed_object_files(
     }
 
     Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("opening {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing {}", path.display()))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("opening directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_staged_file(staged: &Path, final_path: &Path) -> Result<()> {
+    fs::rename(staged, final_path).with_context(|| {
+        format!(
+            "atomically replacing {} with {}",
+            final_path.display(),
+            staged.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn replace_staged_file(staged: &Path, final_path: &Path) -> Result<()> {
+    if final_path.exists() {
+        fs::remove_file(final_path)
+            .with_context(|| format!("removing {}", final_path.display()))?;
+    }
+    fs::rename(staged, final_path).with_context(|| {
+        format!(
+            "moving {} to {}",
+            staged.display(),
+            final_path.display()
+        )
+    })
+}
+
+fn install_or_reuse_cas_object(
+    root: &Path,
+    class: PrivacyClass,
+    hash: &str,
+    logical_bytes: u64,
+    staged_path: &Path,
+) -> Result<PathBuf> {
+    let relative_path = object_relative_path(class, hash);
+    let final_path = root.join(&relative_path);
+    let parent = final_path
+        .parent()
+        .context("CAS object path has no parent directory")?;
+    let parent_existed = parent.is_dir();
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating CAS directory {}", parent.display()))?;
+    if class == PrivacyClass::Private {
+        harden_directory(parent)?;
+    }
+    if !parent_existed {
+        let objects_root = parent
+            .parent()
+            .context("CAS prefix directory has no parent")?;
+        sync_directory(objects_root)?;
+    }
+
+    sync_file(staged_path)?;
+
+    if final_path.exists() {
+        match read_verified_object(root, class.as_str(), hash) {
+            Ok(bytes) if bytes.len() as u64 == logical_bytes => {
+                fs::remove_file(staged_path)
+                    .with_context(|| format!("removing duplicate staged object {}", staged_path.display()))?;
+                return Ok(relative_path);
+            }
+            _ => {
+                replace_staged_file(staged_path, &final_path)?;
+            }
+        }
+    } else {
+        replace_staged_file(staged_path, &final_path)?;
+    }
+
+    if class == PrivacyClass::Private {
+        harden_file(&final_path)?;
+    }
+    sync_directory(parent)?;
+    Ok(relative_path)
 }
 
 fn object_relative_path(class: PrivacyClass, hash: &str) -> PathBuf {
@@ -4735,6 +4800,44 @@ mod tests {
             capture.body_error.as_deref(),
             Some("suppressed:unparseable_json_response_body")
         );
+    }
+
+    #[test]
+    fn capture_replaces_corrupt_unindexed_cas_file_before_ledger_publish() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let body = br#"{"message":"repair crash orphan"}"#;
+        let hash = sha256_hex(body);
+        let final_path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &hash));
+        fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        fs::write(&final_path, b"truncated crash orphan").unwrap();
+
+        let mut item = metadata(
+            "repair-orphan",
+            "https://chatgpt.com/backend-api/conversation",
+            "Fetch",
+        );
+        item.mime_type = "application/json".to_owned();
+        store.begin(item).unwrap();
+        store
+            .append_chunk("repair-orphan", 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish("repair-orphan", Some(body.len() as u64), None)
+            .unwrap();
+
+        let capture = store.recent_captures(1).unwrap().pop().unwrap();
+        assert_eq!(capture.body_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            read_verified_object(directory.path(), "private", &hash).unwrap(),
+            body
+        );
+        let report = store.verify().unwrap();
+        assert_eq!(report.corrupt_objects, 0);
+        assert_eq!(report.orphan_objects, 0);
+        assert_eq!(report.invalid_captures, 0);
     }
 
     #[test]
