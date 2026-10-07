@@ -89,6 +89,7 @@ mirrarium corpus rebuild
 mirrarium corpus stats
 mirrarium corpus verify
 mirrarium corpus export-schema-bundle
+mirrarium corpus export-schema-bundle-v2
 mirrarium corpus export-negotiation-schema-bundle
 mirrarium corpus export-schema
 mirrarium corpus export-source-schema

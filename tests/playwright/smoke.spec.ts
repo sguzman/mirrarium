@@ -2542,6 +2542,53 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(validateBundledSyncTransaction).toBeTruthy();
 
+      const { stdout: corpusSchemaBundleV2Stdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-schema-bundle-v2"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSchemaBundleV2 = JSON.parse(corpusSchemaBundleV2Stdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        schemas: Array<{ $id?: string }>;
+      };
+      expect(corpusSchemaBundleV2).toMatchObject({
+        schema: "mirrarium.corpus.schema-bundle",
+        schema_version: 2,
+        record_type: "schema-bundle",
+      });
+      expect(corpusSchemaBundleV2.schemas.map((schema) => schema.$id)).toEqual([
+        ...bundledSchemaIds,
+        "urn:mirrarium:corpus:consumer-requirements:v1",
+        "urn:mirrarium:corpus:compatibility:v1",
+        "urn:mirrarium:corpus:negotiated-sync-request:v1",
+        "urn:mirrarium:corpus:sync-plan:v1",
+      ]);
+      const bundledV2Ajv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      for (const schema of corpusSchemaBundleV2.schemas) {
+        bundledV2Ajv.addSchema(schema);
+      }
+      expect(
+        bundledV2Ajv.getSchema("urn:mirrarium:corpus:sync-plan:v1"),
+      ).toBeTruthy();
+      expect(
+        bundledV2Ajv.getSchema("urn:mirrarium:corpus:compatibility:v1"),
+      ).toBeTruthy();
+      expect(
+        bundledV2Ajv.getSchema(
+          "urn:mirrarium:corpus:negotiated-sync-request:v1",
+        ),
+      ).toBeTruthy();
+
       const { stdout: negotiationSchemaBundleStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-negotiation-schema-bundle"],

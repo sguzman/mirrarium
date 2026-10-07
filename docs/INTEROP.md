@@ -1,6 +1,8 @@
 # Mirrarium corpus JSONL export
 
-`mirrarium corpus export-schema-bundle` emits one deterministic convenience envelope containing every currently published interop JSON Schema in dependency order. Each embedded schema retains its normative URN `$id`; consumers can register the array with a JSON Schema implementation and then resolve the same cross-schema `$ref` graph used by Mirrarium's own Chromium QA. The bundle envelope itself is not a replacement wire contract — the embedded schemas remain authoritative.
+`mirrarium corpus export-schema-bundle` is the frozen original v1 convenience envelope containing the original export/sync JSON Schemas in dependency order. Each embedded schema retains its normative URN `$id`; consumers can register the array with a JSON Schema implementation and then resolve the same cross-schema `$ref` graph used by Mirrarium's own Chromium QA. The bundle envelope itself is not a replacement wire contract — the embedded schemas remain authoritative.
+
+`mirrarium corpus export-schema-bundle-v2` is the additive superset for new consumers. It preserves all v1 members and ordering, then appends consumer-requirements, compatibility, negotiated-sync-request, and sync-plan schemas. Bundle v1 is not changed retroactively; consumers can pin either bundle generation explicitly.
 
 `mirrarium corpus export-capabilities` is the discovery handshake for an installed producer. Its v1 schema is `schemas/mirrarium-corpus-capabilities-v1.schema.json` / `mirrarium corpus export-capabilities-schema`. It reports the stable raw `archive_id`, current internal producer schema version, the v1 export/sync wire versions represented by that published contract, synchronization byte ceilings, SHA-256 hash algorithms, and support for source-bound plus `--require-fresh` sync. Capability values describe protocol support, not current corpus freshness or manifest state; use `export-status` and `export-manifest` for those.
 
