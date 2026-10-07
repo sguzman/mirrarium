@@ -154,6 +154,63 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       extension_id: expectedExtensionId,
     });
 
+    const installedBackgroundPath = join(
+      installedExtensionPath,
+      "background.js",
+    );
+    const installedBackgroundBeforeTear = await readFile(installedBackgroundPath);
+    await writeFile(
+      installedBackgroundPath,
+      Buffer.concat([
+        installedBackgroundBeforeTear,
+        Buffer.from("\n// simulated torn generation\n", "utf8"),
+      ]),
+    );
+    const { stdout: tornStatusStdout } = await execFileAsync(
+      cliPath,
+      ["extension", "status"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_DATA_HOME: join(browserHome, ".local", "share"),
+        },
+      },
+    );
+    const tornStatus = JSON.parse(tornStatusStdout) as {
+      installed: boolean;
+      valid: boolean;
+      build_id: string | null;
+      error: string | null;
+    };
+    expect(tornStatus.installed).toBe(true);
+    expect(tornStatus.valid).toBe(false);
+    expect(tornStatus.build_id).toBeNull();
+    expect(tornStatus.error).toContain(
+      "installed extension tree does not match the last fully published generation",
+    );
+
+    await writeFile(installedBackgroundPath, installedBackgroundBeforeTear);
+    const { stdout: restoredStatusStdout } = await execFileAsync(
+      cliPath,
+      ["extension", "status"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_DATA_HOME: join(browserHome, ".local", "share"),
+        },
+      },
+    );
+    expect(JSON.parse(restoredStatusStdout)).toMatchObject({
+      install_path: installedExtensionPath,
+      installed: true,
+      valid: true,
+      version: "0.1.0",
+      build_id: extensionInstall.build_id,
+      extension_id: expectedExtensionId,
+    });
+
     const { stdout: nativeInstallStdout } = await execFileAsync(
       cliPath,
       ["native-host", "install", "chrome-for-testing", daemonPath],
