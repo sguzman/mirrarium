@@ -1754,6 +1754,7 @@ where
 fn verify_export_record_scope(
     conversation_id: &str,
     evidence: &ConversationView,
+    canonical: &Option<CanonicalConversationView>,
     stream_revisions: &[StreamMessageRevisionView],
     attachments: &[AttachmentView],
 ) -> Result<()> {
@@ -1806,6 +1807,24 @@ fn verify_export_record_scope(
             "conversation {conversation_id:?} export contains stream scoped to {:?}",
             stream.conversation_id
         );
+    }
+    if let Some(canonical) = canonical {
+        anyhow::ensure!(
+            canonical.conversation_id == conversation_id,
+            "conversation {conversation_id:?} export contains canonical view scoped to {:?}",
+            canonical.conversation_id
+        );
+        for stream in canonical
+            .linked_streams
+            .iter()
+            .chain(canonical.unlinked_streams.iter())
+        {
+            anyhow::ensure!(
+                stream.conversation_id == conversation_id,
+                "conversation {conversation_id:?} canonical view contains stream scoped to {:?}",
+                stream.conversation_id
+            );
+        }
     }
     for revision in stream_revisions {
         anyhow::ensure!(
@@ -2085,6 +2104,7 @@ fn conversation_export_record_for_connections(
     verify_export_record_scope(
         &conversation_id,
         &evidence,
+        &canonical,
         &stream_revisions,
         &attachments,
     )?;
@@ -6094,6 +6114,46 @@ mod tests {
             error.contains("EventSource skipped capture")
                 && error.contains("empty reason")
         }));
+    }
+
+    #[test]
+    fn export_scope_rejects_cross_conversation_canonical_view() {
+        let evidence = ConversationView {
+            summary: ConversationSummary {
+                conversation_id: "fixture".to_owned(),
+                title: None,
+                snapshot_count: 1,
+                message_observation_count: 0,
+                stream_reconstruction_count: 0,
+                stream_revision_count: 0,
+                attachment_observation_count: 0,
+            },
+            messages: Vec::new(),
+            streams: Vec::new(),
+        };
+        let canonical = Some(CanonicalConversationView {
+            conversation_id: "wrong".to_owned(),
+            title: None,
+            basis_capture_id: "capture".to_owned(),
+            basis_source_url: "https://chatgpt.com/backend-api/conversation/wrong".to_owned(),
+            basis_source_body_hash: "a".repeat(64),
+            basis_kind: "mapping_current_node".to_owned(),
+            current_node: None,
+            messages: Vec::new(),
+            linked_streams: Vec::new(),
+            unlinked_streams: Vec::new(),
+            warnings: Vec::new(),
+        });
+
+        let error = verify_export_record_scope(
+            "fixture",
+            &evidence,
+            &canonical,
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("canonical view scoped"));
     }
 
     #[test]
