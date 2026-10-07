@@ -6176,9 +6176,10 @@ mod tests {
             .contains("duplicate corpus sync-state conversation id"));
     }
 
-    fn checkpoint_fixture(
+    fn checkpoint_fixture_with_producer(
         archive_id: &str,
         records: BTreeMap<String, String>,
+        producer_corpus_schema_version: i64,
     ) -> ConversationSyncCheckpoint {
         let mut index_hasher = Sha256::new();
         for (conversation_id, record_sha256) in &records {
@@ -6186,7 +6187,7 @@ mod tests {
                 conversation_export_index_line_with_producer(
                     conversation_id,
                     record_sha256,
-                    CORPUS_SCHEMA_VERSION,
+                    producer_corpus_schema_version,
                 )
                 .unwrap(),
             );
@@ -6201,7 +6202,7 @@ mod tests {
                 schema_version: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
                 conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
                 index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
-                producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+                producer_corpus_schema_version,
                 record_type: "export-manifest".to_owned(),
                 conversation_count: records.len() as u64,
                 index_sha256: format!("{:x}", index_hasher.finalize()),
@@ -6212,6 +6213,29 @@ mod tests {
                 records,
             },
         }
+    }
+
+    fn checkpoint_fixture(
+        archive_id: &str,
+        records: BTreeMap<String, String>,
+    ) -> ConversationSyncCheckpoint {
+        checkpoint_fixture_with_producer(archive_id, records, CORPUS_SCHEMA_VERSION)
+    }
+
+    #[test]
+    fn source_bound_checkpoint_validation_accepts_older_internal_producer_schema() {
+        let archive = "a".repeat(64);
+        let mut records = BTreeMap::new();
+        records.insert("fixture".to_owned(), "c".repeat(64));
+        let older_producer = (CORPUS_SCHEMA_VERSION - 1).max(1);
+        let checkpoint =
+            checkpoint_fixture_with_producer(&archive, records, older_producer);
+
+        validate_sync_checkpoint_for_archive(&checkpoint, &archive).unwrap();
+        assert_eq!(
+            checkpoint.manifest.producer_corpus_schema_version,
+            older_producer
+        );
     }
 
     #[test]
