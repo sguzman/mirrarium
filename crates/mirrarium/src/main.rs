@@ -276,10 +276,22 @@ fn run() -> Result<()> {
                 print!("{}", corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON);
             }
             Some("export-sync-state") => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&corpus::export_sync_state(&root)?)?
+                let state = corpus::export_sync_state(&root)?;
+                let bytes =
+                    serde_json::to_vec(&state).context("serializing corpus sync state")?;
+                anyhow::ensure!(
+                    bytes.len() as u64 <= MAX_CORPUS_SYNC_STATE_INPUT_BYTES,
+                    "current corpus sync checkpoint is {} bytes, exceeding the {}-byte export-delta input ceiling; use export-manifest/export-index/export-one for incremental synchronization",
+                    bytes.len(),
+                    MAX_CORPUS_SYNC_STATE_INPUT_BYTES
                 );
+                let mut stdout = std::io::stdout().lock();
+                stdout
+                    .write_all(&bytes)
+                    .context("writing corpus sync state")?;
+                stdout
+                    .write_all(b"\n")
+                    .context("terminating corpus sync state")?;
             }
             Some("export-delta") => {
                 let input = read_bounded_utf8_input(

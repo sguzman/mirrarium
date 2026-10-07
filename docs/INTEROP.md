@@ -62,7 +62,7 @@ Canonicalization is not authoritative over evidence. Ambiguous or unsupported sn
 
 `mirrarium corpus export-delta` is the direct consumer path for a local importer that can hold its known conversation hash map. It reads one sync-state JSON object from stdin and emits one sync-delta JSON object to stdout. The whole calculation holds a shared corpus-generation lock, so its manifest, upserts, and deletions all describe one published generation.
 
-The sync-state v1 contract is `schemas/mirrarium-corpus-sync-state-v1.schema.json` and is emitted by `mirrarium corpus export-sync-state-schema`. `mirrarium corpus export-sync-state` emits the exact current checkpoint from the verified materialized conversation hash index under one shared generation lock; its `records` object is equivalent to converting the complete `export-index` JSONL stream into conversation-ID→record-hash pairs:
+The sync-state v1 contract is `schemas/mirrarium-corpus-sync-state-v1.schema.json` and is emitted by `mirrarium corpus export-sync-state-schema`. `mirrarium corpus export-sync-state` emits the exact current checkpoint from the verified materialized conversation hash index under one shared generation lock; its `records` object is equivalent to converting the complete `export-index` JSONL stream into conversation-ID→record-hash pairs. The emitter enforces the same 64 MiB byte ceiling as `export-delta`, so every successfully emitted checkpoint is guaranteed to be acceptable as a later delta input. If a future archive exceeds that checkpoint size, use the manifest/index/`export-one` protocol instead:
 
 ```json
 {"schema":"mirrarium.corpus.sync-state","schema_version":1,"records":{"conversation-id":"<record_sha256>"}}
