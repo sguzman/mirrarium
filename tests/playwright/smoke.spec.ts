@@ -12,6 +12,35 @@ const execFileAsync = promisify(execFile);
 const nativeHostName = "com.sguzman.mirrarium";
 const expectedExtensionId = "oodcefibmdmabgepkcpanjpjolnbignk";
 
+async function execFileWithInputResult(
+  file: string,
+  args: string[],
+  input: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(file, args, {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", rejectPromise);
+    child.on("close", (code) => {
+      resolvePromise({ code, stdout, stderr });
+    });
+    child.stdin.end(input);
+  });
+}
+
 async function execFileWithInput(
   file: string,
   args: string[],
@@ -2874,22 +2903,24 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         }
         expect(damagedStaleExpectedRejected).toBe(true);
 
-        let damagedUpsertRejected = false;
-        try {
-          await execFileWithInput(
-            cliPath,
-            ["corpus", "export-delta"],
-            JSON.stringify(staleSyncState),
-            {
-              ...childEnv,
-              MIRRARIUM_DATA_DIR: dataDir,
-            },
-          );
-        } catch (error) {
-          damagedUpsertRejected = true;
-          expect(String(error)).toContain("canonicalizing conversation");
-        }
-        expect(damagedUpsertRejected).toBe(true);
+        const damagedUpsertResult = await execFileWithInputResult(
+          cliPath,
+          ["corpus", "export-delta"],
+          JSON.stringify(staleSyncState),
+          {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        );
+        expect(damagedUpsertResult.code).not.toBe(0);
+        expect(damagedUpsertResult.stderr).toContain("canonicalizing conversation");
+        expect(damagedUpsertResult.stdout).toContain(
+          '"schema":"mirrarium.corpus.sync-delta"',
+        );
+        expect(damagedUpsertResult.stdout).not.toContain(
+          '"deleted_conversation_ids"',
+        );
+        expect(() => JSON.parse(damagedUpsertResult.stdout)).toThrow();
 
         try {
           await execFileAsync(
