@@ -333,6 +333,12 @@ fn run() -> Result<()> {
                     "writing corpus export-index schema",
                 )?;
             }
+            Some("export-source-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_EXPORT_SOURCE_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus export-source schema",
+                )?;
+            }
             Some("export-manifest-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON.as_bytes(),
@@ -385,6 +391,13 @@ fn run() -> Result<()> {
                 stdout
                     .flush()
                     .context("flushing corpus sync-delta JSON")?;
+            }
+            Some("export-source") => {
+                let source = corpus::export_source(&root)?;
+                write_stdout_json_line(
+                    serde_json::to_vec(&source).context("serializing corpus export source")?,
+                    "writing corpus export source",
+                )?;
             }
             Some("export-manifest") => {
                 let manifest = corpus::export_manifest(&root)?;
@@ -1530,6 +1543,7 @@ USAGE:
   mirrarium corpus stats
   mirrarium corpus verify
   mirrarium corpus export-schema
+  mirrarium corpus export-source-schema
   mirrarium corpus export-index-schema
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-status-schema
@@ -1537,6 +1551,7 @@ USAGE:
   mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta
+  mirrarium corpus export-source
   mirrarium corpus export-manifest
   mirrarium corpus export-status
   mirrarium corpus export-index [LIMIT]

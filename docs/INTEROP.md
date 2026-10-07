@@ -4,6 +4,8 @@
 
 ## v1 framing
 
+`mirrarium corpus export-source` emits the stable identity of the authoritative raw archive. Its normative contract is `schemas/mirrarium-corpus-export-source-v1.schema.json` and `mirrarium corpus export-source-schema`. The `archive_id` is a random 256-bit lowercase-hex identifier stored inside the raw ledger, preserved by SQLCipher migration and archive copies, and unrelated to keys, filesystem paths, account identity, or conversation content. A downstream consumer should bind persisted sync state to this ID and refuse to reuse that state against a different archive ID. Sync-state v1 deliberately remains unchanged, so this source binding is a consumer-side envelope rule rather than an added field in the existing wire object.
+
 `mirrarium corpus export-status` reports whether the currently published derived corpus was built from the current raw archive tip. Its normative contract is `schemas/mirrarium-corpus-export-status-v1.schema.json` and `mirrarium corpus export-status-schema`. A rebuild stores the raw capture count and maximum SQLite rowid from the exact pinned raw snapshot used for derivation. Status compares that watermark with the current append-only raw ledger and reports `fresh`, `pending_raw_captures`, both watermarks, and the published export manifest. Any new raw capture makes the result conservatively stale until the next successful `corpus rebuild`, even if that capture would not ultimately change a conversation export record. A raw ledger that is behind or contradicts the published watermark is treated as a lineage error rather than ordinary staleness.
 
 `mirrarium corpus export-manifest` emits a tiny deterministic JSON object containing the full exported conversation count and SHA-256 of the exact complete `corpus export-index` JSONL bytes (including newline framing). Its normative contract is `schemas/mirrarium-corpus-export-manifest-v1.schema.json` and `mirrarium corpus export-manifest-schema`. Consumers can compare this fingerprint first and skip all further synchronization work when it is unchanged.
@@ -92,6 +94,7 @@ For operational safety, `export-delta` accepts at most 64 MiB of UTF-8 sync-stat
 
 A downstream consumer can synchronize without re-ingesting unchanged conversation text while remaining safe against a rebuild between commands:
 
+-1. Read `corpus export-source` and require its `archive_id` to match the source identity bound to the consumer's persisted sync state. For first import, bind the new state to this ID.
 0. If the goal is “derive everything captured so far,” read `corpus export-status` and require `fresh: true`; otherwise the protocol deliberately synchronizes the last published derived generation.
 1. Read `corpus export-manifest` as M1. If its `index_sha256` matches the consumer's previously completed synchronization, stop: the exported conversation set and every v1 record hash were unchanged at that observation point.
 2. Otherwise read a complete `corpus export-index`, hash its exact stdout bytes, and require that SHA-256 to equal M1.`index_sha256`. If it differs, a rebuild raced the commands; discard the index and restart from step 1.

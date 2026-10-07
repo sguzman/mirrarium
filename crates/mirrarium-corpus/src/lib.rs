@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use mirrarium_store::{
-    apply_private_database_key, open_raw_ledger_read_only, read_verified_object,
+    apply_private_database_key, archive_identity as raw_archive_identity,
+    open_raw_ledger_read_only, read_verified_object,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{
@@ -30,6 +31,9 @@ pub const CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON: &str =
 pub const CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-export-manifest-v1.schema.json");
+pub const CORPUS_EXPORT_SOURCE_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_EXPORT_SOURCE_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-export-source-v1.schema.json");
 pub const CORPUS_EXPORT_STATUS_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-export-status-v1.schema.json");
@@ -300,6 +304,14 @@ pub struct ConversationExportManifest {
     pub record_type: String,
     pub conversation_count: u64,
     pub index_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationExportSource {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1687,6 +1699,15 @@ pub fn export_manifest(raw_root: impl AsRef<Path>) -> Result<ConversationExportM
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
     materialized_export_manifest_for_connection(&corpus)
+}
+
+pub fn export_source(raw_root: impl AsRef<Path>) -> Result<ConversationExportSource> {
+    Ok(ConversationExportSource {
+        schema: "mirrarium.corpus.export-source".to_owned(),
+        schema_version: CORPUS_EXPORT_SOURCE_SCHEMA_VERSION,
+        record_type: "export-source".to_owned(),
+        archive_id: raw_archive_identity(raw_root)?,
+    })
 }
 
 pub fn export_status(raw_root: impl AsRef<Path>) -> Result<ConversationExportStatus> {

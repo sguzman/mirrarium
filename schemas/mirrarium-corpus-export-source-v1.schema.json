@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:export-source:v1",
+  "title": "Mirrarium corpus export source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "record_type", "archive_id"],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.export-source" },
+    "schema_version": { "const": 1 },
+    "record_type": { "const": "export-source" },
+    "archive_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
