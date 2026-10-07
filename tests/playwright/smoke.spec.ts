@@ -59,6 +59,7 @@ type StoreStats = {
   private_objects: number;
   unknown_objects: number;
   body_errors: number;
+  suppressed_bodies: number;
   request_bodies: number;
   request_body_bytes: number;
   request_body_errors: number;
@@ -1490,6 +1491,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(oversizedCompressedResponseCapture?.body_error).toBe(
         "suppressed:response_body_too_large",
       );
+
+      const bodyLimitStats = await readStats();
+      expect(bodyLimitStats.body_errors).toBeGreaterThanOrEqual(1);
+      expect(bodyLimitStats.suppressed_bodies).toBeGreaterThanOrEqual(4);
+      expect(bodyLimitStats.request_body_errors).toBe(0);
+      expect(bodyLimitStats.suppressed_request_bodies).toBeGreaterThanOrEqual(2);
 
       const websocketSent = captures.find(
         (capture) =>
