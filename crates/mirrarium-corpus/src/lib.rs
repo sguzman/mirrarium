@@ -43,6 +43,10 @@ pub const CORPUS_SYNC_STATE_SCHEMA_V1_JSON: &str =
 pub const CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_CHECKPOINT_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-checkpoint-v1.schema.json");
+pub const CORPUS_SYNC_TRANSACTION_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SYNC_TRANSACTION_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-sync-transaction-v1.schema.json");
+pub const CORPUS_SYNC_STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const CORPUS_SYNC_DELTA_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
@@ -297,7 +301,8 @@ pub struct ConversationExportIndexRecord {
     pub record_sha256: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationExportManifest {
     pub schema: String,
     pub schema_version: u32,
@@ -332,7 +337,7 @@ pub struct ConversationExportStatus {
     pub fresh: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationSyncState {
     pub schema: String,
@@ -341,7 +346,8 @@ pub struct ConversationSyncState {
     pub records: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationSyncCheckpoint {
     pub schema: String,
     pub schema_version: u32,
@@ -349,6 +355,18 @@ pub struct ConversationSyncCheckpoint {
     pub archive_id: String,
     pub manifest: ConversationExportManifest,
     pub sync_state: ConversationSyncState,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationSyncTransaction {
+    pub schema: String,
+    pub schema_version: u32,
+    pub sync_checkpoint_schema_version: u32,
+    pub sync_delta_schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
+    pub delta: ConversationSyncDelta,
+    pub checkpoint: ConversationSyncCheckpoint,
 }
 
 fn deserialize_unique_string_map<'de, D>(
@@ -404,6 +422,7 @@ pub struct ConversationSyncDelta {
 #[derive(Debug)]
 struct ConversationSyncDeltaPlan {
     manifest: ConversationExportManifest,
+    current_index: Vec<(String, String)>,
     changed_records: Vec<(String, String)>,
     deleted_conversation_ids: Vec<String>,
 }
@@ -1388,33 +1407,58 @@ pub fn export_conversations(
     Ok(records)
 }
 
-fn conversation_export_index_record(
+fn conversation_export_index_record_with_producer(
     conversation_id: String,
     record_sha256: String,
+    producer_corpus_schema_version: i64,
 ) -> ConversationExportIndexRecord {
     ConversationExportIndexRecord {
         schema: "mirrarium.corpus.conversation-index".to_owned(),
         schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
         conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
-        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        producer_corpus_schema_version,
         record_type: "conversation-index".to_owned(),
         conversation_id,
         record_sha256,
     }
 }
 
-fn conversation_export_index_line_from_parts(
+fn conversation_export_index_record(
+    conversation_id: String,
+    record_sha256: String,
+) -> ConversationExportIndexRecord {
+    conversation_export_index_record_with_producer(
+        conversation_id,
+        record_sha256,
+        CORPUS_SCHEMA_VERSION,
+    )
+}
+
+fn conversation_export_index_line_with_producer(
     conversation_id: &str,
     record_sha256: &str,
+    producer_corpus_schema_version: i64,
 ) -> Result<Vec<u8>> {
-    let index = conversation_export_index_record(
+    let index = conversation_export_index_record_with_producer(
         conversation_id.to_owned(),
         record_sha256.to_owned(),
+        producer_corpus_schema_version,
     );
     let mut bytes =
         serde_json::to_vec(&index).context("serializing corpus export index record")?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+fn conversation_export_index_line_from_parts(
+    conversation_id: &str,
+    record_sha256: &str,
+) -> Result<Vec<u8>> {
+    conversation_export_index_line_with_producer(
+        conversation_id,
+        record_sha256,
+        CORPUS_SCHEMA_VERSION,
+    )
 }
 
 fn conversation_export_index_records_for_connection(
@@ -1572,6 +1616,121 @@ pub fn export_sync_checkpoint(
     })
 }
 
+fn validate_export_manifest(manifest: &ConversationExportManifest) -> Result<()> {
+    anyhow::ensure!(
+        manifest.schema == "mirrarium.corpus.export-manifest",
+        "unsupported export-manifest schema {:?}",
+        manifest.schema
+    );
+    anyhow::ensure!(
+        manifest.schema_version == CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
+        "unsupported export-manifest schema version {}; expected {}",
+        manifest.schema_version,
+        CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        manifest.conversation_schema_version == CORPUS_EXPORT_SCHEMA_VERSION,
+        "unsupported export-manifest conversation schema version {}; expected {}",
+        manifest.conversation_schema_version,
+        CORPUS_EXPORT_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        manifest.index_schema_version == CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+        "unsupported export-manifest index schema version {}; expected {}",
+        manifest.index_schema_version,
+        CORPUS_EXPORT_INDEX_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        manifest.producer_corpus_schema_version > 0,
+        "export-manifest producer corpus schema version must be positive"
+    );
+    anyhow::ensure!(
+        manifest.record_type == "export-manifest",
+        "unsupported export-manifest record type {:?}",
+        manifest.record_type
+    );
+    anyhow::ensure!(
+        valid_sha256_hex(&manifest.index_sha256)
+            && manifest
+                .index_sha256
+                .bytes()
+                .all(|byte| !byte.is_ascii_uppercase()),
+        "export-manifest index SHA-256 must be 64 lowercase hexadecimal characters"
+    );
+    Ok(())
+}
+
+fn validate_sync_checkpoint(checkpoint: &ConversationSyncCheckpoint) -> Result<()> {
+    anyhow::ensure!(
+        checkpoint.schema == "mirrarium.corpus.sync-checkpoint",
+        "unsupported sync-checkpoint schema {:?}",
+        checkpoint.schema
+    );
+    anyhow::ensure!(
+        checkpoint.schema_version == CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        "unsupported sync-checkpoint schema version {}; expected {}",
+        checkpoint.schema_version,
+        CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        checkpoint.record_type == "sync-checkpoint",
+        "unsupported sync-checkpoint record type {:?}",
+        checkpoint.record_type
+    );
+    anyhow::ensure!(
+        valid_sha256_hex(&checkpoint.archive_id)
+            && checkpoint
+                .archive_id
+                .bytes()
+                .all(|byte| !byte.is_ascii_uppercase()),
+        "sync-checkpoint archive_id must be 64 lowercase hexadecimal characters"
+    );
+    validate_export_manifest(&checkpoint.manifest)?;
+    validate_sync_state(&checkpoint.sync_state)?;
+
+    let conversation_count: u64 = checkpoint
+        .sync_state
+        .records
+        .len()
+        .try_into()
+        .context("sync-checkpoint conversation count overflow")?;
+    anyhow::ensure!(
+        checkpoint.manifest.conversation_count == conversation_count,
+        "sync-checkpoint manifest conversation count {} disagrees with nested sync-state count {}",
+        checkpoint.manifest.conversation_count,
+        conversation_count
+    );
+
+    let mut index_hasher = Sha256::new();
+    for (conversation_id, record_sha256) in &checkpoint.sync_state.records {
+        index_hasher.update(conversation_export_index_line_with_producer(
+            conversation_id,
+            record_sha256,
+            checkpoint.manifest.producer_corpus_schema_version,
+        )?);
+    }
+    let computed_index_sha256 = format!("{:x}", index_hasher.finalize());
+    anyhow::ensure!(
+        checkpoint.manifest.index_sha256 == computed_index_sha256,
+        "sync-checkpoint manifest index SHA-256 disagrees with nested sync-state"
+    );
+    Ok(())
+}
+
+fn validate_sync_checkpoint_for_archive(
+    checkpoint: &ConversationSyncCheckpoint,
+    archive_id: &str,
+) -> Result<()> {
+    validate_sync_checkpoint(checkpoint)?;
+    anyhow::ensure!(
+        checkpoint.archive_id == archive_id,
+        "sync-checkpoint belongs to archive {}, but current archive is {}; refuse cross-archive synchronization",
+        checkpoint.archive_id,
+        archive_id
+    );
+    Ok(())
+}
+
 fn validate_sync_state(state: &ConversationSyncState) -> Result<()> {
     anyhow::ensure!(
         state.schema == "mirrarium.corpus.sync-state",
@@ -1608,13 +1767,13 @@ fn conversation_sync_delta_plan(
     let mut current_ids = BTreeSet::new();
     let mut changed_records = Vec::new();
 
-    for (conversation_id, record_sha256) in cached_index {
+    for (conversation_id, record_sha256) in &cached_index {
         current_ids.insert(conversation_id.clone());
 
-        if state.records.get(&conversation_id).map(String::as_str)
+        if state.records.get(conversation_id).map(String::as_str)
             != Some(record_sha256.as_str())
         {
-            changed_records.push((conversation_id, record_sha256));
+            changed_records.push((conversation_id.clone(), record_sha256.clone()));
         }
     }
 
@@ -1627,6 +1786,7 @@ fn conversation_sync_delta_plan(
 
     Ok(ConversationSyncDeltaPlan {
         manifest,
+        current_index: cached_index,
         changed_records,
         deleted_conversation_ids,
     })
@@ -1671,17 +1831,12 @@ pub fn export_delta(
     })
 }
 
-pub fn write_conversation_sync_delta_json<W: Write>(
-    raw_root: impl AsRef<Path>,
-    state: &ConversationSyncState,
+fn write_conversation_sync_delta_body<W: Write>(
+    raw_root: &Path,
+    corpus: &Connection,
+    plan: &ConversationSyncDeltaPlan,
     writer: &mut W,
 ) -> Result<()> {
-    validate_sync_state(state)?;
-    let raw_root = raw_root.as_ref();
-    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
-    let corpus = open_corpus_read_only(raw_root)?;
-    let plan = conversation_sync_delta_plan(&corpus, state)?;
-
     write!(
         writer,
         "{{\"schema\":\"mirrarium.corpus.sync-delta\",\"schema_version\":{},\"sync_state_schema_version\":{},\"conversation_schema_version\":{},\"producer_corpus_schema_version\":{},\"record_type\":\"sync-delta\",\"manifest\":",
@@ -1711,7 +1866,7 @@ pub fn write_conversation_sync_delta_json<W: Write>(
         }
         let record = conversation_export_record_for_connections(
             raw_root,
-            &corpus,
+            corpus,
             raw.as_ref().expect("raw ledger opened for sync upsert"),
             conversation_id.clone(),
         )?;
@@ -1726,8 +1881,94 @@ pub fn write_conversation_sync_delta_json<W: Write>(
     serde_json::to_writer(&mut *writer, &plan.deleted_conversation_ids)
         .context("serializing corpus sync-delta deletions")?;
     writer
-        .write_all(b"}\n")
+        .write_all(b"}")
         .context("writing corpus sync-delta terminator")?;
+    Ok(())
+}
+
+pub fn write_conversation_sync_delta_json<W: Write>(
+    raw_root: impl AsRef<Path>,
+    state: &ConversationSyncState,
+    writer: &mut W,
+) -> Result<()> {
+    validate_sync_state(state)?;
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let plan = conversation_sync_delta_plan(&corpus, state)?;
+    write_conversation_sync_delta_body(raw_root, &corpus, &plan, writer)?;
+    writer
+        .write_all(b"\n")
+        .context("writing corpus sync-delta newline")?;
+    Ok(())
+}
+
+pub fn write_conversation_sync_transaction_json<W: Write>(
+    raw_root: impl AsRef<Path>,
+    previous_checkpoint: Option<&ConversationSyncCheckpoint>,
+    writer: &mut W,
+) -> Result<()> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let archive_id = raw_archive_identity(raw_root)?;
+
+    let bootstrap_state;
+    let previous_state = match previous_checkpoint {
+        Some(checkpoint) => {
+            validate_sync_checkpoint_for_archive(checkpoint, &archive_id)?;
+            &checkpoint.sync_state
+        }
+        None => {
+            bootstrap_state = ConversationSyncState {
+                schema: "mirrarium.corpus.sync-state".to_owned(),
+                schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+                records: BTreeMap::new(),
+            };
+            &bootstrap_state
+        }
+    };
+
+    let corpus = open_corpus_read_only(raw_root)?;
+    let plan = conversation_sync_delta_plan(&corpus, previous_state)?;
+    let next_sync_state = sync_state_from_cached_index(plan.current_index.clone())?;
+    let next_sync_state_bytes =
+        serde_json::to_vec(&next_sync_state).context("serializing next corpus sync-state")?;
+    anyhow::ensure!(
+        next_sync_state_bytes.len() as u64 <= CORPUS_SYNC_STATE_MAX_BYTES,
+        "next corpus sync-state exceeds the {}-byte source-bound sync ceiling; use export-manifest/export-index/export-one instead",
+        CORPUS_SYNC_STATE_MAX_BYTES
+    );
+    let next_checkpoint = ConversationSyncCheckpoint {
+        schema: "mirrarium.corpus.sync-checkpoint".to_owned(),
+        schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        record_type: "sync-checkpoint".to_owned(),
+        archive_id: archive_id.clone(),
+        manifest: plan.manifest.clone(),
+        sync_state: next_sync_state,
+    };
+
+    write!(
+        writer,
+        "{{\"schema\":\"mirrarium.corpus.sync-transaction\",\"schema_version\":{},\"sync_checkpoint_schema_version\":{},\"sync_delta_schema_version\":{},\"record_type\":\"sync-transaction\",\"archive_id\":",
+        CORPUS_SYNC_TRANSACTION_SCHEMA_VERSION,
+        CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        CORPUS_SYNC_DELTA_SCHEMA_VERSION,
+    )
+    .context("writing corpus sync-transaction header")?;
+    serde_json::to_writer(&mut *writer, &archive_id)
+        .context("serializing corpus sync-transaction archive id")?;
+    writer
+        .write_all(b",\"delta\":")
+        .context("writing corpus sync-transaction delta prefix")?;
+    write_conversation_sync_delta_body(raw_root, &corpus, &plan, writer)?;
+    writer
+        .write_all(b",\"checkpoint\":")
+        .context("writing corpus sync-transaction checkpoint prefix")?;
+    serde_json::to_writer(&mut *writer, &next_checkpoint)
+        .context("serializing corpus sync-transaction checkpoint")?;
+    writer
+        .write_all(b"}\n")
+        .context("writing corpus sync-transaction terminator")?;
     Ok(())
 }
 
@@ -5933,6 +6174,72 @@ mod tests {
         assert!(error
             .to_string()
             .contains("duplicate corpus sync-state conversation id"));
+    }
+
+    fn checkpoint_fixture(
+        archive_id: &str,
+        records: BTreeMap<String, String>,
+    ) -> ConversationSyncCheckpoint {
+        let mut index_hasher = Sha256::new();
+        for (conversation_id, record_sha256) in &records {
+            index_hasher.update(
+                conversation_export_index_line_with_producer(
+                    conversation_id,
+                    record_sha256,
+                    CORPUS_SCHEMA_VERSION,
+                )
+                .unwrap(),
+            );
+        }
+        ConversationSyncCheckpoint {
+            schema: "mirrarium.corpus.sync-checkpoint".to_owned(),
+            schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+            record_type: "sync-checkpoint".to_owned(),
+            archive_id: archive_id.to_owned(),
+            manifest: ConversationExportManifest {
+                schema: "mirrarium.corpus.export-manifest".to_owned(),
+                schema_version: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
+                conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+                index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+                producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+                record_type: "export-manifest".to_owned(),
+                conversation_count: records.len() as u64,
+                index_sha256: format!("{:x}", index_hasher.finalize()),
+            },
+            sync_state: ConversationSyncState {
+                schema: "mirrarium.corpus.sync-state".to_owned(),
+                schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+                records,
+            },
+        }
+    }
+
+    #[test]
+    fn source_bound_checkpoint_validation_rejects_cross_archive_reuse() {
+        let archive_a = "a".repeat(64);
+        let archive_b = "b".repeat(64);
+        let mut records = BTreeMap::new();
+        records.insert("fixture".to_owned(), "c".repeat(64));
+        let checkpoint = checkpoint_fixture(&archive_a, records);
+
+        validate_sync_checkpoint_for_archive(&checkpoint, &archive_a).unwrap();
+        let error =
+            validate_sync_checkpoint_for_archive(&checkpoint, &archive_b).unwrap_err();
+        assert!(error.to_string().contains("refuse cross-archive synchronization"));
+    }
+
+    #[test]
+    fn source_bound_checkpoint_validation_rejects_torn_manifest() {
+        let archive = "a".repeat(64);
+        let mut records = BTreeMap::new();
+        records.insert("fixture".to_owned(), "c".repeat(64));
+        let mut checkpoint = checkpoint_fixture(&archive, records);
+        checkpoint.manifest.index_sha256 = "d".repeat(64);
+
+        let error = validate_sync_checkpoint(&checkpoint).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("manifest index SHA-256 disagrees"));
     }
 
     #[test]

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:sync-transaction:v1",
+  "title": "Mirrarium source-bound corpus sync transaction v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "sync_checkpoint_schema_version",
+    "sync_delta_schema_version",
+    "record_type",
+    "archive_id",
+    "delta",
+    "checkpoint"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.sync-transaction" },
+    "schema_version": { "const": 1 },
+    "sync_checkpoint_schema_version": { "const": 1 },
+    "sync_delta_schema_version": { "const": 1 },
+    "record_type": { "const": "sync-transaction" },
+    "archive_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "delta": {
+      "$ref": "urn:mirrarium:corpus:sync-delta:v1"
+    },
+    "checkpoint": {
+      "$ref": "urn:mirrarium:corpus:sync-checkpoint:v1"
+    }
+  }
+}
