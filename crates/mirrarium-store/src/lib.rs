@@ -4883,10 +4883,17 @@ mod tests {
             "Fetch",
         );
         store.begin(item).unwrap();
+        let indexed_body = br#"{"indexed":"body"}"#;
         store
-            .append_chunk("indexed-capture", 0, &BASE64.encode(b"indexed body"))
+            .append_chunk("indexed-capture", 0, &BASE64.encode(indexed_body))
             .unwrap();
-        store.finish("indexed-capture", Some(12), None).unwrap();
+        store
+            .finish(
+                "indexed-capture",
+                Some(indexed_body.len() as u64),
+                None,
+            )
+            .unwrap();
         let indexed_hash = store.recent_captures(1).unwrap()[0]
             .body_hash
             .clone()
