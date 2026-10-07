@@ -357,10 +357,31 @@ fn run() -> Result<()> {
                     "writing corpus sync-state schema",
                 )?;
             }
+            Some("export-sync-checkpoint-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_SYNC_CHECKPOINT_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus sync-checkpoint schema",
+                )?;
+            }
             Some("export-delta-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON.as_bytes(),
                     "writing corpus sync-delta schema",
+                )?;
+            }
+            Some("export-sync-checkpoint") => {
+                let checkpoint = corpus::export_sync_checkpoint(&root)?;
+                let sync_state_bytes = serde_json::to_vec(&checkpoint.sync_state)
+                    .context("serializing bound corpus sync-state")?;
+                anyhow::ensure!(
+                    sync_state_bytes.len() as u64 <= MAX_CORPUS_SYNC_STATE_INPUT_BYTES,
+                    "bound corpus sync checkpoint contains a sync-state larger than the {}-byte export-delta input ceiling; use export-manifest/export-index/export-one instead",
+                    MAX_CORPUS_SYNC_STATE_INPUT_BYTES
+                );
+                write_stdout_json_line(
+                    serde_json::to_vec(&checkpoint)
+                        .context("serializing corpus sync checkpoint")?,
+                    "writing corpus sync checkpoint",
                 )?;
             }
             Some("export-sync-state") => {
@@ -1548,6 +1569,8 @@ USAGE:
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-status-schema
   mirrarium corpus export-sync-state-schema
+  mirrarium corpus export-sync-checkpoint-schema
+  mirrarium corpus export-sync-checkpoint
   mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta

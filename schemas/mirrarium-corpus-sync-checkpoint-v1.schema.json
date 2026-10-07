@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:sync-checkpoint:v1",
+  "title": "Mirrarium corpus sync checkpoint v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "record_type",
+    "archive_id",
+    "manifest",
+    "sync_state"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.sync-checkpoint" },
+    "schema_version": { "const": 1 },
+    "record_type": { "const": "sync-checkpoint" },
+    "archive_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "manifest": { "$ref": "urn:mirrarium:corpus:export-manifest:v1" },
+    "sync_state": { "$ref": "urn:mirrarium:corpus:sync-state:v1" }
+  }
+}

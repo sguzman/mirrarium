@@ -40,6 +40,9 @@ pub const CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON: &str =
 pub const CORPUS_SYNC_STATE_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_STATE_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-state-v1.schema.json");
+pub const CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SYNC_CHECKPOINT_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-sync-checkpoint-v1.schema.json");
 pub const CORPUS_SYNC_DELTA_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
@@ -336,6 +339,16 @@ pub struct ConversationSyncState {
     pub schema_version: u32,
     #[serde(deserialize_with = "deserialize_unique_string_map")]
     pub records: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationSyncCheckpoint {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
+    pub manifest: ConversationExportManifest,
+    pub sync_state: ConversationSyncState,
 }
 
 fn deserialize_unique_string_map<'de, D>(
@@ -1520,19 +1533,43 @@ pub fn write_conversation_sync_state_json<W: Write>(
     Ok(count)
 }
 
+fn sync_state_from_cached_index(
+    cached_index: Vec<(String, String)>,
+) -> Result<ConversationSyncState> {
+    let state = ConversationSyncState {
+        schema: "mirrarium.corpus.sync-state".to_owned(),
+        schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+        records: cached_index.into_iter().collect::<BTreeMap<_, _>>(),
+    };
+    validate_sync_state(&state)?;
+    Ok(state)
+}
+
 pub fn export_sync_state(raw_root: impl AsRef<Path>) -> Result<ConversationSyncState> {
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
     let (_manifest, cached_index) = verified_materialized_export_index(&corpus)?;
-    let records = cached_index.into_iter().collect::<BTreeMap<_, _>>();
-    let state = ConversationSyncState {
-        schema: "mirrarium.corpus.sync-state".to_owned(),
-        schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
-        records,
-    };
-    validate_sync_state(&state)?;
-    Ok(state)
+    sync_state_from_cached_index(cached_index)
+}
+
+pub fn export_sync_checkpoint(
+    raw_root: impl AsRef<Path>,
+) -> Result<ConversationSyncCheckpoint> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let (manifest, cached_index) = verified_materialized_export_index(&corpus)?;
+    let sync_state = sync_state_from_cached_index(cached_index)?;
+
+    Ok(ConversationSyncCheckpoint {
+        schema: "mirrarium.corpus.sync-checkpoint".to_owned(),
+        schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        record_type: "sync-checkpoint".to_owned(),
+        archive_id: raw_archive_identity(raw_root)?,
+        manifest,
+        sync_state,
+    })
 }
 
 fn validate_sync_state(state: &ConversationSyncState) -> Result<()> {
