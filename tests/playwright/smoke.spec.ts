@@ -2233,6 +2233,35 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         strict: true,
       }).compile(corpusExportManifestSchema);
 
+      const exportHashVector = JSON.parse(
+        await readFile(
+          resolve(
+            "schemas/mirrarium-corpus-conversation-v1.hash-vector.json",
+          ),
+          "utf8",
+        ),
+      ) as {
+        record_line: string;
+        hash_preimage: string;
+        sha256: string;
+      };
+      const hashMember =
+        `"record_sha256":"${exportHashVector.sha256}",`;
+      expect(exportHashVector.record_line.indexOf(hashMember)).toBeGreaterThan(
+        -1,
+      );
+      expect(exportHashVector.record_line.indexOf(hashMember)).toBe(
+        exportHashVector.record_line.lastIndexOf(hashMember),
+      );
+      const consumerPreimage = exportHashVector.record_line.replace(
+        hashMember,
+        "",
+      );
+      expect(consumerPreimage).toBe(exportHashVector.hash_preimage);
+      expect(
+        createHash("sha256").update(consumerPreimage, "utf8").digest("hex"),
+      ).toBe(exportHashVector.sha256);
+
       const { stdout: corpusExportStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export"],
