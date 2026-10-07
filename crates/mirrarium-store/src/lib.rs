@@ -184,6 +184,7 @@ fn capture_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Capture
 pub struct VerifyReport {
     pub checked_objects: u64,
     pub corrupt_objects: u64,
+    pub unreferenced_indexed_objects: u64,
     pub orphan_objects: u64,
     pub orphan_object_bytes: u64,
     pub unexpected_object_entries: u64,
@@ -1369,6 +1370,7 @@ impl CaptureStore {
         let mut report = VerifyReport {
             checked_objects: 0,
             corrupt_objects: 0,
+            unreferenced_indexed_objects: 0,
             orphan_objects: 0,
             orphan_object_bytes: 0,
             unexpected_object_entries: 0,
@@ -1414,6 +1416,39 @@ impl CaptureStore {
                     "{storage_class}/{hash}: ledger path mismatch: {indexed_relative_path}"
                 ));
                 continue;
+            }
+
+            let reference_count: i64 = if class == PrivacyClass::Private {
+                self.connection.query_row(
+                    r#"
+                    SELECT
+                        (SELECT COUNT(*) FROM captures
+                         WHERE privacy_class = 'private' AND body_hash = ?1)
+                      + (SELECT COUNT(*) FROM request_bodies
+                         WHERE body_hash = ?1)
+                    "#,
+                    [hash.as_str()],
+                    |row| row.get(0),
+                )?
+            } else {
+                self.connection.query_row(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM captures
+                    WHERE privacy_class = ?1 AND body_hash = ?2
+                    "#,
+                    params![class.as_str(), hash],
+                    |row| row.get(0),
+                )?
+            };
+            if reference_count == 0 {
+                report.unreferenced_indexed_objects = report
+                    .unreferenced_indexed_objects
+                    .checked_add(1)
+                    .context("unreferenced indexed object count overflow")?;
+                report.errors.push(format!(
+                    "{storage_class}/{hash}: indexed object is not referenced by any capture or request body"
+                ));
             }
 
             match read_verified_object(&self.root, &storage_class, &hash) {
@@ -4287,6 +4322,60 @@ mod tests {
         assert!(broken_request.errors.iter().any(|error| {
             error.contains("request body byte count")
                 && error.contains("indexed object bytes")
+        }));
+    }
+
+    #[test]
+    fn verify_rejects_indexed_object_without_capture_reference() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+
+        let body = b"referenced";
+        let capture_id = "referenced-object";
+        let mut item = metadata(
+            capture_id,
+            "https://chatgpt.com/_next/static/referenced.js",
+            "Script",
+        );
+        item.mime_type = "application/javascript".to_owned();
+        store.begin(item).unwrap();
+        store
+            .append_chunk(capture_id, 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish(capture_id, Some(body.len() as u64), None)
+            .unwrap();
+
+        let orphan_bytes = b"indexed but unreferenced";
+        let orphan_hash = sha256_hex(orphan_bytes);
+        let orphan_relative =
+            object_relative_path(PrivacyClass::Public, &orphan_hash);
+        let orphan_path = directory.path().join(&orphan_relative);
+        fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        fs::write(&orphan_path, orphan_bytes).unwrap();
+        store
+            .connection
+            .execute(
+                r#"
+                INSERT INTO objects
+                    (storage_class, hash, bytes, relative_path, created_at_ms)
+                VALUES
+                    ('public', ?1, ?2, ?3, 0)
+                "#,
+                params![
+                    orphan_hash,
+                    orphan_bytes.len() as i64,
+                    orphan_relative.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+
+        let report = store.verify().unwrap();
+        assert_eq!(report.corrupt_objects, 0);
+        assert_eq!(report.orphan_objects, 0);
+        assert_eq!(report.unreferenced_indexed_objects, 1);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("indexed object is not referenced")
         }));
     }
 
