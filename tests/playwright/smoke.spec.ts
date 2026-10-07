@@ -3344,6 +3344,60 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         );
         expect(() => JSON.parse(damagedUpsertResult.stdout)).toThrow();
 
+        const staleCheckpointIndexBytes = Object.entries(
+          staleSyncState.records,
+        )
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([conversationId, recordSha256]) =>
+            JSON.stringify({
+              schema: "mirrarium.corpus.conversation-index",
+              schema_version: 1,
+              conversation_schema_version: 1,
+              producer_corpus_schema_version:
+                currentCheckpoint.manifest.producer_corpus_schema_version,
+              record_type: "conversation-index",
+              conversation_id: conversationId,
+              record_sha256: recordSha256,
+            }) + "\n",
+          )
+          .join("");
+        const staleCheckpoint = {
+          ...currentCheckpoint,
+          manifest: {
+            ...currentCheckpoint.manifest,
+            conversation_count: Object.keys(staleSyncState.records).length,
+            index_sha256: createHash("sha256")
+              .update(staleCheckpointIndexBytes)
+              .digest("hex"),
+          },
+          sync_state: staleSyncState,
+        };
+        expect(
+          validateCorpusSyncCheckpoint(staleCheckpoint),
+          JSON.stringify(validateCorpusSyncCheckpoint.errors),
+        ).toBe(true);
+
+        const damagedBoundSyncResult = await execFileWithInputResult(
+          cliPath,
+          ["corpus", "export-sync"],
+          JSON.stringify(staleCheckpoint),
+          {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        );
+        expect(damagedBoundSyncResult.code).not.toBe(0);
+        expect(damagedBoundSyncResult.stderr).toContain(
+          "canonicalizing conversation",
+        );
+        if (damagedBoundSyncResult.stdout.length > 0) {
+          expect(damagedBoundSyncResult.stdout).toContain(
+            '"schema":"mirrarium.corpus.sync-transaction"',
+          );
+        }
+        expect(damagedBoundSyncResult.stdout).not.toContain('"checkpoint":');
+        expect(() => JSON.parse(damagedBoundSyncResult.stdout)).toThrow();
+
         try {
           await execFileAsync(
             cliPath,

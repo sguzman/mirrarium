@@ -102,6 +102,8 @@ For every later synchronization, pipe that exact checkpoint back to `mirrarium c
 
 The legacy `export-delta` + separate source/checkpoint protocol remains supported for consumers that already manage source binding themselves.
 
+Like `export-delta`, `export-sync` streams changed private conversation records and can encounter structural CAS/JSON damage after stdout begins. **Exit status remains authoritative.** On nonzero exit, discard stdout in full even if it begins with a valid transaction prefix. Mirrarium writes the returned checkpoint only after every changed record and deletion list has been serialized successfully, so a failed transaction cannot contain an authoritative next checkpoint.
+
 ## Incremental synchronization
 
 A downstream consumer can synchronize without re-ingesting unchanged conversation text while remaining safe against a rebuild between commands:
