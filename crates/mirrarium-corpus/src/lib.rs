@@ -172,6 +172,8 @@ pub struct ConversationSummary {
     pub snapshot_count: u64,
     pub message_observation_count: u64,
     pub stream_reconstruction_count: u64,
+    pub stream_revision_count: u64,
+    pub attachment_observation_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1063,6 +1065,21 @@ pub fn conversations(
     anyhow::ensure!(limit > 0, "conversation limit must be greater than zero");
     let connection = open_corpus_read_only(raw_root)?;
 
+    let ids = conversation_ids_for_connection(&connection, limit as i64)?;
+
+    ids.into_iter()
+        .map(|conversation_id| {
+            conversation_summary(&connection, &conversation_id)?
+                .context("conversation disappeared while reading corpus")
+        })
+        .collect()
+}
+
+fn conversation_ids_for_connection(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<String>> {
+    anyhow::ensure!(limit != 0, "conversation limit must not be zero");
     let mut statement = connection.prepare(
         r#"
         SELECT conversation_id
@@ -1076,21 +1093,21 @@ pub fn conversations(
             UNION
             SELECT conversation_id
             FROM stream_reconstructions
+            UNION
+            SELECT conversation_id
+            FROM stream_message_revisions
+            UNION
+            SELECT conversation_id
+            FROM attachment_observations
+            WHERE conversation_id IS NOT NULL
         )
         ORDER BY conversation_id
         LIMIT ?1
         "#,
     )?;
-    let ids = statement
-        .query_map([limit as i64], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    ids.into_iter()
-        .map(|conversation_id| {
-            conversation_summary(&connection, &conversation_id)?
-                .context("conversation disappeared while reading corpus")
-        })
-        .collect()
+    Ok(statement
+        .query_map([limit], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub fn export_conversations(
@@ -3031,10 +3048,22 @@ fn conversation_summary(
         [conversation_id],
         |row| row.get(0),
     )?;
+    let stream_revision_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM stream_message_revisions WHERE conversation_id = ?1",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
+    let attachment_observation_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM attachment_observations WHERE conversation_id = ?1",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
 
     if snapshot_count == 0
         && message_observation_count == 0
         && stream_reconstruction_count == 0
+        && stream_revision_count == 0
+        && attachment_observation_count == 0
     {
         return Ok(None);
     }
@@ -3064,6 +3093,12 @@ fn conversation_summary(
         stream_reconstruction_count: stream_reconstruction_count
             .try_into()
             .context("negative stream reconstruction count")?,
+        stream_revision_count: stream_revision_count
+            .try_into()
+            .context("negative stream revision count")?,
+        attachment_observation_count: attachment_observation_count
+            .try_into()
+            .context("negative attachment observation count")?,
     }))
 }
 
@@ -4665,6 +4700,61 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_identity_includes_revision_and_attachment_only_evidence() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE conversation_snapshots (
+                    conversation_id TEXT NOT NULL,
+                    title TEXT
+                );
+                CREATE TABLE message_observations (
+                    conversation_id TEXT
+                );
+                CREATE TABLE stream_reconstructions (
+                    conversation_id TEXT NOT NULL
+                );
+                CREATE TABLE stream_message_revisions (
+                    conversation_id TEXT NOT NULL
+                );
+                CREATE TABLE attachment_observations (
+                    conversation_id TEXT
+                );
+
+                INSERT INTO stream_message_revisions (conversation_id)
+                VALUES ('revision-only');
+                INSERT INTO attachment_observations (conversation_id)
+                VALUES ('attachment-only');
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            conversation_ids_for_connection(&connection, 10).unwrap(),
+            vec!["attachment-only".to_owned(), "revision-only".to_owned()]
+        );
+
+        let revision = conversation_summary(&connection, "revision-only")
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision.snapshot_count, 0);
+        assert_eq!(revision.message_observation_count, 0);
+        assert_eq!(revision.stream_reconstruction_count, 0);
+        assert_eq!(revision.stream_revision_count, 1);
+        assert_eq!(revision.attachment_observation_count, 0);
+
+        let attachment = conversation_summary(&connection, "attachment-only")
+            .unwrap()
+            .unwrap();
+        assert_eq!(attachment.snapshot_count, 0);
+        assert_eq!(attachment.message_observation_count, 0);
+        assert_eq!(attachment.stream_reconstruction_count, 0);
+        assert_eq!(attachment.stream_revision_count, 0);
+        assert_eq!(attachment.attachment_observation_count, 1);
+    }
 
     fn open_transport_verify_fixture() -> (Connection, Connection) {
         let corpus = Connection::open_in_memory().unwrap();

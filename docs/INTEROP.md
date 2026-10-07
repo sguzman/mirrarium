@@ -8,6 +8,8 @@ The command writes JSON Lines to stdout: one complete JSON object per conversati
 
 An export pins one published derived-corpus generation with a shared rebuild lock for the lifetime of the command. Multiple exports may run together, but `corpus rebuild` cannot replace the published generation until active exports finish. Normal browser capture remains independent and continues through the raw-store writer.
 
+Conversation identity discovery includes snapshots, message observations, stream reconstructions, stream-message revisions, and attachment observations, so revision-only or attachment-only derived evidence is not dropped from the export.
+
 Each v1 record has:
 
 - `schema: "mirrarium.corpus.conversation"`

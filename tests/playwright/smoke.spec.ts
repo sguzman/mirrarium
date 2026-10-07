@@ -2539,6 +2539,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         snapshot_count: number;
         message_observation_count: number;
         stream_reconstruction_count: number;
+        stream_revision_count: number;
+        attachment_observation_count: number;
       }>;
       const fixtureConversation = conversations.find(
         (conversation) =>
@@ -2547,10 +2549,21 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const fixtureStream = conversations.find(
         (conversation) => conversation.conversation_id === "fixture-stream",
       );
+      const fixtureStreamTail = conversations.find(
+        (conversation) => conversation.conversation_id === "fixture-stream-tail",
+      );
+      const fixtureAttachmentConversation = conversations.find(
+        (conversation) =>
+          conversation.conversation_id === "fixture-attachment-conversation",
+      );
       expect(fixtureConversation?.title).toBe("Private fixture");
       expect(fixtureConversation?.snapshot_count).toBeGreaterThanOrEqual(4);
       expect(fixtureConversation?.message_observation_count).toBeGreaterThanOrEqual(4);
       expect(fixtureStream?.stream_reconstruction_count).toBeGreaterThanOrEqual(1);
+      expect(fixtureStreamTail?.stream_revision_count).toBeGreaterThanOrEqual(2);
+      expect(
+        fixtureAttachmentConversation?.attachment_observation_count,
+      ).toBeGreaterThanOrEqual(1);
 
       const { stdout: conversationStdout } = await execFileAsync(
         cliPath,
