@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:conversation-index:v1",
+  "title": "Mirrarium corpus conversation export index v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "conversation_schema_version",
+    "producer_corpus_schema_version",
+    "record_type",
+    "conversation_id",
+    "record_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mirrarium.corpus.conversation-index"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "conversation_schema_version": {
+      "const": 1
+    },
+    "producer_corpus_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "record_type": {
+      "const": "conversation-index"
+    },
+    "conversation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

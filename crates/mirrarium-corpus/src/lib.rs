@@ -20,6 +20,9 @@ const CORPUS_SCHEMA_VERSION: i64 = 4;
 pub const CORPUS_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-conversation-v1.schema.json");
+pub const CORPUS_EXPORT_INDEX_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-conversation-index-v1.schema.json");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
@@ -258,6 +261,17 @@ pub struct ConversationExportRecord {
     pub canonical_error: Option<String>,
     pub stream_revisions: Vec<StreamMessageRevisionView>,
     pub attachments: Vec<AttachmentView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationExportIndexRecord {
+    pub schema: String,
+    pub schema_version: u32,
+    pub conversation_schema_version: u32,
+    pub producer_corpus_schema_version: i64,
+    pub record_type: String,
+    pub conversation_id: String,
+    pub record_sha256: String,
 }
 
 #[derive(Serialize)]
@@ -1159,6 +1173,30 @@ pub fn export_conversations(
         Ok(())
     })?;
     Ok(records)
+}
+
+pub fn write_conversation_export_index_jsonl<W: Write>(
+    raw_root: impl AsRef<Path>,
+    limit: Option<u64>,
+    writer: &mut W,
+) -> Result<u64> {
+    for_each_export_conversation(raw_root.as_ref(), limit, |record| {
+        let index = ConversationExportIndexRecord {
+            schema: "mirrarium.corpus.conversation-index".to_owned(),
+            schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+            conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+            producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+            record_type: "conversation-index".to_owned(),
+            conversation_id: record.conversation_id,
+            record_sha256: record.record_sha256,
+        };
+        serde_json::to_writer(&mut *writer, &index)
+            .context("serializing corpus export index record")?;
+        writer
+            .write_all(b"\n")
+            .context("writing corpus export index newline")?;
+        Ok(())
+    })
 }
 
 pub fn write_conversation_export_jsonl<W: Write>(

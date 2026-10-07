@@ -242,6 +242,23 @@ fn run() -> Result<()> {
             Some("export-schema") => {
                 print!("{}", corpus::CORPUS_EXPORT_SCHEMA_V1_JSON);
             }
+            Some("export-index-schema") => {
+                print!("{}", corpus::CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON);
+            }
+            Some("export-index") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("export index limit must be a positive integer")?;
+                if let Some(limit) = limit {
+                    anyhow::ensure!(limit > 0, "export index limit must be greater than zero");
+                }
+                let stdout = std::io::stdout();
+                let mut stdout = std::io::BufWriter::new(stdout.lock());
+                corpus::write_conversation_export_index_jsonl(&root, limit, &mut stdout)?;
+                stdout.flush().context("flushing corpus export index JSONL")?;
+            }
             Some("export-one") => {
                 let conversation_id = arguments
                     .get(2)
@@ -1339,6 +1356,8 @@ USAGE:
   mirrarium corpus stats
   mirrarium corpus verify
   mirrarium corpus export-schema
+  mirrarium corpus export-index-schema
+  mirrarium corpus export-index [LIMIT]
   mirrarium corpus export-one <CONVERSATION_ID>
   mirrarium corpus export [LIMIT]
   mirrarium corpus conversations [LIMIT]

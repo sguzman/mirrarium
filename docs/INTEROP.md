@@ -4,6 +4,10 @@
 
 ## v1 framing
 
+`mirrarium corpus export-index [limit]` writes a lightweight JSONL synchronization index in the same deterministic conversation-ID order. Each index line carries the conversation ID and the exact v1 `record_sha256`, allowing a consumer to compare local state before requesting changed records with `export-one`. Its normative contract is `schemas/mirrarium-corpus-conversation-index-v1.schema.json` and `mirrarium corpus export-index-schema`.
+
+A full successful index export (no limit) is authoritative for the current exported conversation set, so a consumer may treat previously known IDs absent from that complete set as deletions from the current derived generation. A limited index is only a prefix and must never be used to infer deletions.
+
 The command writes JSON Lines to stdout: one complete JSON object per conversation, ordered by `conversation_id`. `mirrarium corpus export-one <conversation-id>` emits exactly one v1 record using the same builder and generation lock; for a given published generation its line is byte-identical to that conversation's line in the full export. With no limit it exports every derived conversation. A positive limit restricts the number of conversation records. There is no header line; every record is self-describing. The CLI streams records as they are composed while holding the generation lock; it does not materialize the full archive export in memory before writing. Peak export memory therefore scales with the largest single conversation record rather than the total number of conversations. For an unchanged published corpus generation, repeated exports with the same limit are byte-for-byte deterministic; field order, record order, and newline framing are part of that reproducibility guarantee.
 
 An export pins one published derived-corpus generation with a shared rebuild lock for the lifetime of the command. Multiple exports may run together, but `corpus rebuild` cannot replace the published generation until active exports finish. Normal browser capture remains independent and continues through the raw-store writer.
@@ -38,3 +42,14 @@ The exporter does not crawl ChatGPT, mutate the archive, or read new network dat
 The encrypted-at-rest guarantee ends at this explicit interoperability boundary: JSONL records written to stdout contain the private conversation/evidence text represented by the derived corpus in plaintext. Pipes pass that plaintext to the receiving process, and shell redirection creates an ordinary plaintext file with permissions determined by the shell/filesystem environment. Consumers such as Chatarium should treat the stream as sensitive local data and establish their own at-rest protections if they persist it.
 
 Canonicalization is not authoritative over evidence. If canonicalization of one conversation fails, the exporter keeps that conversation's evidence and provenance and emits `canonical: null` plus `canonical_error` instead of aborting the entire JSONL stream. Structural corpus/read failures still fail the command.
+
+## Incremental synchronization
+
+A downstream consumer can synchronize without re-ingesting unchanged conversation text:
+
+1. Read a complete `corpus export-index`.
+2. Compare each `conversation_id` / `record_sha256` pair with the consumer's local state.
+3. Fetch new or changed records with `corpus export-one <conversation-id>`.
+4. After the complete index command exits successfully, remove or retire local records whose IDs are absent from the authoritative index set.
+
+The index is a bandwidth optimization, not a weaker identity. Its `record_sha256` is copied from the exact v1 conversation record produced by the same pinned generation and record builder.

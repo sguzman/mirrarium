@@ -2198,6 +2198,22 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         strict: true,
       }).compile(corpusExportSchema);
 
+      const { stdout: corpusExportIndexSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-index-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusExportIndexSchema = JSON.parse(corpusExportIndexSchemaStdout);
+      const validateCorpusExportIndex = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(corpusExportIndexSchema);
+
       const { stdout: corpusExportStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export", "20"],
@@ -2271,6 +2287,56 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
               [...record.source_capture_ids].sort().join("\n"),
         ),
       ).toBe(true);
+
+      const { stdout: corpusExportIndexStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-index", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const { stdout: corpusExportIndexRepeatStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-index", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(corpusExportIndexRepeatStdout).toBe(corpusExportIndexStdout);
+
+      const exportIndexRecords = corpusExportIndexStdout
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line)) as Array<{
+        schema: string;
+        schema_version: number;
+        conversation_schema_version: number;
+        producer_corpus_schema_version: number;
+        record_type: string;
+        conversation_id: string;
+        record_sha256: string;
+      }>;
+      expect(exportIndexRecords.length).toBe(exportRecords.length);
+      for (const indexRecord of exportIndexRecords) {
+        expect(
+          validateCorpusExportIndex(indexRecord),
+          JSON.stringify(validateCorpusExportIndex.errors),
+        ).toBe(true);
+        const fullRecord = exportRecords.find(
+          (record) => record.conversation_id === indexRecord.conversation_id,
+        );
+        expect(fullRecord?.record_sha256).toBe(indexRecord.record_sha256);
+      }
+      expect(exportIndexRecords.map((record) => record.conversation_id)).toEqual(
+        exportRecords.map((record) => record.conversation_id),
+      );
 
       const exportedConversation = exportRecords.find(
         (record) => record.conversation_id === "fixture-conversation",
