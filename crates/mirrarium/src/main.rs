@@ -104,11 +104,15 @@ fn run() -> Result<()> {
             let report = store.verify()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             anyhow::ensure!(
-                report.corrupt_objects == 0
+                report.sqlite_integrity_ok
+                    && report.foreign_key_violations == 0
+                    && report.corrupt_objects == 0
                     && report.unreferenced_indexed_objects == 0
                     && report.invalid_captures == 0
                     && report.unexpected_object_entries == 0,
-                "{} corrupt object(s), {} unreferenced indexed object(s), {} invalid capture(s), {} unexpected CAS entrie(s) found",
+                "raw verification failed: sqlite_integrity_ok={}, {} foreign-key violation(s), {} corrupt object(s), {} unreferenced indexed object(s), {} invalid capture(s), {} unexpected CAS entrie(s)",
+                report.sqlite_integrity_ok,
+                report.foreign_key_violations,
                 report.corrupt_objects,
                 report.unreferenced_indexed_objects,
                 report.invalid_captures,
