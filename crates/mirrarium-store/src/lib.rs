@@ -1295,55 +1295,160 @@ impl CaptureStore {
             &mut report,
         )?;
 
-        let mut websocket_statement = self.connection.prepare(
-            "SELECT capture_id, method, url, privacy_class FROM captures WHERE resource_type = 'WebSocketFrame' ORDER BY capture_id",
+        let mut invalid_capture_ids = BTreeSet::new();
+        let mut capture_statement = self.connection.prepare(
+            r#"
+            SELECT
+                capture_id,
+                method,
+                url,
+                privacy_class,
+                resource_type,
+                body_hash,
+                body_bytes,
+                body_error
+            FROM captures
+            ORDER BY capture_id
+            "#,
         )?;
-        let websocket_rows = websocket_statement.query_map([], |row| {
+        let capture_rows = capture_statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
 
-        for row in websocket_rows {
-            let (capture_id, method, url, privacy_class) = row?;
+        for row in capture_rows {
+            let (
+                capture_id,
+                method,
+                url,
+                privacy_class,
+                resource_type,
+                body_hash,
+                body_bytes,
+                body_error,
+            ) = row?;
             report.checked_capture_invariants = report
                 .checked_capture_invariants
                 .checked_add(1)
                 .context("capture invariant count overflow")?;
             let mut violations = Vec::new();
 
-            if privacy_class != "private" {
-                violations.push(format!("WebSocketFrame has privacy class {privacy_class:?}"));
+            let parsed_class = PrivacyClass::parse(&privacy_class);
+            if parsed_class.is_none() {
+                violations.push(format!("invalid privacy class {privacy_class:?}"));
             }
-            if method != "WS_SEND" && method != "WS_RECV" {
-                violations.push(format!("WebSocketFrame has invalid method {method:?}"));
+            if body_bytes < 0 {
+                violations.push(format!("negative body byte count {body_bytes}"));
             }
 
-            match Url::parse(&url) {
-                Ok(parsed) => {
-                    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-                    if parsed.scheme() != "wss" || !is_chatgpt_host(&host) {
-                        violations.push(format!("WebSocketFrame has invalid URL identity {url:?}"));
-                    }
-                    for (key, value) in parsed.query_pairs() {
-                        if is_sensitive_query_key(&key) && value != "[REDACTED]" {
-                            violations.push(format!(
-                                "WebSocketFrame sensitive query key {key:?} is not redacted"
-                            ));
-                        }
+            if let Some(hash) = body_hash.as_deref() {
+                if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    violations.push(format!("invalid response body hash {hash:?}"));
+                }
+                if body_error.is_some() {
+                    violations.push("response body hash is present alongside body_error".to_owned());
+                }
+                if let Some(class) = parsed_class {
+                    let (count, object_bytes): (i64, i64) = self.connection.query_row(
+                        r#"
+                        SELECT COUNT(*), COALESCE(MAX(bytes), 0)
+                        FROM objects
+                        WHERE storage_class = ?1 AND hash = ?2
+                        "#,
+                        params![class.as_str(), hash],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    if count != 1 {
+                        violations.push(format!(
+                            "response body hash {hash:?} is not indexed in privacy class {:?}",
+                            class.as_str()
+                        ));
+                    } else if body_bytes >= 0 && object_bytes != body_bytes {
+                        violations.push(format!(
+                            "response body byte count {body_bytes} disagrees with indexed object bytes {object_bytes}"
+                        ));
                     }
                 }
-                Err(_) => violations.push(format!("WebSocketFrame URL is invalid: {url:?}")),
+            } else if body_error.is_none() && body_bytes > 0 {
+                violations.push(format!(
+                    "response has {body_bytes} body bytes but no body hash or body_error"
+                ));
+            }
+
+            if resource_type == "WebSocketFrame" {
+                if privacy_class != "private" {
+                    violations.push(format!(
+                        "WebSocketFrame has privacy class {privacy_class:?}"
+                    ));
+                }
+                if method != "WS_SEND" && method != "WS_RECV" {
+                    violations.push(format!("WebSocketFrame has invalid method {method:?}"));
+                }
+
+                match Url::parse(&url) {
+                    Ok(parsed) => {
+                        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+                        if parsed.scheme() != "wss" || !is_chatgpt_host(&host) {
+                            violations.push(format!(
+                                "WebSocketFrame has invalid URL identity {url:?}"
+                            ));
+                        }
+                        for (key, value) in parsed.query_pairs() {
+                            if is_sensitive_query_key(&key) && value != "[REDACTED]" {
+                                violations.push(format!(
+                                    "WebSocketFrame sensitive query key {key:?} is not redacted"
+                                ));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        violations.push(format!("WebSocketFrame URL is invalid: {url:?}"))
+                    }
+                }
+            } else if resource_type == "EventSourceMessage" {
+                if privacy_class != "private" {
+                    violations.push(format!(
+                        "EventSourceMessage has privacy class {privacy_class:?}"
+                    ));
+                }
+                if method != "SSE_RECV" {
+                    violations.push(format!(
+                        "EventSourceMessage has invalid method {method:?}"
+                    ));
+                }
+
+                match Url::parse(&url) {
+                    Ok(parsed) => {
+                        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+                        if parsed.scheme() != "https" || !is_chatgpt_host(&host) {
+                            violations.push(format!(
+                                "EventSourceMessage has invalid URL identity {url:?}"
+                            ));
+                        }
+                        for (key, value) in parsed.query_pairs() {
+                            if is_sensitive_query_key(&key) && value != "[REDACTED]" {
+                                violations.push(format!(
+                                    "EventSourceMessage sensitive query key {key:?} is not redacted"
+                                ));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        violations.push(format!("EventSourceMessage URL is invalid: {url:?}"))
+                    }
+                }
             }
 
             if !violations.is_empty() {
-                report.invalid_captures = report
-                    .invalid_captures
-                    .checked_add(1)
-                    .context("invalid capture count overflow")?;
+                invalid_capture_ids.insert(capture_id.clone());
                 report.errors.push(format!(
                     "capture {capture_id}: {}",
                     violations.join("; ")
@@ -1351,61 +1456,73 @@ impl CaptureStore {
             }
         }
 
-        let mut eventsource_statement = self.connection.prepare(
-            "SELECT capture_id, method, url, privacy_class FROM captures WHERE resource_type = 'EventSourceMessage' ORDER BY capture_id",
+        let mut request_body_statement = self.connection.prepare(
+            r#"
+            SELECT capture_id, body_hash, body_bytes, body_error
+            FROM request_bodies
+            ORDER BY capture_id
+            "#,
         )?;
-        let eventsource_rows = eventsource_statement.query_map([], |row| {
+        let request_body_rows = request_body_statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
 
-        for row in eventsource_rows {
-            let (capture_id, method, url, privacy_class) = row?;
-            report.checked_capture_invariants = report
-                .checked_capture_invariants
-                .checked_add(1)
-                .context("capture invariant count overflow")?;
+        for row in request_body_rows {
+            let (capture_id, body_hash, body_bytes, body_error) = row?;
             let mut violations = Vec::new();
 
-            if privacy_class != "private" {
-                violations.push(format!("EventSourceMessage has privacy class {privacy_class:?}"));
+            if body_bytes < 0 {
+                violations.push(format!("negative body byte count {body_bytes}"));
             }
-            if method != "SSE_RECV" {
-                violations.push(format!("EventSourceMessage has invalid method {method:?}"));
-            }
-
-            match Url::parse(&url) {
-                Ok(parsed) => {
-                    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-                    if parsed.scheme() != "https" || !is_chatgpt_host(&host) {
-                        violations.push(format!("EventSourceMessage has invalid URL identity {url:?}"));
-                    }
-                    for (key, value) in parsed.query_pairs() {
-                        if is_sensitive_query_key(&key) && value != "[REDACTED]" {
-                            violations.push(format!(
-                                "EventSourceMessage sensitive query key {key:?} is not redacted"
-                            ));
-                        }
-                    }
+            if let Some(hash) = body_hash.as_deref() {
+                if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    violations.push(format!("invalid request body hash {hash:?}"));
                 }
-                Err(_) => violations.push(format!("EventSourceMessage URL is invalid: {url:?}")),
+                if body_error.is_some() {
+                    violations.push("request body hash is present alongside body_error".to_owned());
+                }
+                let (count, object_bytes): (i64, i64) = self.connection.query_row(
+                    r#"
+                    SELECT COUNT(*), COALESCE(MAX(bytes), 0)
+                    FROM objects
+                    WHERE storage_class = 'private' AND hash = ?1
+                    "#,
+                    [hash],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if count != 1 {
+                    violations.push(format!(
+                        "request body hash {hash:?} is not indexed in private CAS"
+                    ));
+                } else if body_bytes >= 0 && object_bytes != body_bytes {
+                    violations.push(format!(
+                        "request body byte count {body_bytes} disagrees with indexed object bytes {object_bytes}"
+                    ));
+                }
+            } else if body_bytes != 0 {
+                violations.push(format!(
+                    "request body has {body_bytes} bytes but no body hash"
+                ));
             }
 
             if !violations.is_empty() {
-                report.invalid_captures = report
-                    .invalid_captures
-                    .checked_add(1)
-                    .context("invalid capture count overflow")?;
+                invalid_capture_ids.insert(capture_id.clone());
                 report.errors.push(format!(
-                    "capture {capture_id}: {}",
+                    "capture {capture_id} request body: {}",
                     violations.join("; ")
                 ));
             }
         }
+
+        report.invalid_captures = invalid_capture_ids
+            .len()
+            .try_into()
+            .context("invalid capture count overflow")?;
 
         Ok(report)
     }
@@ -3660,6 +3777,93 @@ mod tests {
         assert_eq!(stats.private_captures, 2);
         assert_eq!(stats.private_objects, 1);
     }
+    #[test]
+    fn verify_cross_checks_capture_and_request_body_object_references() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let mut item = metadata(
+            "reference-integrity",
+            "https://chatgpt.com/backend-api/conversation",
+            "Fetch",
+        );
+        item.method = "POST".to_owned();
+        store.begin(item).unwrap();
+        store
+            .begin_request_body(
+                "reference-integrity",
+                RequestBodyMetadata {
+                    content_type: Some("application/json".to_owned()),
+                    has_post_data: true,
+                    post_data_entry_count: Some(1),
+                    declared_content_length: Some(31),
+                },
+            )
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                "reference-integrity",
+                0,
+                &BASE64.encode(br#"{"message":"reference body"}"#),
+            )
+            .unwrap();
+        store
+            .finish_request_body("reference-integrity", None)
+            .unwrap();
+        let response = br#"{"ok":"reference"}"#;
+        store
+            .append_chunk("reference-integrity", 0, &BASE64.encode(response))
+            .unwrap();
+        store
+            .finish(
+                "reference-integrity",
+                Some(response.len() as u64),
+                None,
+            )
+            .unwrap();
+
+        let clean = store.verify().unwrap();
+        assert_eq!(clean.checked_capture_invariants, 1);
+        assert_eq!(clean.invalid_captures, 0);
+
+        let summary = store.recent_captures(1).unwrap().pop().unwrap();
+        let response_hash = summary.body_hash.unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE captures SET body_hash = ?1 WHERE capture_id = 'reference-integrity'",
+                ["0".repeat(64)],
+            )
+            .unwrap();
+
+        let broken_response = store.verify().unwrap();
+        assert_eq!(broken_response.invalid_captures, 1);
+        assert!(broken_response.errors.iter().any(|error| {
+            error.contains("response body hash") && error.contains("not indexed")
+        }));
+
+        store
+            .connection
+            .execute(
+                "UPDATE captures SET body_hash = ?1 WHERE capture_id = 'reference-integrity'",
+                [response_hash],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE request_bodies SET body_bytes = body_bytes + 1 WHERE capture_id = 'reference-integrity'",
+                [],
+            )
+            .unwrap();
+
+        let broken_request = store.verify().unwrap();
+        assert_eq!(broken_request.invalid_captures, 1);
+        assert!(broken_request.errors.iter().any(|error| {
+            error.contains("request body byte count")
+                && error.contains("indexed object bytes")
+        }));
+    }
+
     #[test]
     fn verify_reports_orphan_cas_without_treating_it_as_corruption() {
         let directory = tempdir().unwrap();
