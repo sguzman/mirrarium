@@ -184,6 +184,7 @@ fn capture_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Capture
 pub struct VerifyReport {
     pub sqlite_integrity_ok: bool,
     pub foreign_key_violations: u64,
+    pub schema_ok: bool,
     pub checked_objects: u64,
     pub corrupt_objects: u64,
     pub unreferenced_indexed_objects: u64,
@@ -1357,21 +1358,10 @@ impl CaptureStore {
     }
 
     pub fn verify(&self) -> Result<VerifyReport> {
-        let mut statement = self.connection.prepare(
-            "SELECT storage_class, hash, bytes, relative_path FROM objects ORDER BY storage_class, hash",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-
         let mut report = VerifyReport {
             sqlite_integrity_ok: true,
             foreign_key_violations: 0,
+            schema_ok: true,
             checked_objects: 0,
             corrupt_objects: 0,
             unreferenced_indexed_objects: 0,
@@ -1382,7 +1372,6 @@ impl CaptureStore {
             invalid_captures: 0,
             errors: Vec::new(),
         };
-        let mut indexed_object_paths = BTreeSet::new();
 
         {
             let mut integrity_statement = self.connection.prepare("PRAGMA integrity_check")?;
@@ -1430,6 +1419,26 @@ impl CaptureStore {
                 ));
             }
         }
+
+        let schema_errors = raw_ledger_schema_errors(&self.connection)?;
+        report.schema_ok = schema_errors.is_empty();
+        report.errors.extend(schema_errors);
+        if !report.schema_ok {
+            return Ok(report);
+        }
+
+        let mut statement = self.connection.prepare(
+            "SELECT storage_class, hash, bytes, relative_path FROM objects ORDER BY storage_class, hash",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut indexed_object_paths = BTreeSet::new();
 
         for row in rows {
             let (storage_class, hash, expected_bytes, indexed_relative_path) = row?;
@@ -1919,6 +1928,99 @@ impl CaptureStore {
         )?;
         Ok(())
     }
+}
+
+fn raw_ledger_schema_errors(connection: &Connection) -> Result<Vec<String>> {
+    let requirements: &[(&str, &[&str])] = &[
+        (
+            "objects",
+            &[
+                "storage_class",
+                "hash",
+                "bytes",
+                "relative_path",
+                "created_at_ms",
+            ],
+        ),
+        (
+            "captures",
+            &[
+                "capture_id",
+                "captured_at_ms",
+                "tab_id",
+                "request_id",
+                "method",
+                "url",
+                "status",
+                "mime_type",
+                "resource_type",
+                "privacy_class",
+                "body_hash",
+                "body_bytes",
+                "encoded_data_length",
+                "etag",
+                "last_modified",
+                "cache_control",
+                "body_error",
+                "provenance_json",
+            ],
+        ),
+        (
+            "request_bodies",
+            &[
+                "capture_id",
+                "content_type",
+                "body_hash",
+                "body_bytes",
+                "body_error",
+                "body_kind",
+                "has_post_data",
+                "post_data_entry_count",
+                "declared_content_length",
+            ],
+        ),
+        (
+            "cache_replay_events",
+            &[
+                "event_id",
+                "observed_at_ms",
+                "url",
+                "resource_type",
+                "outcome",
+                "body_bytes",
+            ],
+        ),
+        (
+            "private_revalidation_events",
+            &["event_id", "observed_at_ms", "outcome", "body_bytes"],
+        ),
+    ];
+
+    let mut errors = Vec::new();
+    for (table, required_columns) in requirements {
+        let table_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [*table],
+            |row| row.get(0),
+        )?;
+        if table_count != 1 {
+            errors.push(format!("raw ledger schema missing table {table:?}"));
+            continue;
+        }
+
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let columns = rows.collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        for column in *required_columns {
+            if !columns.contains(*column) {
+                errors.push(format!(
+                    "raw ledger schema table {table:?} missing column {column:?}"
+                ));
+            }
+        }
+    }
+
+    Ok(errors)
 }
 
 fn ensure_table_column(
@@ -4374,6 +4476,26 @@ mod tests {
             error.contains("request body byte count")
                 && error.contains("indexed object bytes")
         }));
+    }
+
+    #[test]
+    fn verify_reports_missing_raw_ledger_schema_without_sql_abort() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE request_bodies;")
+            .unwrap();
+
+        let report = store.verify().unwrap();
+        assert!(report.sqlite_integrity_ok);
+        assert_eq!(report.foreign_key_violations, 0);
+        assert!(!report.schema_ok);
+        assert_eq!(report.checked_objects, 0);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("missing table") && error.contains("request_bodies")));
     }
 
     #[test]
