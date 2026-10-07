@@ -9,6 +9,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use mirrarium_cache as cache;
 use mirrarium_protocol::{HostRequest, HostResponse};
 use mirrarium_store::{default_data_root, CaptureStore};
+use sha2::{Digest, Sha256};
 
 const MAX_NATIVE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -475,6 +476,56 @@ fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn extension_tree_hash(path: &Path) -> Result<String> {
+    let mut files = Vec::<(String, PathBuf)>::new();
+    collect_extension_tree_files(path, path, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+    for (relative, file_path) in files {
+        let relative_bytes = relative.as_bytes();
+        let bytes = fs::read(&file_path)
+            .with_context(|| format!("reading extension tree file {}", file_path.display()))?;
+        hasher.update((relative_bytes.len() as u64).to_le_bytes());
+        hasher.update(relative_bytes);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_extension_tree_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("reading extension tree {}", directory.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "extension tree contains unsupported symlink: {}",
+            path.display()
+        );
+        if metadata.is_dir() {
+            collect_extension_tree_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .context("extension tree file escaped root")?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((relative, path));
+        } else {
+            anyhow::bail!("extension tree contains unsupported entry: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 fn installed_extension_build_id() -> Result<Option<String>> {
     read_extension_build_id_from_state(&extension_state_path()?)
 }
@@ -522,6 +573,13 @@ fn read_extension_build_id_from_state(path: &Path) -> Result<Option<String>> {
         .and_then(serde_json::Value::as_str);
     if manifest_build_id != Some(build_id) {
         return Ok(None);
+    }
+
+    if let Some(expected_tree_hash) = state.get("tree_hash").and_then(serde_json::Value::as_str) {
+        let actual_tree_hash = extension_tree_hash(&install_path)?;
+        if actual_tree_hash != expected_tree_hash {
+            return Ok(None);
+        }
     }
 
     Ok(Some(build_id.to_owned()))
@@ -771,6 +829,19 @@ mod tests {
             read_extension_build_id_from_state(&state).unwrap().as_deref(),
             Some("0.1.0+abc")
         );
+
+        let tree_hash = extension_tree_hash(&install).unwrap();
+        let mut state_value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+        state_value["tree_hash"] = serde_json::Value::String(tree_hash);
+        fs::write(&state, serde_json::to_vec(&state_value).unwrap()).unwrap();
+        assert_eq!(
+            read_extension_build_id_from_state(&state).unwrap().as_deref(),
+            Some("0.1.0+abc")
+        );
+        fs::write(install.join("extra.js"), b"mixed generation").unwrap();
+        assert!(read_extension_build_id_from_state(&state).unwrap().is_none());
+        fs::remove_file(install.join("extra.js")).unwrap();
 
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.path().join("extension/manifest.json")).unwrap())

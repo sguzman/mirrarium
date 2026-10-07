@@ -12,6 +12,7 @@ mirrarium-cache = { path = "../mirrarium-cache" }
 mirrarium-protocol = { path = "../mirrarium-protocol" }
 mirrarium-store = { path = "../mirrarium-store" }
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

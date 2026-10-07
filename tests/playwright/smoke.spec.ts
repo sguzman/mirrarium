@@ -121,6 +121,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
     });
     expect(extensionInstall.build_id).toMatch(/^0\.1\.0\+[0-9a-f]{16}$/);
     expect(extensionInstall.source_path).toBe(extensionSourcePath);
+    const installState = JSON.parse(
+      await readFile(extensionStateFile, "utf8"),
+    ) as { tree_hash?: string };
+    expect(installState.tree_hash).toMatch(/^[0-9a-f]{64}$/);
 
     const { stdout: extensionStatusStdout } = await execFileAsync(
       cliPath,

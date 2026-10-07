@@ -14,6 +14,7 @@ use mirrarium_corpus as corpus;
 use mirrarium_store::{
     default_data_root, incoming_maintenance_status, migrate_private_storage, CaptureStore,
 };
+use sha2::{Digest, Sha256};
 
 const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
@@ -404,7 +405,10 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             let manifest_path = install_path.join("manifest.json");
             let installed = install_path.is_dir();
             let (valid, version, build_id, error) = if installed {
-                match validate_extension_directory(&install_path) {
+                match validate_extension_directory(&install_path).and_then(|manifest| {
+                    validate_extension_install_generation(&install_path, &manifest)?;
+                    Ok(manifest)
+                }) {
                     Ok(manifest) => (
                         true,
                         manifest.get("version").cloned().unwrap_or(serde_json::Value::Null),
@@ -565,10 +569,12 @@ fn publish_extension_install_state(
         .get("version_name")
         .and_then(serde_json::Value::as_str)
         .context("installed extension manifest is missing version_name")?;
+    let tree_hash = extension_tree_hash(&canonical_install)?;
     let state = serde_json::json!({
         "schema_version": 1,
         "extension_id": EXTENSION_ID,
         "build_id": build_id,
+        "tree_hash": tree_hash,
         "install_path": canonical_install,
     });
     let temp = parent.join(format!(
@@ -611,6 +617,115 @@ fn resolve_extension_source(explicit: Option<&str>) -> Result<PathBuf> {
         .with_context(|| format!("resolving extension source {}", candidate.display()))?;
     validate_extension_directory(&canonical)?;
     Ok(canonical)
+}
+
+fn extension_tree_hash(path: &Path) -> Result<String> {
+    let mut files = Vec::<(String, PathBuf)>::new();
+    collect_extension_tree_files(path, path, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+    for (relative, file_path) in files {
+        let relative_bytes = relative.as_bytes();
+        let bytes = fs::read(&file_path)
+            .with_context(|| format!("reading extension tree file {}", file_path.display()))?;
+        hasher.update((relative_bytes.len() as u64).to_le_bytes());
+        hasher.update(relative_bytes);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_extension_tree_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("reading extension tree {}", directory.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "extension tree contains unsupported symlink: {}",
+            path.display()
+        );
+        if metadata.is_dir() {
+            collect_extension_tree_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .context("extension tree file escaped root")?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((relative, path));
+        } else {
+            anyhow::bail!("extension tree contains unsupported entry: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn validate_extension_install_generation(
+    install_path: &Path,
+    manifest: &serde_json::Value,
+) -> Result<()> {
+    let state_path = extension_state_path()?;
+    if !state_path.is_file() {
+        return Ok(());
+    }
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(&state_path)
+            .with_context(|| format!("reading extension install state {}", state_path.display()))?,
+    )
+    .with_context(|| format!("parsing extension install state {}", state_path.display()))?;
+    anyhow::ensure!(
+        state.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1),
+        "unsupported extension install-state schema"
+    );
+    anyhow::ensure!(
+        state.get("extension_id").and_then(serde_json::Value::as_str) == Some(EXTENSION_ID),
+        "extension install-state id mismatch"
+    );
+
+    let state_build_id = state
+        .get("build_id")
+        .and_then(serde_json::Value::as_str)
+        .context("extension install-state build_id is missing")?;
+    let manifest_build_id = manifest
+        .get("version_name")
+        .and_then(serde_json::Value::as_str)
+        .context("installed extension manifest is missing version_name")?;
+    anyhow::ensure!(
+        state_build_id == manifest_build_id,
+        "installed extension manifest does not match the last published install generation"
+    );
+
+    let canonical_install = fs::canonicalize(install_path)
+        .with_context(|| format!("resolving installed extension {}", install_path.display()))?;
+    let state_install = state
+        .get("install_path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .context("extension install-state install_path is missing")?;
+    anyhow::ensure!(
+        state_install == canonical_install,
+        "extension install-state path does not match installed extension"
+    );
+
+    if let Some(expected_tree_hash) = state.get("tree_hash").and_then(serde_json::Value::as_str) {
+        let actual_tree_hash = extension_tree_hash(&canonical_install)?;
+        anyhow::ensure!(
+            actual_tree_hash == expected_tree_hash,
+            "installed extension tree does not match the last fully published generation"
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_extension_directory(path: &Path) -> Result<serde_json::Value> {
@@ -1156,6 +1271,22 @@ mod tests {
             fs::read_to_string(destination.join("background.js")).unwrap(),
             "// second"
         );
+    }
+
+    #[test]
+    fn extension_tree_hash_detects_mixed_generation_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let install = directory.path().join("extension");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(install.join("manifest.json"), b"{\"version\":\"0.1.0\"}").unwrap();
+        fs::write(install.join("background.js"), b"// first").unwrap();
+
+        let first = extension_tree_hash(&install).unwrap();
+        fs::write(install.join("background.js"), b"// second").unwrap();
+        let second = extension_tree_hash(&install).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
     }
 
     #[cfg(unix)]
