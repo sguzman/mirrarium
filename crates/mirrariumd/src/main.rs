@@ -440,8 +440,17 @@ fn publish_extension_runtime_state(build_id: &str) -> Result<()> {
         ".extension-runtime.{}.tmp",
         std::process::id()
     ));
-    fs::write(&temp, serde_json::to_vec_pretty(&state)?)
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp)
+        .with_context(|| format!("opening extension runtime state {}", temp.display()))?;
+    file.write_all(&serde_json::to_vec_pretty(&state)?)
         .with_context(|| format!("writing extension runtime state {}", temp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing extension runtime state {}", temp.display()))?;
+    drop(file);
     fs::rename(&temp, &state_path).with_context(|| {
         format!(
             "installing extension runtime state {} to {}",
@@ -449,6 +458,20 @@ fn publish_extension_runtime_state(build_id: &str) -> Result<()> {
             state_path.display()
         )
     })?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("opening directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 

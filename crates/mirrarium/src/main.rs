@@ -3,6 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -574,8 +575,17 @@ fn publish_extension_install_state(
         ".extension-install.{}.tmp",
         std::process::id()
     ));
-    fs::write(&temp, serde_json::to_vec_pretty(&state)?)
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp)
+        .with_context(|| format!("opening extension state {}", temp.display()))?;
+    file.write_all(&serde_json::to_vec_pretty(&state)?)
         .with_context(|| format!("writing extension state {}", temp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing extension state {}", temp.display()))?;
+    drop(file);
     fs::rename(&temp, &state_path).with_context(|| {
         format!(
             "installing extension state {} to {}",
@@ -583,6 +593,7 @@ fn publish_extension_install_state(
             state_path.display()
         )
     })?;
+    sync_directory(parent)?;
     Ok(state_path)
 }
 
@@ -915,6 +926,7 @@ fn install_native_host(browser: &str, host_path: &Path) -> Result<PathBuf> {
     fs::write(&temp_path, bytes)
         .with_context(|| format!("writing {}", temp_path.display()))?;
     harden_manifest_file(&temp_path)?;
+    sync_file(&temp_path)?;
     fs::rename(&temp_path, &manifest_path).with_context(|| {
         format!(
             "moving {} to {}",
@@ -923,6 +935,8 @@ fn install_native_host(browser: &str, host_path: &Path) -> Result<PathBuf> {
         )
     })?;
     harden_manifest_file(&manifest_path)?;
+    sync_file(&manifest_path)?;
+    sync_directory(parent)?;
 
     Ok(manifest_path)
 }
@@ -994,6 +1008,26 @@ fn ensure_executable(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn ensure_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("opening {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing {}", path.display()))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("opening directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
