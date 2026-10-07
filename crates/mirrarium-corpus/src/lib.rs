@@ -299,7 +299,7 @@ pub struct ConversationExportManifest {
     pub index_sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationSyncState {
     pub schema: String,
