@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use mirrarium_cache as cache;
 use mirrarium_corpus as corpus;
 use mirrarium_store::{
-    default_data_root, incoming_maintenance_status, migrate_private_storage, CaptureStore,
+    default_data_root, incoming_maintenance_status, migrate_private_storage,
+    prune_orphan_objects, CaptureStore,
 };
 use sha2::{Digest, Sha256};
 
@@ -128,11 +129,17 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&incoming_maintenance_status(&root)?)?
                 );
             }
+            Some("prune-orphans") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&prune_orphan_objects(&root)?)?
+                );
+            }
             Some(command) => anyhow::bail!(
-                "unknown maintenance command {command:?}; use incoming"
+                "unknown maintenance command {command:?}; use incoming or prune-orphans"
             ),
             None => anyhow::bail!(
-                "missing maintenance command; use 'mirrarium maintenance incoming'"
+                "missing maintenance command; use 'mirrarium maintenance incoming' or 'mirrarium maintenance prune-orphans'"
             ),
         },
         Some("privacy") => match arguments.get(1).map(String::as_str) {
@@ -1387,6 +1394,7 @@ USAGE:
   mirrarium capture <CAPTURE_ID> [response|request]
   mirrarium verify
   mirrarium maintenance incoming
+  mirrarium maintenance prune-orphans
   mirrarium privacy status
   mirrarium privacy migrate
   mirrarium cache opportunities
@@ -1448,6 +1456,10 @@ MAINTENANCE:
   parts as in-flight while a writer holds .writer.lock, or abandoned otherwise;
   it also reports preserved ledger-migration recovery artifacts and unexpected
   entries without opening or decrypting incomplete payloads.
+  'maintenance prune-orphans' is an explicit exclusive operation. It requires a
+  clean raw verification result, then deletes only well-formed unindexed CAS
+  files. It refuses a live writer or malformed CAS tree and never touches
+  .incoming or ledger-migration recovery artifacts.
 
 DATA ROOT:
   MIRRARIUM_DATA_DIR, then XDG_DATA_HOME/mirrarium,
