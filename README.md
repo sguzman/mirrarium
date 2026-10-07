@@ -87,6 +87,8 @@ mirrarium corpus stats
 mirrarium corpus verify
 mirrarium corpus export-schema
 mirrarium corpus export-index-schema
+mirrarium corpus export-manifest-schema
+mirrarium corpus export-manifest
 mirrarium corpus export-index [limit]
 mirrarium corpus export-one <conversation-id>
 mirrarium corpus export [limit]

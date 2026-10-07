@@ -4,6 +4,8 @@
 
 ## v1 framing
 
+`mirrarium corpus export-manifest` emits a tiny deterministic JSON object containing the full exported conversation count and SHA-256 of the exact complete `corpus export-index` JSONL bytes (including newline framing). Its normative contract is `schemas/mirrarium-corpus-export-manifest-v1.schema.json` and `mirrarium corpus export-manifest-schema`. Consumers can compare this fingerprint first and skip all further synchronization work when it is unchanged.
+
 `mirrarium corpus export-index [limit]` writes a lightweight JSONL synchronization index in the same deterministic conversation-ID order. Each index line carries the conversation ID and the exact v1 `record_sha256`, allowing a consumer to compare local state before requesting changed records with `export-one`. Its normative contract is `schemas/mirrarium-corpus-conversation-index-v1.schema.json` and `mirrarium corpus export-index-schema`.
 
 A full successful index export (no limit) is authoritative for the current exported conversation set, so a consumer may treat previously known IDs absent from that complete set as deletions from the current derived generation. A limited index is only a prefix and must never be used to infer deletions.
@@ -47,9 +49,10 @@ Canonicalization is not authoritative over evidence. If canonicalization of one 
 
 A downstream consumer can synchronize without re-ingesting unchanged conversation text:
 
-1. Read a complete `corpus export-index`.
-2. Compare each `conversation_id` / `record_sha256` pair with the consumer's local state.
-3. Fetch new or changed records with `corpus export-one <conversation-id>`.
-4. After the complete index command exits successfully, remove or retire local records whose IDs are absent from the authoritative index set.
+1. Read `corpus export-manifest`. If its `index_sha256` matches the consumer's previously completed synchronization, stop: the exported conversation set and every v1 record hash are unchanged.
+2. Otherwise read a complete `corpus export-index`.
+3. Compare each `conversation_id` / `record_sha256` pair with the consumer's local state.
+4. Fetch new or changed records with `corpus export-one <conversation-id>`.
+5. After the complete index command exits successfully, remove or retire local records whose IDs are absent from the authoritative index set and persist the new manifest fingerprint.
 
 The index is a bandwidth optimization, not a weaker identity. Its `record_sha256` is copied from the exact v1 conversation record produced by the same pinned generation and record builder.

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:export-manifest:v1",
+  "title": "Mirrarium corpus export manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "conversation_schema_version",
+    "index_schema_version",
+    "producer_corpus_schema_version",
+    "record_type",
+    "conversation_count",
+    "index_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mirrarium.corpus.export-manifest"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "conversation_schema_version": {
+      "const": 1
+    },
+    "index_schema_version": {
+      "const": 1
+    },
+    "producer_corpus_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "record_type": {
+      "const": "export-manifest"
+    },
+    "conversation_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "index_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

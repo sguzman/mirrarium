@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -2214,9 +2215,27 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         strict: true,
       }).compile(corpusExportIndexSchema);
 
+      const { stdout: corpusExportManifestSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-manifest-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusExportManifestSchema = JSON.parse(
+        corpusExportManifestSchemaStdout,
+      );
+      const validateCorpusExportManifest = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(corpusExportManifestSchema);
+
       const { stdout: corpusExportStdout } = await execFileAsync(
         cliPath,
-        ["corpus", "export", "20"],
+        ["corpus", "export"],
         {
           env: {
             ...childEnv,
@@ -2226,7 +2245,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       const { stdout: corpusExportRepeatStdout } = await execFileAsync(
         cliPath,
-        ["corpus", "export", "20"],
+        ["corpus", "export"],
         {
           env: {
             ...childEnv,
@@ -2290,7 +2309,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const { stdout: corpusExportIndexStdout } = await execFileAsync(
         cliPath,
-        ["corpus", "export-index", "20"],
+        ["corpus", "export-index"],
         {
           env: {
             ...childEnv,
@@ -2300,7 +2319,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       const { stdout: corpusExportIndexRepeatStdout } = await execFileAsync(
         cliPath,
-        ["corpus", "export-index", "20"],
+        ["corpus", "export-index"],
         {
           env: {
             ...childEnv,
@@ -2336,6 +2355,46 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       }
       expect(exportIndexRecords.map((record) => record.conversation_id)).toEqual(
         exportRecords.map((record) => record.conversation_id),
+      );
+
+      const { stdout: corpusExportManifestStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-manifest"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const { stdout: corpusExportManifestRepeatStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-manifest"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(corpusExportManifestRepeatStdout).toBe(corpusExportManifestStdout);
+      const exportManifest = JSON.parse(corpusExportManifestStdout) as {
+        schema: string;
+        schema_version: number;
+        conversation_schema_version: number;
+        index_schema_version: number;
+        producer_corpus_schema_version: number;
+        record_type: string;
+        conversation_count: number;
+        index_sha256: string;
+      };
+      expect(
+        validateCorpusExportManifest(exportManifest),
+        JSON.stringify(validateCorpusExportManifest.errors),
+      ).toBe(true);
+      expect(exportManifest.conversation_count).toBe(exportIndexRecords.length);
+      expect(exportManifest.index_sha256).toBe(
+        createHash("sha256").update(corpusExportIndexStdout).digest("hex"),
       );
 
       const exportedConversation = exportRecords.find(

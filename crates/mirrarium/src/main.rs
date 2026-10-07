@@ -245,6 +245,12 @@ fn run() -> Result<()> {
             Some("export-index-schema") => {
                 print!("{}", corpus::CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON);
             }
+            Some("export-manifest-schema") => {
+                print!("{}", corpus::CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON);
+            }
+            Some("export-manifest") => {
+                println!("{}", serde_json::to_string(&corpus::export_manifest(&root)?)?);
+            }
             Some("export-index") => {
                 let limit = arguments
                     .get(2)
@@ -1357,6 +1363,8 @@ USAGE:
   mirrarium corpus verify
   mirrarium corpus export-schema
   mirrarium corpus export-index-schema
+  mirrarium corpus export-manifest-schema
+  mirrarium corpus export-manifest
   mirrarium corpus export-index [LIMIT]
   mirrarium corpus export-one <CONVERSATION_ID>
   mirrarium corpus export [LIMIT]
