@@ -18,6 +18,8 @@ use url::Url;
 
 const CORPUS_SCHEMA_VERSION: i64 = 4;
 pub const CORPUS_EXPORT_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_EXPORT_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-conversation-v1.schema.json");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {

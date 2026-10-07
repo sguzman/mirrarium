@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import Ajv2020 from "ajv/dist/2020.js";
 import { chromium, expect, test } from "@playwright/test";
 
 const execFileAsync = promisify(execFile);
@@ -2181,6 +2182,22 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(JSON.parse(eventSourceSkippedStdout)).toEqual([]);
 
+      const { stdout: corpusExportSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusExportSchema = JSON.parse(corpusExportSchemaStdout);
+      const validateCorpusExport = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(corpusExportSchema);
+
       const { stdout: corpusExportStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export", "20"],
@@ -2232,6 +2249,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         }>;
       }>;
       expect(exportRecords.length).toBeGreaterThan(0);
+      for (const record of exportRecords) {
+        expect(
+          validateCorpusExport(record),
+          JSON.stringify(validateCorpusExport.errors),
+        ).toBe(true);
+      }
       expect(
         exportRecords.every(
           (record) =>

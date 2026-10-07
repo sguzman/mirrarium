@@ -1,6 +1,6 @@
 # Mirrarium corpus JSONL export
 
-`mirrarium corpus export [limit]` is a read-only interoperability surface for local consumers such as Chatarium.
+`mirrarium corpus export [limit]` is a read-only interoperability surface for local consumers such as Chatarium. The normative machine-readable v1 contract is checked in at `schemas/mirrarium-corpus-conversation-v1.schema.json` and is also emitted by `mirrarium corpus export-schema` for installed-binary consumers.
 
 ## v1 framing
 

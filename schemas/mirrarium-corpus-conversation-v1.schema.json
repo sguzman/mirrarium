@@ -1,0 +1,487 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:conversation:v1",
+  "title": "Mirrarium corpus conversation export v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "producer_corpus_schema_version",
+    "record_type",
+    "conversation_id",
+    "source_capture_ids",
+    "record_sha256",
+    "evidence",
+    "canonical",
+    "canonical_error",
+    "stream_revisions",
+    "attachments"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mirrarium.corpus.conversation"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "producer_corpus_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "record_type": {
+      "const": "conversation"
+    },
+    "conversation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_capture_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "record_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence": {
+      "$ref": "#/$defs/conversationView"
+    },
+    "canonical": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/canonicalConversation"
+        }
+      ]
+    },
+    "canonical_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stream_revisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/streamRevision"
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/attachment"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "conversationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conversation_id",
+        "title",
+        "snapshot_count",
+        "message_observation_count",
+        "stream_reconstruction_count"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "snapshot_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "message_observation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stream_reconstruction_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "messageObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_id",
+        "source_kind",
+        "sequence",
+        "conversation_id",
+        "message_id",
+        "role",
+        "content_text",
+        "source_url"
+      ],
+      "properties": {
+        "capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conversation_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "message_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "role": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "content_text": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "source_url": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "streamReconstruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_id",
+        "conversation_id",
+        "message_id",
+        "source_url",
+        "text",
+        "fragment_count"
+      ],
+      "properties": {
+        "capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "source_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string"
+        },
+        "fragment_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "conversationView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "messages",
+        "streams"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/conversationSummary"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/messageObservation"
+          }
+        },
+        "streams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/streamReconstruction"
+          }
+        }
+      }
+    },
+    "canonicalMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message_id",
+        "parent_id",
+        "role",
+        "content_text"
+      ],
+      "properties": {
+        "message_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "parent_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "role": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "content_text": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "canonicalConversation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conversation_id",
+        "title",
+        "basis_capture_id",
+        "basis_source_url",
+        "basis_source_body_hash",
+        "basis_kind",
+        "current_node",
+        "messages",
+        "linked_streams",
+        "unlinked_streams",
+        "warnings"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "basis_capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basis_source_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basis_source_body_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "basis_kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "current_node": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/canonicalMessage"
+          }
+        },
+        "linked_streams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/streamReconstruction"
+          }
+        },
+        "unlinked_streams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/streamReconstruction"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "streamRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_id",
+        "sequence",
+        "conversation_id",
+        "message_id",
+        "parent_id",
+        "role",
+        "content_text",
+        "source_url"
+      ],
+      "properties": {
+        "capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "role": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "content_text": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "source_url": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "attachmentObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_id",
+        "sequence",
+        "conversation_id",
+        "message_id",
+        "attachment_id",
+        "file_name",
+        "mime_type",
+        "size_bytes",
+        "sanitized_url",
+        "source_url",
+        "json_path"
+      ],
+      "properties": {
+        "capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conversation_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "message_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "attachment_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "file_name": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "mime_type": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "size_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sanitized_url": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "source_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "json_path": {
+          "type": "string"
+        }
+      }
+    },
+    "attachmentDownload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "download_capture_id",
+        "source_url",
+        "mime_type",
+        "privacy_class",
+        "body_hash",
+        "body_bytes"
+      ],
+      "properties": {
+        "download_capture_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "privacy_class": {
+          "type": "string",
+          "enum": [
+            "public",
+            "private",
+            "unknown"
+          ]
+        },
+        "body_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "body_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation",
+        "downloads"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/attachmentObservation"
+        },
+        "downloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachmentDownload"
+          }
+        }
+      }
+    }
+  }
+}

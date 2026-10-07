@@ -10,6 +10,7 @@
     "test": "pnpm check:extension && pnpm check:rust && pnpm test:e2e"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0"
+    "@playwright/test": "^1.63.0",
+    "ajv": "^8.17.1"
   }
 }

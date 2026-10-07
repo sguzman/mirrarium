@@ -239,6 +239,9 @@ fn run() -> Result<()> {
                     report.errors.len() + report.foreign_key_violations as usize
                 );
             }
+            Some("export-schema") => {
+                print!("{}", corpus::CORPUS_EXPORT_SCHEMA_V1_JSON);
+            }
             Some("export") => {
                 let limit = arguments
                     .get(2)
@@ -1327,6 +1330,7 @@ USAGE:
   mirrarium corpus rebuild
   mirrarium corpus stats
   mirrarium corpus verify
+  mirrarium corpus export-schema
   mirrarium corpus export [LIMIT]
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
