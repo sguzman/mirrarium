@@ -127,8 +127,8 @@ Implemented:
 - explicit derived-corpus schema versioning with rebuild-required failure semantics;
 - SQLCipher encryption for the rebuildable derived corpus using a domain-separated key derived from the Mirrarium master key;
 - Chromium proof that the derived corpus is not a plaintext SQLite file and does not expose known fixture conversation plaintext at rest;
-- SQLCipher encryption for new authoritative raw ledgers from birth with a separate domain-derived key;
-- verified legacy raw-ledger migration via WAL checkpoint + `sqlcipher_export`, schema/row-count/user-version/integrity checks, atomic replacement, and interruption recovery;
+- SQLCipher encryption for new authoritative raw ledgers from birth with a separate domain-derived key, WAL `synchronous=FULL`, directory-synced fresh-store initialization, synced CAS-before-ledger ordering, and single-transaction capture/request-body publication;
+- verified legacy raw-ledger migration via WAL checkpoint + `sqlcipher_export`, schema/row-count/user-version/integrity checks, fsync/directory-sync at staging/install/rollback boundaries, atomic replacement, and interruption recovery; private-object migration uses the same synced staged-replacement discipline;
 - read-only ledger inspection paths for CLI/cache/corpus/daemon stats so the browser's native host remains the sole long-lived writer, with a bounded 250 ms SQLite/SQLCipher busy timeout so brief writer lock windows do not immediately surface as read failures;
 - Chromium proof that encrypted raw-ledger capture, changed private-response persistence, and subsequent revalidation remain live while read-only inspection runs concurrently;
 - exclusive per-data-root writer locking for writable raw-store lifetimes, with read-only inspection left concurrent;
@@ -156,7 +156,7 @@ Implemented:
 - Chromium proof with browser cache disabled covering unchanged JSON v1, changed v2, capture of v2, subsequent v2 revalidation, exact query-bearing revalidation, and top-level private HTML document revalidation;
 - aggregate-only private revalidation telemetry with not-modified/refresh/fulfillment-error counts and avoided private body bytes, without a second private-URL ledger;
 - user-level native-host install/status/uninstall tooling for Edge, Chromium, Chrome, and Chrome for Testing;
-- stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, atomic initial installation, live-safe staged per-file replacement with the manifest committed last, and Chromium e2e execution from the installed copy rather than the build tree.
+- stable user-level unpacked-extension install/status/uninstall tooling with source validation, symlink rejection, fsynced staging, durable atomic initial installation, live-safe synced per-file replacement with the manifest committed last, directory-synced uninstall, and Chromium e2e execution from the installed copy rather than the build tree.
 - deterministic compiled-extension build IDs, durably atomically published install/runtime state, durably published Native Messaging manifests, native-host reporting of the running build, and CLI `reload_required` detection when installed files are newer than the active unpacked extension;
 - Chromium hot-update proof: replace the stable installed extension while the browser remains open, preserve the extension ID/path, observe the old worker remain active until a browser-level unpacked-extension reload, then observe the new build become active without re-adding the extension.
 
