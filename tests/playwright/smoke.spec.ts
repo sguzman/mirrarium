@@ -1688,6 +1688,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         source_url: string;
         privacy_class: string;
         event_count: number;
+        reconnect_last_event_id: string | null;
+        reconnect_from_lifecycle_id: string | null;
       }>;
       const derivedEventSource = eventSourceStreams.find((stream) =>
         stream.source_url.includes("/backend-api/eventsource-fixture"),
@@ -1715,6 +1717,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(
         new Set(derivedReconnectStreams.map((stream) => stream.lifecycle_id)).size,
       ).toBe(2);
+      const reconnectContinuation = derivedReconnectStreams.find(
+        (stream) => stream.reconnect_last_event_id === "fixture-reconnect-1",
+      );
+      const reconnectOrigin = derivedReconnectStreams.find(
+        (stream) => stream.reconnect_last_event_id === null,
+      );
+      expect(reconnectContinuation).toBeTruthy();
+      expect(reconnectOrigin).toBeTruthy();
+      expect(reconnectContinuation?.reconnect_from_lifecycle_id).toBe(
+        reconnectOrigin?.lifecycle_id,
+      );
+      expect(reconnectOrigin?.reconnect_from_lifecycle_id).toBeNull();
 
       const { stdout: eventSourceEventsStdout } = await execFileAsync(
         cliPath,

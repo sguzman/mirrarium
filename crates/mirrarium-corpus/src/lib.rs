@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 
-const CORPUS_SCHEMA_VERSION: i64 = 2;
+const CORPUS_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
@@ -69,6 +69,8 @@ pub struct EventSourceStreamView {
     pub source_url: String,
     pub privacy_class: String,
     pub event_count: u64,
+    pub reconnect_last_event_id: Option<String>,
+    pub reconnect_from_lifecycle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -203,6 +205,7 @@ struct DownloadSource {
 #[derive(Debug, Clone)]
 struct EventSourceSource {
     capture_id: String,
+    captured_at_ms: i64,
     source_url: String,
     privacy_class: String,
     body_hash: String,
@@ -212,6 +215,7 @@ struct EventSourceSource {
 #[derive(Debug, Clone)]
 struct EventSourceDerivedEvent {
     transport_sequence: u64,
+    captured_at_ms: i64,
     source_capture_id: String,
     source_body_hash: String,
     event_name: Option<String>,
@@ -224,6 +228,8 @@ struct EventSourceDerivedEvent {
 struct EventSourceGroup {
     source_url: String,
     privacy_class: String,
+    first_observed_at_ms: i64,
+    reconnect_last_event_id: Option<String>,
     events: BTreeMap<u64, EventSourceDerivedEvent>,
     ambiguous_sequences: BTreeSet<u64>,
 }
@@ -403,7 +409,9 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             lifecycle_id TEXT PRIMARY KEY,
             source_url TEXT NOT NULL,
             privacy_class TEXT NOT NULL,
-            event_count INTEGER NOT NULL
+            event_count INTEGER NOT NULL,
+            reconnect_last_event_id TEXT,
+            reconnect_from_lifecycle_id TEXT
         );
 
         CREATE TABLE eventsource_events (
@@ -591,7 +599,13 @@ pub fn eventsource_streams(
     let connection = open_corpus_read_only(raw_root)?;
     let mut statement = connection.prepare(
         r#"
-        SELECT lifecycle_id, source_url, privacy_class, event_count
+        SELECT
+            lifecycle_id,
+            source_url,
+            privacy_class,
+            event_count,
+            reconnect_last_event_id,
+            reconnect_from_lifecycle_id
         FROM eventsource_streams
         ORDER BY lifecycle_id
         LIMIT ?1
@@ -604,6 +618,8 @@ pub fn eventsource_streams(
                 source_url: row.get(1)?,
                 privacy_class: row.get(2)?,
                 event_count: row.get::<_, i64>(3)? as u64,
+                reconnect_last_event_id: row.get(4)?,
+                reconnect_from_lifecycle_id: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1647,7 +1663,7 @@ fn correlate_attachment_downloads(
 fn collect_eventsource_sources(connection: &Connection) -> Result<Vec<EventSourceSource>> {
     let mut statement = connection.prepare(
         r#"
-        SELECT capture_id, url, privacy_class, body_hash, provenance_json
+        SELECT capture_id, captured_at_ms, url, privacy_class, body_hash, provenance_json
         FROM captures
         WHERE resource_type = 'EventSourceMessage'
           AND body_hash IS NOT NULL
@@ -1657,13 +1673,25 @@ fn collect_eventsource_sources(connection: &Connection) -> Result<Vec<EventSourc
     let rows = statement.query_map([], |row| {
         Ok(EventSourceSource {
             capture_id: row.get(0)?,
-            source_url: row.get(1)?,
-            privacy_class: row.get(2)?,
-            body_hash: row.get(3)?,
-            provenance_json: row.get(4)?,
+            captured_at_ms: row.get(1)?,
+            source_url: row.get(2)?,
+            privacy_class: row.get(3)?,
+            body_hash: row.get(4)?,
+            provenance_json: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn provenance_request_header(provenance: &Value, header_name: &str) -> Option<String> {
+    provenance
+        .get("request_headers")
+        .and_then(Value::as_object)?
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
+        .and_then(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn insert_eventsource_skip(
@@ -1712,6 +1740,8 @@ fn derive_eventsource_messages(
         let transport_sequence = provenance
             .get("transport_sequence")
             .and_then(Value::as_u64);
+        let reconnect_last_event_id =
+            provenance_request_header(&provenance, "last-event-id");
 
         let (Some(lifecycle_id), Some(transport_sequence)) =
             (lifecycle_id, transport_sequence)
@@ -1761,6 +1791,8 @@ fn derive_eventsource_messages(
             .or_insert_with(|| EventSourceGroup {
                 source_url: source.source_url.clone(),
                 privacy_class: source.privacy_class.clone(),
+                first_observed_at_ms: source.captured_at_ms,
+                reconnect_last_event_id: reconnect_last_event_id.clone(),
                 events: BTreeMap::new(),
                 ambiguous_sequences: BTreeSet::new(),
             });
@@ -1782,6 +1814,25 @@ fn derive_eventsource_messages(
                 "lifecycle_privacy_class_mismatch",
             )?;
             continue;
+        }
+        group.first_observed_at_ms = group.first_observed_at_ms.min(source.captured_at_ms);
+        match (
+            group.reconnect_last_event_id.as_deref(),
+            reconnect_last_event_id.as_deref(),
+        ) {
+            (None, Some(value)) => {
+                group.reconnect_last_event_id = Some(value.to_owned());
+            }
+            (Some(existing), Some(value)) if existing != value => {
+                insert_eventsource_skip(
+                    transaction,
+                    &source.capture_id,
+                    &source.source_url,
+                    "lifecycle_last_event_id_mismatch",
+                )?;
+                continue;
+            }
+            _ => {}
         }
         if group.ambiguous_sequences.contains(&transport_sequence) {
             insert_eventsource_skip(
@@ -1814,6 +1865,7 @@ fn derive_eventsource_messages(
             transport_sequence,
             EventSourceDerivedEvent {
                 transport_sequence,
+                captured_at_ms: source.captured_at_ms,
                 source_capture_id: source.capture_id,
                 source_body_hash: source.body_hash,
                 event_name: event.event_name,
@@ -1824,23 +1876,69 @@ fn derive_eventsource_messages(
         );
     }
 
+    let mut event_id_index: BTreeMap<(String, String), Vec<(String, i64)>> =
+        BTreeMap::new();
+    for (lifecycle_id, group) in &groups {
+        for event in group.events.values() {
+            if let Some(event_id) = event.event_id.as_ref().filter(|value| !value.is_empty()) {
+                event_id_index
+                    .entry((group.source_url.clone(), event_id.clone()))
+                    .or_default()
+                    .push((lifecycle_id.clone(), event.captured_at_ms));
+            }
+        }
+    }
+
+    let mut reconnect_links: BTreeMap<String, String> = BTreeMap::new();
+    for (lifecycle_id, group) in &groups {
+        let Some(last_event_id) = group.reconnect_last_event_id.as_ref() else {
+            continue;
+        };
+        let key = (group.source_url.clone(), last_event_id.clone());
+        let mut candidates = BTreeSet::new();
+        if let Some(matches) = event_id_index.get(&key) {
+            for (candidate_lifecycle_id, captured_at_ms) in matches {
+                if candidate_lifecycle_id != lifecycle_id
+                    && *captured_at_ms < group.first_observed_at_ms
+                {
+                    candidates.insert(candidate_lifecycle_id.clone());
+                }
+            }
+        }
+        if candidates.len() == 1 {
+            reconnect_links.insert(
+                lifecycle_id.clone(),
+                candidates.into_iter().next().expect("one reconnect candidate"),
+            );
+        }
+    }
+
     for (lifecycle_id, group) in groups {
         if group.events.is_empty() {
             continue;
         }
 
+        let reconnect_from_lifecycle_id = reconnect_links.get(&lifecycle_id);
+
         transaction.execute(
             r#"
-            INSERT INTO eventsource_streams
-                (lifecycle_id, source_url, privacy_class, event_count)
-            VALUES
-                (?1, ?2, ?3, ?4)
+            INSERT INTO eventsource_streams (
+                lifecycle_id,
+                source_url,
+                privacy_class,
+                event_count,
+                reconnect_last_event_id,
+                reconnect_from_lifecycle_id
+            ) VALUES
+                (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
             params![
                 lifecycle_id,
                 group.source_url,
                 group.privacy_class,
                 group.events.len() as i64,
+                group.reconnect_last_event_id,
+                reconnect_from_lifecycle_id,
             ],
         )?;
 
