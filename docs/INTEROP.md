@@ -31,4 +31,6 @@ The export is deliberately conversation-focused. WebSocket/EventSource transport
 
 The exporter does not crawl ChatGPT, mutate the archive, or read new network data. It composes already-derived local evidence. It also does not include arbitrary decrypted CAS bodies beyond text/content already represented in the derived corpus.
 
+The encrypted-at-rest guarantee ends at this explicit interoperability boundary: JSONL records written to stdout contain the private conversation/evidence text represented by the derived corpus in plaintext. Pipes pass that plaintext to the receiving process, and shell redirection creates an ordinary plaintext file with permissions determined by the shell/filesystem environment. Consumers such as Chatarium should treat the stream as sensitive local data and establish their own at-rest protections if they persist it.
+
 Canonicalization is not authoritative over evidence. If canonicalization of one conversation fails, the exporter keeps that conversation's evidence and provenance and emits `canonical: null` plus `canonical_error` instead of aborting the entire JSONL stream. Structural corpus/read failures still fail the command.
