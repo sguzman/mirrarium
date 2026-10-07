@@ -4558,6 +4558,19 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(staleProgressSync.stdout).toBe("");
       expect(staleProgressSync.stderr).toContain("published corpus is stale by");
 
+      const staleSyncPlan = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-plan", "--require-fresh"],
+        JSON.stringify(checkpointC1),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(staleSyncPlan.code).not.toBe(0);
+      expect(staleSyncPlan.stdout).toBe("");
+      expect(staleSyncPlan.stderr).toContain("published corpus is stale by");
+
       const negotiatedFreshRequest = {
         schema: "mirrarium.corpus.negotiated-sync-request",
         schema_version: 1,
@@ -4653,6 +4666,58 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(c1ToC2Sync.checkpoint.sync_state.records).toMatchObject(
         checkpointC1.sync_state.records,
+      );
+
+      const { stdout: c1ToC2PlanStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-plan", "--require-fresh"],
+        JSON.stringify(checkpointC1),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const c1ToC2Plan = JSON.parse(c1ToC2PlanStdout) as {
+        archive_id: string;
+        manifest: typeof exportManifest;
+        upserts: Array<{
+          conversation_id: string;
+          record_sha256: string;
+        }>;
+        deleted_conversation_ids: string[];
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(
+        validateCorpusSyncPlan(c1ToC2Plan),
+        JSON.stringify(validateCorpusSyncPlan.errors),
+      ).toBe(true);
+      expect(c1ToC2Plan.archive_id).toBe(exportSource.archive_id);
+      expect(c1ToC2Plan.manifest).toEqual(syncProgressFreshStatus.manifest);
+      expect(c1ToC2Plan.deleted_conversation_ids).toEqual([]);
+      expect(c1ToC2Plan.checkpoint).toEqual(c1ToC2Sync.checkpoint);
+      expect(c1ToC2Plan.upserts).toHaveLength(1);
+      expect(c1ToC2Plan.upserts[0]?.conversation_id).toBe("fixture-sync-new");
+      expect(c1ToC2Plan.upserts[0]?.record_sha256).toBe(
+        c1ToC2Sync.delta.upserts[0]?.record_sha256,
+      );
+
+      const { stdout: plannedRecordStdout } = await execFileAsync(
+        cliPath,
+        [
+          "corpus",
+          "export-one",
+          c1ToC2Plan.upserts[0]!.conversation_id,
+          c1ToC2Plan.upserts[0]!.record_sha256,
+        ],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(plannedRecordStdout)).toEqual(
+        c1ToC2Sync.delta.upserts[0],
       );
 
       const { stdout: c1ToC2SyncRepeatStdout } = await execFileWithInput(
