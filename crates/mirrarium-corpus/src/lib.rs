@@ -1106,9 +1106,9 @@ fn conversation_ids_for_connection(
         LIMIT ?1
         "#,
     )?;
-    Ok(statement
-        .query_map([limit], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+    let rows = statement.query_map([limit], |row| row.get::<_, String>(0))?;
+    let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 pub fn export_conversations(
