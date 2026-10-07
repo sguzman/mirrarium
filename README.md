@@ -74,6 +74,7 @@ mirrarium captures 20
 mirrarium capture <capture-id> [response|request]
 mirrarium verify
 mirrarium maintenance incoming
+mirrarium maintenance prune-orphans
 mirrarium privacy status
 mirrarium privacy migrate
 mirrarium cache opportunities
@@ -118,6 +119,8 @@ mirrarium native-host status
 ```
 
 `verify` is the whole raw-archive integrity pass. It first runs SQLCipher/SQLite `integrity_check` and `foreign_key_check`, validates the required raw-ledger tables/columns, then re-hashes every indexed content-addressed object, checks class/path/logical byte count, cross-checks every response/request-body reference against `objects`, and verifies the reverse direction too: every indexed object must still be referenced by at least one response capture or private request body. Structural database damage, FK violations, missing required schema, corrupt objects, indexed-but-unreferenced rows, and invalid capture invariants fail verification. Private CAS objects are transparently decrypted before verification. Separately, the verifier scans CAS trees for unindexed crash residue: well-formed orphan files are reported by count and stored-on-disk bytes without failing verification, while malformed paths, files, symlinks, or unexpected nesting are errors. Mirrarium never deletes orphan CAS objects automatically.
+
+`maintenance prune-orphans` is the only deletion path for that crash residue. It is manual and exclusive: it refuses to run while the browser/native host owns the raw writer lock, requires the entire raw `verify` result to be clean apart from informational orphan counts, rescans the CAS and requires candidate count/bytes to match those verified orphan totals, then deletes only well-formed unindexed CAS files and syncs the touched directories. It never deletes indexed objects, malformed entries, `.incoming` files, or raw-ledger migration recovery artifacts.
 
 `privacy status` reports the private-CAS key path, whether the key exists, and encrypted/legacy/missing private-object counts. New private response bodies and captured request bodies are stored as versioned XChaCha20-Poly1305 envelopes; the CAS key remains the SHA-256 of the decrypted logical bytes, so deduplication and provenance identities do not change. Existing plaintext private objects remain readable for backward compatibility until migrated.
 
