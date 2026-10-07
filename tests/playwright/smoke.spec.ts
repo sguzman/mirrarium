@@ -2850,11 +2850,26 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const negotiatedSyncRequestSchema = JSON.parse(
         negotiatedSyncRequestSchemaStdout,
       );
+      const { stdout: negotiatedSyncCheckpointSchemaStdout } =
+        await execFileAsync(
+          cliPath,
+          ["corpus", "export-sync-checkpoint-schema"],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+      const negotiatedSyncCheckpointSchema = JSON.parse(
+        negotiatedSyncCheckpointSchemaStdout,
+      );
       const negotiatedSyncRequestAjv = new Ajv2020({
         allErrors: true,
         strict: true,
       });
       negotiatedSyncRequestAjv.addSchema(consumerRequirementsSchema);
+      negotiatedSyncRequestAjv.addSchema(negotiatedSyncCheckpointSchema);
       const validateNegotiatedSyncRequest =
         negotiatedSyncRequestAjv.compile(negotiatedSyncRequestSchema);
 
