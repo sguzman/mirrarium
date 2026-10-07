@@ -13,6 +13,7 @@ use mirrarium_store::{
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 const CORPUS_SCHEMA_VERSION: i64 = 4;
@@ -248,11 +249,28 @@ pub struct ConversationExportRecord {
     pub producer_corpus_schema_version: i64,
     pub record_type: String,
     pub conversation_id: String,
+    pub source_capture_ids: Vec<String>,
+    pub record_sha256: String,
     pub evidence: ConversationView,
     pub canonical: Option<CanonicalConversationView>,
     pub canonical_error: Option<String>,
     pub stream_revisions: Vec<StreamMessageRevisionView>,
     pub attachments: Vec<AttachmentView>,
+}
+
+#[derive(Serialize)]
+struct ConversationExportHashPayload<'a> {
+    schema: &'a str,
+    schema_version: u32,
+    producer_corpus_schema_version: i64,
+    record_type: &'a str,
+    conversation_id: &'a str,
+    source_capture_ids: &'a [String],
+    evidence: &'a ConversationView,
+    canonical: &'a Option<CanonicalConversationView>,
+    canonical_error: &'a Option<String>,
+    stream_revisions: &'a [StreamMessageRevisionView],
+    attachments: &'a [AttachmentView],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1196,6 +1214,43 @@ where
     Ok(written)
 }
 
+fn export_source_capture_ids(
+    evidence: &ConversationView,
+    canonical: &Option<CanonicalConversationView>,
+    stream_revisions: &[StreamMessageRevisionView],
+    attachments: &[AttachmentView],
+) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+
+    for message in &evidence.messages {
+        ids.insert(message.capture_id.clone());
+    }
+    for stream in &evidence.streams {
+        ids.insert(stream.capture_id.clone());
+    }
+    if let Some(canonical) = canonical {
+        ids.insert(canonical.basis_capture_id.clone());
+        for stream in canonical
+            .linked_streams
+            .iter()
+            .chain(canonical.unlinked_streams.iter())
+        {
+            ids.insert(stream.capture_id.clone());
+        }
+    }
+    for revision in stream_revisions {
+        ids.insert(revision.capture_id.clone());
+    }
+    for attachment in attachments {
+        ids.insert(attachment.observation.capture_id.clone());
+        for download in &attachment.downloads {
+            ids.insert(download.download_capture_id.clone());
+        }
+    }
+
+    ids.into_iter().collect()
+}
+
 fn conversation_export_record(
     raw_root: &Path,
     conversation_id: String,
@@ -1214,13 +1269,42 @@ fn conversation_export_record(
         stream_message_revisions(raw_root, &conversation_id, i64::MAX as u64)?;
     let attachments =
         attachments(raw_root, Some(&conversation_id), i64::MAX as u64)?;
+    let source_capture_ids = export_source_capture_ids(
+        &evidence,
+        &canonical,
+        &stream_revisions,
+        &attachments,
+    );
+
+    let schema = "mirrarium.corpus.conversation".to_owned();
+    let record_type = "conversation".to_owned();
+    let record_sha256 = {
+        let payload = ConversationExportHashPayload {
+            schema: &schema,
+            schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+            producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+            record_type: &record_type,
+            conversation_id: &conversation_id,
+            source_capture_ids: &source_capture_ids,
+            evidence: &evidence,
+            canonical: &canonical,
+            canonical_error: &canonical_error,
+            stream_revisions: &stream_revisions,
+            attachments: &attachments,
+        };
+        let bytes =
+            serde_json::to_vec(&payload).context("serializing corpus export hash payload")?;
+        format!("{:x}", Sha256::digest(&bytes))
+    };
 
     Ok(ConversationExportRecord {
-        schema: "mirrarium.corpus.conversation".to_owned(),
+        schema,
         schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
         producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
-        record_type: "conversation".to_owned(),
+        record_type,
         conversation_id,
+        source_capture_ids,
+        record_sha256,
         evidence,
         canonical,
         canonical_error,

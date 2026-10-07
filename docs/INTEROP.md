@@ -17,6 +17,8 @@ Each v1 record has:
 - `producer_corpus_schema_version`: the internal rebuildable corpus schema version that produced the record
 - `record_type: "conversation"`
 - `conversation_id`
+- `source_capture_ids`: sorted/deduplicated raw capture IDs referenced anywhere in the record
+- `record_sha256`: SHA-256 of the full v1 record payload except the `record_sha256` field itself
 - `evidence`: the normal derived conversation evidence view, retaining source capture IDs
 - `canonical`: the conservative canonical conversation view when safely derivable, otherwise `null`
 - `canonical_error`: `null` on normal derivation, otherwise the canonicalization failure for this conversation
@@ -26,6 +28,8 @@ Each v1 record has:
 ## Contract
 
 The export schema version is independent of Mirrarium's internal SQLite schema version. Internal rebuildable schema changes do not change the JSONL contract unless the export `schema_version` changes.
+
+For a fixed published corpus generation, repeated exports are byte-for-byte deterministic. `record_sha256` therefore gives downstream consumers an idempotent content identity for each conversation record; a consumer can key updates by `conversation_id` and skip work when the hash is unchanged.
 
 The export is deliberately conversation-focused. WebSocket/EventSource transport-global views, skipped transport derivations, cache telemetry, and arbitrary raw capture bodies remain available through their dedicated Mirrarium inspection commands and are not silently folded into conversation records.
 

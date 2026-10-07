@@ -2213,6 +2213,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         producer_corpus_schema_version: number;
         record_type: string;
         conversation_id: string;
+        source_capture_ids: string[];
+        record_sha256: string;
         evidence: {
           summary: { conversation_id: string; title?: string };
           messages: Array<{ capture_id: string }>;
@@ -2237,7 +2239,12 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
             record.schema_version === 1 &&
             record.producer_corpus_schema_version > 0 &&
             record.record_type === "conversation" &&
-            record.conversation_id === record.evidence.summary.conversation_id,
+            record.conversation_id === record.evidence.summary.conversation_id &&
+            /^[0-9a-f]{64}$/.test(record.record_sha256) &&
+            record.source_capture_ids.length ===
+              new Set(record.source_capture_ids).size &&
+            record.source_capture_ids.join("\n") ===
+              [...record.source_capture_ids].sort().join("\n"),
         ),
       ).toBe(true);
 
@@ -2248,6 +2255,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(exportedConversation?.canonical?.basis_capture_id.length).toBeGreaterThan(0);
       expect(exportedConversation?.canonical?.basis_source_body_hash).toMatch(
         /^[0-9a-f]{64}$/,
+      );
+      expect(exportedConversation?.source_capture_ids).toContain(
+        exportedConversation?.canonical?.basis_capture_id,
       );
       expect(
         exportedConversation?.evidence.messages.every(
@@ -2261,7 +2271,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(exportedStreamTail?.stream_revisions.length).toBeGreaterThanOrEqual(2);
       expect(
         exportedStreamTail?.stream_revisions.every(
-          (revision) => revision.capture_id.length > 0,
+          (revision) =>
+            revision.capture_id.length > 0 &&
+            exportedStreamTail.source_capture_ids.includes(revision.capture_id),
         ),
       ).toBe(true);
 
@@ -2273,8 +2285,15 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         exportedAttachment?.attachments.some(
           (attachment) =>
             attachment.observation.capture_id.length > 0 &&
+            exportedAttachment.source_capture_ids.includes(
+              attachment.observation.capture_id,
+            ) &&
             attachment.downloads.some(
-              (download) => download.download_capture_id.length > 0,
+              (download) =>
+                download.download_capture_id.length > 0 &&
+                exportedAttachment.source_capture_ids.includes(
+                  download.download_capture_id,
+                ),
             ),
         ),
       ).toBe(true);
