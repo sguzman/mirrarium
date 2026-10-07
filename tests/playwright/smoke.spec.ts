@@ -1858,6 +1858,42 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         corpusVerify,
       );
 
+      const staleCorpusStagingPath = join(
+        dataDir,
+        "derived",
+        ".corpus.sqlite3.rebuild",
+      );
+      await writeFile(
+        staleCorpusStagingPath,
+        Buffer.from("simulated hard-crash staging artifact", "utf8"),
+      );
+      const { stdout: recoveredCorpusRebuildStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "rebuild"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(recoveredCorpusRebuildStdout)).toEqual(corpusStats);
+      expect(await readdir(join(dataDir, "derived"))).not.toContain(
+        ".corpus.sqlite3.rebuild",
+      );
+
+      const { stdout: recoveredCorpusVerifyStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "verify"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(recoveredCorpusVerifyStdout)).toEqual(corpusVerify);
+
       const { stdout: webSocketStreamsStdout } = await execFileAsync(
         cliPath,
         ["corpus", "websocket-streams", "20"],
