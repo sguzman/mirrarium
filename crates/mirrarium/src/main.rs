@@ -335,10 +335,12 @@ fn run() -> Result<()> {
                 );
                 let state: corpus::ConversationSyncState =
                     serde_json::from_str(&input).context("parsing corpus sync-state JSON")?;
-                println!(
-                    "{}",
-                    serde_json::to_string(&corpus::export_delta(&root, &state)?)?
-                );
+                let stdout = std::io::stdout();
+                let mut stdout = std::io::BufWriter::new(stdout.lock());
+                corpus::write_conversation_sync_delta_json(&root, &state, &mut stdout)?;
+                stdout
+                    .flush()
+                    .context("flushing corpus sync-delta JSON")?;
             }
             Some("export-manifest") => {
                 println!("{}", serde_json::to_string(&corpus::export_manifest(&root)?)?);
