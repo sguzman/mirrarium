@@ -460,6 +460,9 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
             let removed = if install_path.exists() {
                 fs::remove_dir_all(&install_path)
                     .with_context(|| format!("removing {}", install_path.display()))?;
+                if let Some(parent) = install_path.parent() {
+                    sync_directory(parent)?;
+                }
                 true
             } else {
                 false
@@ -468,6 +471,9 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
                 if state_path.is_file() {
                     fs::remove_file(&state_path)
                         .with_context(|| format!("removing {}", state_path.display()))?;
+                    if let Some(parent) = state_path.parent() {
+                        sync_directory(parent)?;
+                    }
                 }
             }
             println!(
@@ -817,6 +823,7 @@ fn install_extension(source: &Path, destination: &Path) -> Result<serde_json::Va
                 destination.display()
             )
         })?;
+        sync_directory(parent)?;
     }
 
     Ok(installed_manifest)
@@ -827,8 +834,14 @@ fn activate_staged_extension_directory(
     destination: &Path,
     manifest_last: bool,
 ) -> Result<()> {
+    let destination_existed = destination.is_dir();
     fs::create_dir_all(destination)
         .with_context(|| format!("creating extension destination {}", destination.display()))?;
+    if !destination_existed {
+        if let Some(parent) = destination.parent() {
+            sync_directory(parent)?;
+        }
+    }
 
     let mut entries = Vec::new();
     let mut expected_names = BTreeSet::<OsString>::new();
@@ -875,8 +888,12 @@ fn activate_staged_extension_directory(
         }
     }
 
+    sync_directory(destination)?;
     fs::remove_dir(staging)
         .with_context(|| format!("removing empty extension staging {}", staging.display()))?;
+    if let Some(parent) = staging.parent() {
+        sync_directory(parent)?;
+    }
     Ok(())
 }
 
@@ -914,13 +931,19 @@ fn activate_staged_extension_entry(source: &Path, destination: &Path) -> Result<
             )
         })?;
     }
+    sync_file(source)?;
     fs::rename(source, destination).with_context(|| {
         format!(
             "atomically replacing extension file {} with {}",
             destination.display(),
             source.display()
         )
-    })
+    })?;
+    sync_directory(
+        destination
+            .parent()
+            .context("extension destination file has no parent directory")?,
+    )
 }
 
 fn copy_extension_tree(source: &Path, destination: &Path) -> Result<()> {
@@ -951,6 +974,7 @@ fn copy_extension_tree(source: &Path, destination: &Path) -> Result<()> {
                     destination_path.display()
                 )
             })?;
+            sync_file(&destination_path)?;
         } else {
             anyhow::bail!(
                 "extension source contains unsupported entry: {}",
@@ -959,6 +983,7 @@ fn copy_extension_tree(source: &Path, destination: &Path) -> Result<()> {
         }
     }
 
+    sync_directory(destination)?;
     Ok(())
 }
 
@@ -996,6 +1021,9 @@ fn handle_native_host(arguments: &[String]) -> Result<()> {
             let removed = if manifest_path.is_file() {
                 fs::remove_file(&manifest_path)
                     .with_context(|| format!("removing {}", manifest_path.display()))?;
+                if let Some(parent) = manifest_path.parent() {
+                    sync_directory(parent)?;
+                }
                 true
             } else {
                 false
