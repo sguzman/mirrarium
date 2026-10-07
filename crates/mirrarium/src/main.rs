@@ -86,11 +86,10 @@ fn write_stdout_bytes(bytes: &[u8], context: &'static str) -> Result<()> {
     stdout.flush().context("flushing stdout")
 }
 
-fn write_stdout_json_line<T: serde::Serialize>(
-    value: &T,
+fn write_stdout_json_line(
+    mut bytes: Vec<u8>,
     context: &'static str,
 ) -> Result<()> {
-    let mut bytes = serde_json::to_vec(value).context("serializing stdout JSON")?;
     bytes.push(b'\n');
     write_stdout_bytes(&bytes, context)
 }
@@ -384,7 +383,7 @@ fn run() -> Result<()> {
             Some("export-manifest") => {
                 let manifest = corpus::export_manifest(&root)?;
                 write_stdout_json_line(
-                    &manifest,
+                    serde_json::to_vec(&manifest).context("serializing corpus export manifest")?,
                     "writing corpus export manifest",
                 )?;
             }
@@ -423,7 +422,8 @@ fn run() -> Result<()> {
                 )?
                 .with_context(|| format!("conversation {conversation_id:?} not found"))?;
                 write_stdout_json_line(
-                    &record,
+                    serde_json::to_vec(&record)
+                        .context("serializing corpus conversation export")?,
                     "writing corpus conversation export",
                 )?;
             }
