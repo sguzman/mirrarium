@@ -2538,6 +2538,39 @@ fn verify_corpus_connections(
         }
     }
 
+    let mut websocket_skipped_statement = corpus.prepare(
+        "SELECT capture_id, source_url, reason FROM websocket_skipped_captures ORDER BY capture_id",
+    )?;
+    let websocket_skipped_rows = websocket_skipped_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in websocket_skipped_rows {
+        let (capture_id, source_url, reason) = row?;
+        if reason.trim().is_empty() {
+            errors.push(format!(
+                "WebSocket skipped capture {capture_id:?} has an empty reason"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            Some("private"),
+            None,
+            None,
+            None,
+            Some("WebSocketFrame"),
+            None,
+            "WebSocket skipped capture",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
+    }
+
     let websocket_overlap: u64 = corpus.query_row(
         r#"
         SELECT COUNT(*)
@@ -2799,6 +2832,39 @@ fn verify_corpus_connections(
                 "EventSource event {source_capture_id:?} has no raw transport source"
             )),
         }
+    }
+
+    let mut eventsource_skipped_statement = corpus.prepare(
+        "SELECT capture_id, source_url, reason FROM eventsource_skipped_captures ORDER BY capture_id",
+    )?;
+    let eventsource_skipped_rows = eventsource_skipped_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in eventsource_skipped_rows {
+        let (capture_id, source_url, reason) = row?;
+        if reason.trim().is_empty() {
+            errors.push(format!(
+                "EventSource skipped capture {capture_id:?} has an empty reason"
+            ));
+        }
+        verify_raw_source_link(
+            &raw_sources,
+            &capture_id,
+            &source_url,
+            Some("private"),
+            None,
+            None,
+            None,
+            Some("EventSourceMessage"),
+            Some("SSE_RECV"),
+            "EventSource skipped capture",
+            &mut raw_source_links_checked,
+            &mut errors,
+        )?;
     }
 
     let eventsource_overlap: u64 = corpus.query_row(
@@ -4646,6 +4712,16 @@ mod tests {
             params!["event-capture-2", "https://chatgpt.com/backend-api/events", event_hash_2],
         )
         .unwrap();
+        raw.execute(
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, body_bytes, mime_type, resource_type, method) VALUES ('ws-skip', 'wss://chatgpt.com/backend-api/ws-skipped', 'private', NULL, 0, 'application/json', 'WebSocketFrame', 'WS_RECV')",
+            [],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, body_bytes, mime_type, resource_type, method) VALUES ('sse-skip', 'https://chatgpt.com/backend-api/events-skipped', 'private', NULL, 0, 'text/event-stream; charset=utf-8', 'EventSourceMessage', 'SSE_RECV')",
+            [],
+        )
+        .unwrap();
 
         corpus.execute(
             "INSERT INTO websocket_streams (lifecycle_id, source_url, privacy_class, frame_count) VALUES ('ws-life', 'wss://chatgpt.com/backend-api/ws', 'private', 1)",
@@ -4672,6 +4748,18 @@ mod tests {
             "INSERT INTO eventsource_events (lifecycle_id, transport_sequence, source_capture_id, source_body_hash, event_name, event_id, data, json_valid) VALUES ('event-life-2', 0, 'event-capture-2', ?1, 'message', 'cursor-2', '[DONE]', 0)",
             [event_hash_2],
         ).unwrap();
+        corpus
+            .execute(
+                "INSERT INTO websocket_skipped_captures (capture_id, source_url, reason) VALUES ('ws-skip', 'wss://chatgpt.com/backend-api/ws-skipped', 'missing_transport_identity')",
+                [],
+            )
+            .unwrap();
+        corpus
+            .execute(
+                "INSERT INTO eventsource_skipped_captures (capture_id, source_url, reason) VALUES ('sse-skip', 'https://chatgpt.com/backend-api/events-skipped', 'missing_transport_identity')",
+                [],
+            )
+            .unwrap();
 
         (corpus, raw)
     }
@@ -4679,25 +4767,13 @@ mod tests {
     #[test]
     fn transport_skipped_capture_views_preserve_reason_and_source() {
         let (corpus, _raw) = open_transport_verify_fixture();
-        corpus
-            .execute(
-                "INSERT INTO websocket_skipped_captures (capture_id, source_url, reason) VALUES ('ws-skip', 'wss://chatgpt.com/backend-api/ws-skipped', 'missing_transport_sequence')",
-                [],
-            )
-            .unwrap();
-        corpus
-            .execute(
-                "INSERT INTO eventsource_skipped_captures (capture_id, source_url, reason) VALUES ('sse-skip', 'https://chatgpt.com/backend-api/events-skipped', 'ambiguous_lifecycle_id')",
-                [],
-            )
-            .unwrap();
 
         assert_eq!(
             websocket_skipped_captures_for_connection(&corpus, 10).unwrap(),
             vec![TransportSkippedCaptureView {
                 capture_id: "ws-skip".to_owned(),
                 source_url: "wss://chatgpt.com/backend-api/ws-skipped".to_owned(),
-                reason: "missing_transport_sequence".to_owned(),
+                reason: "missing_transport_identity".to_owned(),
             }]
         );
         assert_eq!(
@@ -4705,7 +4781,7 @@ mod tests {
             vec![TransportSkippedCaptureView {
                 capture_id: "sse-skip".to_owned(),
                 source_url: "https://chatgpt.com/backend-api/events-skipped".to_owned(),
-                reason: "ambiguous_lifecycle_id".to_owned(),
+                reason: "missing_transport_identity".to_owned(),
             }]
         );
     }
@@ -4720,8 +4796,40 @@ mod tests {
         assert_eq!(report.websocket_frames_checked, 1);
         assert_eq!(report.eventsource_streams_checked, 2);
         assert_eq!(report.eventsource_events_checked, 2);
-        assert_eq!(report.raw_source_links_checked, 3);
+        assert_eq!(report.raw_source_links_checked, 5);
         assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn transport_corpus_verify_checks_skipped_capture_raw_provenance() {
+        let (corpus, raw) = open_transport_verify_fixture();
+
+        let clean = verify_corpus_connections(&corpus, &raw).unwrap();
+        assert!(clean.errors.is_empty());
+        assert_eq!(clean.raw_source_links_checked, 5);
+
+        corpus
+            .execute(
+                "UPDATE websocket_skipped_captures SET source_url = 'wss://chatgpt.com/backend-api/wrong' WHERE capture_id = 'ws-skip'",
+                [],
+            )
+            .unwrap();
+        corpus
+            .execute(
+                "UPDATE eventsource_skipped_captures SET reason = '' WHERE capture_id = 'sse-skip'",
+                [],
+            )
+            .unwrap();
+
+        let broken = verify_corpus_connections(&corpus, &raw).unwrap();
+        assert!(broken.errors.iter().any(|error| {
+            error.contains("WebSocket skipped capture")
+                && error.contains("source URL disagrees")
+        }));
+        assert!(broken.errors.iter().any(|error| {
+            error.contains("EventSource skipped capture")
+                && error.contains("empty reason")
+        }));
     }
 
     #[test]
