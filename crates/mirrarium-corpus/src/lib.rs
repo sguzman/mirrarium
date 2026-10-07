@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use mirrarium_store::{
     apply_private_database_key, open_raw_ledger_read_only, read_verified_object,
 };
@@ -344,6 +345,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     fs::create_dir_all(&derived_root)
         .with_context(|| format!("creating {}", derived_root.display()))?;
     harden_directory(&derived_root)?;
+    let _rebuild_lock = acquire_corpus_rebuild_lock(&derived_root)?;
 
     let corpus_database = derived_root.join("corpus.sqlite3");
     let staging_database = derived_root.join(".corpus.sqlite3.rebuild");
@@ -4191,6 +4193,40 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
     events
 }
 
+#[derive(Debug)]
+struct CorpusRebuildLock {
+    file: fs::File,
+}
+
+impl Drop for CorpusRebuildLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn acquire_corpus_rebuild_lock(derived_root: &Path) -> Result<CorpusRebuildLock> {
+    let lock_path = derived_root.join(".rebuild.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening corpus rebuild lock {}", lock_path.display()))?;
+    harden_file(&lock_path)?;
+
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(CorpusRebuildLock { file }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            anyhow::bail!(
+                "another 'mirrarium corpus rebuild' is already active for {}",
+                derived_root.display()
+            )
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("locking corpus rebuild lock {}", lock_path.display())),
+    }
+}
+
 fn corpus_sidecar_paths(database: &Path) -> [PathBuf; 2] {
     [
         PathBuf::from(format!("{}-wal", database.display())),
@@ -4535,6 +4571,25 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("missing reconnect predecessor")));
+    }
+
+    #[test]
+    fn corpus_rebuild_lock_excludes_competing_writer_and_recovers_after_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let derived_root = directory.path().join("derived");
+        fs::create_dir_all(&derived_root).unwrap();
+
+        let first = acquire_corpus_rebuild_lock(&derived_root).unwrap();
+        let second = acquire_corpus_rebuild_lock(&derived_root);
+        assert!(second.is_err());
+        assert!(second
+            .unwrap_err()
+            .to_string()
+            .contains("already active"));
+
+        drop(first);
+        let third = acquire_corpus_rebuild_lock(&derived_root).unwrap();
+        drop(third);
     }
 
     #[test]
