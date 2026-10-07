@@ -1906,6 +1906,33 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(privacyStatus.migration_needed).toBe(false);
       expect(privacyStatus.key_path).toBe(privateKeyFile);
 
+      const readExportSource = async () => {
+        const { stdout } = await execFileAsync(
+          cliPath,
+          ["corpus", "export-source"],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+        return JSON.parse(stdout) as {
+          schema: string;
+          schema_version: number;
+          record_type: string;
+          archive_id: string;
+        };
+      };
+      const exportSource = await readExportSource();
+      expect(exportSource).toMatchObject({
+        schema: "mirrarium.corpus.export-source",
+        schema_version: 1,
+        record_type: "export-source",
+      });
+      expect(exportSource.archive_id).toMatch(/^[0-9a-f]{64}$/);
+      expect(await readExportSource()).toEqual(exportSource);
+
       const { stdout: privacyMigrationStdout } = await execFileAsync(
         cliPath,
         ["privacy", "migrate"],
@@ -1932,6 +1959,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(privacyMigration.ledger_migrated).toBe(false);
       expect(privacyMigration.ledger_already_encrypted).toBe(true);
       expect(privacyMigration.ledger_plaintext_bytes).toBe(0);
+      expect(await readExportSource()).toEqual(exportSource);
 
       const { stdout: corpusStdout } = await execFileAsync(
         cliPath,
@@ -2475,6 +2503,34 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           record_type: "conversation-index",
           conversation_id: "   ",
           record_sha256: "0".repeat(64),
+        }),
+      ).toBe(false);
+
+      const { stdout: corpusExportSourceSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-source-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusExportSourceSchema = JSON.parse(corpusExportSourceSchemaStdout);
+      const validateCorpusExportSource = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(corpusExportSourceSchema);
+      expect(
+        validateCorpusExportSource(await readExportSource()),
+        JSON.stringify(validateCorpusExportSource.errors),
+      ).toBe(true);
+      expect(
+        validateCorpusExportSource({
+          schema: "mirrarium.corpus.export-source",
+          schema_version: 1,
+          record_type: "export-source",
+          archive_id: "A".repeat(64),
         }),
       ).toBe(false);
 
