@@ -1476,7 +1476,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         eventsource_message_errors: number;
         suppressed_eventsource_messages: number;
       };
-      expect(eventSourceStats.eventsource_messages).toBe(2);
+      expect(eventSourceStats.eventsource_messages).toBe(4);
       expect(eventSourceStats.eventsource_message_body_bytes).toBeGreaterThan(0);
       expect(eventSourceStats.eventsource_message_errors).toBe(0);
       expect(eventSourceStats.suppressed_eventsource_messages).toBe(0);
@@ -1662,9 +1662,9 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.stream_captures).toBeGreaterThanOrEqual(1);
       expect(corpusStats.stream_events).toBeGreaterThanOrEqual(3);
       expect(corpusStats.json_stream_events).toBeGreaterThanOrEqual(2);
-      expect(corpusStats.eventsource_streams).toBe(1);
-      expect(corpusStats.eventsource_events).toBe(2);
-      expect(corpusStats.eventsource_json_events).toBe(1);
+      expect(corpusStats.eventsource_streams).toBe(3);
+      expect(corpusStats.eventsource_events).toBe(4);
+      expect(corpusStats.eventsource_json_events).toBe(3);
       expect(corpusStats.eventsource_skipped_captures).toBe(0);
       expect(corpusStats.stream_message_revisions).toBeGreaterThanOrEqual(2);
       expect(corpusStats.conversation_snapshots).toBeGreaterThanOrEqual(1);
@@ -1699,6 +1699,22 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         "fixture-eventsource-query-secret",
       );
       expect(derivedEventSource?.source_url).toContain("keep=yes");
+
+      const derivedReconnectStreams = eventSourceStreams.filter((stream) =>
+        stream.source_url.includes("/backend-api/eventsource-reconnect"),
+      );
+      expect(derivedReconnectStreams).toHaveLength(2);
+      expect(
+        derivedReconnectStreams.every(
+          (stream) =>
+            stream.privacy_class === "private" &&
+            stream.event_count === 1 &&
+            !stream.source_url.includes("fixture-eventsource-reconnect-secret"),
+        ),
+      ).toBe(true);
+      expect(
+        new Set(derivedReconnectStreams.map((stream) => stream.lifecycle_id)).size,
+      ).toBe(2);
 
       const { stdout: eventSourceEventsStdout } = await execFileAsync(
         cliPath,
