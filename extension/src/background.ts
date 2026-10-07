@@ -1370,6 +1370,18 @@ async function captureRequestBody(
     return;
   }
 
+  if (
+    request.declaredContentLength !== undefined &&
+    request.declaredContentLength > MAX_REQUEST_BODY_BYTES
+  ) {
+    postNative({
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: "suppressed:request_body_too_large",
+    });
+    return;
+  }
+
   let body = request.postData;
   if (body === undefined && request.hasPostData && !allowPostDataFetch) {
     postNative({
@@ -1407,11 +1419,7 @@ async function captureRequestBody(
     return;
   }
 
-  if (
-    (request.declaredContentLength !== undefined &&
-      request.declaredContentLength > MAX_REQUEST_BODY_BYTES) ||
-    utf8ByteLength(body) > MAX_REQUEST_BODY_BYTES
-  ) {
+  if (utf8ByteLength(body) > MAX_REQUEST_BODY_BYTES) {
     postNative({
       type: "request_body_finish",
       capture_id: captureId,
