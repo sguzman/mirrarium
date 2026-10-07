@@ -1223,17 +1223,25 @@ pub fn export_conversation(
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
-    if conversation_summary(&corpus, conversation_id)?.is_none() {
+    let cached_hash = corpus
+        .query_row(
+            "SELECT record_sha256 FROM conversation_export_index WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(cached_hash) = cached_hash else {
         return Ok(None);
-    }
+    };
     let raw = open_raw_ledger_read_only(raw_root)?;
-    conversation_export_record_for_connections(
+    let record = conversation_export_record_for_connections(
         raw_root,
         &corpus,
         &raw,
         conversation_id.to_owned(),
-    )
-    .map(Some)
+    )?;
+    ensure_record_matches_cached_hash(&record, &cached_hash)?;
+    Ok(Some(record))
 }
 
 pub fn export_conversations(
@@ -1248,20 +1256,81 @@ pub fn export_conversations(
     Ok(records)
 }
 
-fn conversation_export_index_line(record: &ConversationExportRecord) -> Result<Vec<u8>> {
-    let index = ConversationExportIndexRecord {
+fn conversation_export_index_record(
+    conversation_id: String,
+    record_sha256: String,
+) -> ConversationExportIndexRecord {
+    ConversationExportIndexRecord {
         schema: "mirrarium.corpus.conversation-index".to_owned(),
         schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
         conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
         producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
         record_type: "conversation-index".to_owned(),
-        conversation_id: record.conversation_id.clone(),
-        record_sha256: record.record_sha256.clone(),
-    };
+        conversation_id,
+        record_sha256,
+    }
+}
+
+fn conversation_export_index_line_from_parts(
+    conversation_id: &str,
+    record_sha256: &str,
+) -> Result<Vec<u8>> {
+    let index = conversation_export_index_record(
+        conversation_id.to_owned(),
+        record_sha256.to_owned(),
+    );
     let mut bytes =
         serde_json::to_vec(&index).context("serializing corpus export index record")?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+fn conversation_export_index_records_for_connection(
+    corpus: &Connection,
+    limit: i64,
+) -> Result<Vec<(String, String)>> {
+    anyhow::ensure!(limit != 0, "export index limit must not be zero");
+    let mut statement = corpus.prepare(
+        r#"
+        SELECT conversation_id, record_sha256
+        FROM conversation_export_index
+        ORDER BY conversation_id
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map([limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (conversation_id, record_sha256) in &rows {
+        anyhow::ensure!(
+            !conversation_id.trim().is_empty(),
+            "cached export index contains an empty conversation id"
+        );
+        anyhow::ensure!(
+            valid_sha256_hex(record_sha256)
+                && record_sha256.bytes().all(|byte| !byte.is_ascii_uppercase()),
+            "cached export index for conversation {conversation_id:?} contains invalid SHA-256 {record_sha256:?}; run 'mirrarium corpus verify' or rebuild"
+        );
+    }
+
+    Ok(rows)
+}
+
+fn ensure_record_matches_cached_hash(
+    record: &ConversationExportRecord,
+    cached_hash: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        record.record_sha256 == cached_hash,
+        "conversation {:?} export hash disagrees with the published corpus index: cached {}, rebuilt {}; run 'mirrarium corpus verify' or 'mirrarium corpus rebuild'",
+        record.conversation_id,
+        cached_hash,
+        record.record_sha256
+    );
+    Ok(())
 }
 
 fn validate_sync_state(state: &ConversationSyncState) -> Result<()> {
@@ -1300,29 +1369,33 @@ pub fn export_delta(
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
+    let cached_index = conversation_export_index_records_for_connection(&corpus, -1)?;
     let raw = open_raw_ledger_read_only(raw_root)?;
-    let conversation_ids = conversation_ids_for_connection(&corpus, -1)?;
 
     let mut current_ids = BTreeSet::new();
     let mut upserts = Vec::new();
     let mut index_hasher = Sha256::new();
     let mut conversation_count = 0_u64;
 
-    for conversation_id in conversation_ids {
+    for (conversation_id, record_sha256) in cached_index {
         current_ids.insert(conversation_id.clone());
-        let record = conversation_export_record_for_connections(
-            raw_root,
-            &corpus,
-            &raw,
-            conversation_id.clone(),
-        )?;
-        let index_line = conversation_export_index_line(&record)?;
+        let index_line =
+            conversation_export_index_line_from_parts(&conversation_id, &record_sha256)?;
         index_hasher.update(&index_line);
+
         if state.records.get(&conversation_id).map(String::as_str)
-            != Some(record.record_sha256.as_str())
+            != Some(record_sha256.as_str())
         {
+            let record = conversation_export_record_for_connections(
+                raw_root,
+                &corpus,
+                &raw,
+                conversation_id.clone(),
+            )?;
+            ensure_record_matches_cached_hash(&record, &record_sha256)?;
             upserts.push(record);
         }
+
         conversation_count = conversation_count
             .checked_add(1)
             .context("sync delta conversation count overflow")?;
@@ -1360,13 +1433,20 @@ pub fn export_delta(
 }
 
 pub fn export_manifest(raw_root: impl AsRef<Path>) -> Result<ConversationExportManifest> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let cached_index = conversation_export_index_records_for_connection(&corpus, -1)?;
     let mut hasher = Sha256::new();
-    let conversation_count =
-        for_each_export_conversation(raw_root.as_ref(), None, |record| {
-            let line = conversation_export_index_line(&record)?;
-            hasher.update(&line);
-            Ok(())
-        })?;
+
+    for (conversation_id, record_sha256) in &cached_index {
+        let line =
+            conversation_export_index_line_from_parts(conversation_id, record_sha256)?;
+        hasher.update(&line);
+    }
+
+    let conversation_count = u64::try_from(cached_index.len())
+        .context("export manifest conversation count overflow")?;
 
     Ok(ConversationExportManifest {
         schema: "mirrarium.corpus.export-manifest".to_owned(),
@@ -1385,13 +1465,28 @@ pub fn write_conversation_export_index_jsonl<W: Write>(
     limit: Option<u64>,
     writer: &mut W,
 ) -> Result<u64> {
-    for_each_export_conversation(raw_root.as_ref(), limit, |record| {
-        let line = conversation_export_index_line(&record)?;
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let sql_limit = match limit {
+        Some(limit) => {
+            anyhow::ensure!(limit > 0, "export index limit must be greater than zero");
+            i64::try_from(limit).context("export index limit is too large")?
+        }
+        None => -1,
+    };
+    let corpus = open_corpus_read_only(raw_root)?;
+    let cached_index =
+        conversation_export_index_records_for_connection(&corpus, sql_limit)?;
+
+    for (conversation_id, record_sha256) in &cached_index {
+        let line =
+            conversation_export_index_line_from_parts(conversation_id, record_sha256)?;
         writer
             .write_all(&line)
             .context("writing corpus export index line")?;
-        Ok(())
-    })
+    }
+
+    u64::try_from(cached_index.len()).context("export index record count overflow")
 }
 
 pub fn write_conversation_export_jsonl<W: Write>(
@@ -1428,16 +1523,18 @@ where
 
     let corpus = open_corpus_read_only(raw_root)?;
     let raw = open_raw_ledger_read_only(raw_root)?;
-    let conversation_ids = conversation_ids_for_connection(&corpus, sql_limit)?;
+    let cached_index =
+        conversation_export_index_records_for_connection(&corpus, sql_limit)?;
     let mut written = 0_u64;
 
-    for conversation_id in conversation_ids {
+    for (conversation_id, cached_hash) in cached_index {
         let record = conversation_export_record_for_connections(
             raw_root,
             &corpus,
             &raw,
             conversation_id,
         )?;
+        ensure_record_matches_cached_hash(&record, &cached_hash)?;
         visit(record)?;
         written = written
             .checked_add(1)
