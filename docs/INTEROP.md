@@ -24,7 +24,7 @@ Each v1 record has:
 - `record_type: "conversation"`
 - `conversation_id`
 - `source_capture_ids`: sorted/deduplicated raw capture IDs referenced anywhere in the record
-- `record_sha256`: SHA-256 of the full v1 record payload except the `record_sha256` field itself
+- `record_sha256`: SHA-256 of the exact compact UTF-8 v1 record bytes with the single producer-emitted member `"record_sha256":"<64 lowercase hex>",` removed byte-for-byte
 - `evidence`: the normal derived conversation evidence view, retaining source capture IDs
 - `canonical`: the conservative canonical conversation view when safely derivable, otherwise `null` when no canonical snapshot exists
 - `canonical_error`: reserved by v1 for a future explicitly recoverable canonicalization error class; current exporters emit `null`
@@ -36,6 +36,17 @@ Each v1 record has:
 The export schema version is independent of Mirrarium's internal SQLite schema version. Internal rebuildable schema changes do not change the JSONL contract unless the export `schema_version` changes.
 
 For a fixed published corpus generation, repeated exports are byte-for-byte deterministic. `record_sha256` therefore gives downstream consumers an idempotent content identity for each conversation record; a consumer can key updates by `conversation_id` and skip work when the hash is unchanged.
+
+### v1 record hash verification
+
+A consumer can verify `record_sha256` without parsing and reserializing JSON:
+
+1. Take the exact UTF-8 bytes of one Mirrarium conversation JSONL record, excluding the trailing newline.
+2. Locate the single ASCII member `"record_sha256":"<64 lowercase hexadecimal characters>",`. Mirrarium v1 emits it immediately after `source_capture_ids`.
+3. Remove exactly those bytes, including the trailing comma.
+4. SHA-256 the remaining bytes and compare the lowercase hexadecimal digest with the removed value.
+
+The resulting byte sequence is exactly the producer's v1 hash preimage. This byte-level rule avoids cross-language JSON object-order and escaping differences. `schemas/mirrarium-corpus-conversation-v1.hash-vector.json` contains a golden record line, its exact preimage, and the expected digest.
 
 The export is deliberately conversation-focused. WebSocket/EventSource transport-global views, skipped transport derivations, cache telemetry, and arbitrary raw capture bodies remain available through their dedicated Mirrarium inspection commands and are not silently folded into conversation records.
 
