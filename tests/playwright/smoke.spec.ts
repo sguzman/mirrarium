@@ -1256,6 +1256,40 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(postCapture).toBeTruthy();
       expect(postCapture?.capture_id).toBeTruthy();
+
+      const { stdout: postRequestBodyStdout } = await execFileAsync(
+        cliPath,
+        ["capture", postCapture?.capture_id as string, "request"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const postRequestBody = JSON.parse(postRequestBodyStdout) as {
+        capture_id: string;
+        body_kind: string;
+        storage_class: string;
+        body_hash: string;
+        body_bytes: number;
+        mime_type?: string;
+        encoding: string;
+        data: string;
+      };
+      expect(postRequestBody).toMatchObject({
+        capture_id: postCapture?.capture_id,
+        body_kind: "request",
+        storage_class: "private",
+        body_hash: postCapture?.request_body_hash,
+        body_bytes: postCapture?.request_body_bytes,
+        encoding: "utf8",
+      });
+      expect(postRequestBody.mime_type).toContain("application/json");
+      expect(postRequestBody.data).toContain("hello from request body");
+      expect(postRequestBody.data).toContain("[REDACTED]");
+      expect(postRequestBody.data).not.toContain("fixture-secret-token");
+
       expect(postCapture?.provenance.initiator_type).toBe("script");
       expect(postCapture?.provenance.request_wall_time_ms).toBeGreaterThan(0);
       expect(postCapture?.provenance.response_protocol).toBeTruthy();
@@ -2038,6 +2072,37 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         body_hash: completedStream?.source_body_hash,
         privacy_class: "private",
       });
+
+      const { stdout: rawStreamBodyStdout } = await execFileAsync(
+        cliPath,
+        ["capture", completedStream?.capture_id as string, "response"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const rawStreamBody = JSON.parse(rawStreamBodyStdout) as {
+        capture_id: string;
+        body_kind: string;
+        storage_class: string;
+        body_hash: string;
+        body_bytes: number;
+        mime_type?: string;
+        encoding: string;
+        data: string;
+      };
+      expect(rawStreamBody).toMatchObject({
+        capture_id: completedStream?.capture_id,
+        body_kind: "response",
+        storage_class: "private",
+        body_hash: completedStream?.source_body_hash,
+        encoding: "utf8",
+      });
+      expect(rawStreamBody.mime_type).toContain("text/event-stream");
+      expect(rawStreamBody.data).toContain('"conversation_id":"fixture-stream"');
+      expect(rawStreamBody.data).toContain("[DONE]");
 
       const { stdout: streamEventsStdout } = await execFileAsync(
         cliPath,

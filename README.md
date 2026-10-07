@@ -69,7 +69,7 @@ The Rust CLI reads the same local store as the native host:
 ```bash
 mirrarium stats
 mirrarium captures 20
-mirrarium capture <capture-id>
+mirrarium capture <capture-id> [response|request]
 mirrarium verify
 mirrarium maintenance incoming
 mirrarium privacy status
@@ -141,7 +141,7 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 
 `corpus streams` lists completed whole-response SSE captures already present in the derived corpus with sanitized source URL, privacy class, source body hash, and event count. `corpus stream-events` returns the parsed SSE events for one capture in sequence order, preserving event name, raw data text, and JSON-validity status; terminal markers such as `[DONE]` remain explicit evidence rather than being normalized away.
 
-`corpus websocket-skipped` and `corpus eventsource-skipped` expose transport captures that were intentionally not promoted into the derived lifecycle views, retaining the sanitized source URL and exact derivation-skip reason. Healthy fixture traffic yields empty lists; malformed or ambiguous provenance remains inspectable rather than being silently discarded. Every raw `capture_id` emitted by corpus/skip views can be resolved directly with `mirrarium capture <capture-id>`; `mirrarium captures` also includes `capture_id` on every row so provenance keys round-trip without raw SQL.
+`corpus websocket-skipped` and `corpus eventsource-skipped` expose transport captures that were intentionally not promoted into the derived lifecycle views, retaining the sanitized source URL and exact derivation-skip reason. Healthy fixture traffic yields empty lists; malformed or ambiguous provenance remains inspectable rather than being silently discarded. Every raw `capture_id` emitted by corpus/skip views can be resolved directly with `mirrarium capture <capture-id>`; `mirrarium captures` also includes `capture_id` on every row so provenance keys round-trip without raw SQL. Adding `response` or `request` explicitly reads that persisted CAS body through the verified/decrypting object reader and returns a JSON envelope containing hash, logical size, MIME type, encoding, and data. Textual bodies are emitted as UTF-8; other bodies are base64. These explicit body modes can reveal private conversation/request content on stdout, so metadata lookup remains the default.
 
 `corpus websocket-streams` lists derived socket lifecycles containing trusted archived JSON frames; `corpus websocket-frames` returns those frames in explicit transport-sequence order with sent/received direction, source capture/hash provenance, and sanitized JSON text. Suppressed raw socket frames are intentionally absent from this derived view.
 

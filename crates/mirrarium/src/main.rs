@@ -73,10 +73,31 @@ fn run() -> Result<()> {
         Some("capture") => {
             let capture_id = arguments.get(1).context("missing capture id")?;
             let store = CaptureStore::open_read_only(&root)?;
-            let capture = store
-                .capture_by_id(capture_id)?
-                .with_context(|| format!("capture not found: {capture_id}"))?;
-            println!("{}", serde_json::to_string_pretty(&capture)?);
+            match arguments.get(2).map(String::as_str) {
+                None => {
+                    let capture = store
+                        .capture_by_id(capture_id)?
+                        .with_context(|| format!("capture not found: {capture_id}"))?;
+                    println!("{}", serde_json::to_string_pretty(&capture)?);
+                }
+                Some(body_kind @ ("response" | "request")) => {
+                    anyhow::ensure!(
+                        store.capture_by_id(capture_id)?.is_some(),
+                        "capture not found: {capture_id}"
+                    );
+                    let body = store
+                        .capture_body_by_id(capture_id, body_kind)?
+                        .with_context(|| {
+                            format!(
+                                "capture {capture_id:?} has no persisted {body_kind} body"
+                            )
+                        })?;
+                    println!("{}", serde_json::to_string_pretty(&body)?);
+                }
+                Some(body_kind) => anyhow::bail!(
+                    "unknown capture body mode {body_kind:?}; use response or request"
+                ),
+            }
         }
         Some("verify") => {
             let store = CaptureStore::open_read_only(&root)?;
@@ -1268,7 +1289,7 @@ fn print_help() {
 USAGE:
   mirrarium stats
   mirrarium captures [LIMIT]
-  mirrarium capture <CAPTURE_ID>
+  mirrarium capture <CAPTURE_ID> [response|request]
   mirrarium verify
   mirrarium maintenance incoming
   mirrarium privacy status
