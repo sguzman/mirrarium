@@ -1712,6 +1712,48 @@ fn insert_eventsource_skip(
     Ok(())
 }
 
+fn resolve_eventsource_reconnect_links(
+    groups: &BTreeMap<String, EventSourceGroup>,
+) -> BTreeMap<String, String> {
+    let mut event_id_index: BTreeMap<(String, String), Vec<(String, i64)>> =
+        BTreeMap::new();
+    for (lifecycle_id, group) in groups {
+        for event in group.events.values() {
+            if let Some(event_id) = event.event_id.as_ref().filter(|value| !value.is_empty()) {
+                event_id_index
+                    .entry((group.source_url.clone(), event_id.clone()))
+                    .or_default()
+                    .push((lifecycle_id.clone(), event.captured_at_ms));
+            }
+        }
+    }
+
+    let mut reconnect_links = BTreeMap::new();
+    for (lifecycle_id, group) in groups {
+        let Some(last_event_id) = group.reconnect_last_event_id.as_ref() else {
+            continue;
+        };
+        let key = (group.source_url.clone(), last_event_id.clone());
+        let mut candidates = BTreeSet::new();
+        if let Some(matches) = event_id_index.get(&key) {
+            for (candidate_lifecycle_id, captured_at_ms) in matches {
+                if candidate_lifecycle_id != lifecycle_id
+                    && *captured_at_ms < group.first_observed_at_ms
+                {
+                    candidates.insert(candidate_lifecycle_id.clone());
+                }
+            }
+        }
+        if candidates.len() == 1 {
+            reconnect_links.insert(
+                lifecycle_id.clone(),
+                candidates.into_iter().next().expect("one reconnect candidate"),
+            );
+        }
+    }
+    reconnect_links
+}
+
 fn derive_eventsource_messages(
     transaction: &Transaction<'_>,
     raw_root: &Path,
@@ -1876,42 +1918,7 @@ fn derive_eventsource_messages(
         );
     }
 
-    let mut event_id_index: BTreeMap<(String, String), Vec<(String, i64)>> =
-        BTreeMap::new();
-    for (lifecycle_id, group) in &groups {
-        for event in group.events.values() {
-            if let Some(event_id) = event.event_id.as_ref().filter(|value| !value.is_empty()) {
-                event_id_index
-                    .entry((group.source_url.clone(), event_id.clone()))
-                    .or_default()
-                    .push((lifecycle_id.clone(), event.captured_at_ms));
-            }
-        }
-    }
-
-    let mut reconnect_links: BTreeMap<String, String> = BTreeMap::new();
-    for (lifecycle_id, group) in &groups {
-        let Some(last_event_id) = group.reconnect_last_event_id.as_ref() else {
-            continue;
-        };
-        let key = (group.source_url.clone(), last_event_id.clone());
-        let mut candidates = BTreeSet::new();
-        if let Some(matches) = event_id_index.get(&key) {
-            for (candidate_lifecycle_id, captured_at_ms) in matches {
-                if candidate_lifecycle_id != lifecycle_id
-                    && *captured_at_ms < group.first_observed_at_ms
-                {
-                    candidates.insert(candidate_lifecycle_id.clone());
-                }
-            }
-        }
-        if candidates.len() == 1 {
-            reconnect_links.insert(
-                lifecycle_id.clone(),
-                candidates.into_iter().next().expect("one reconnect candidate"),
-            );
-        }
-    }
+    let reconnect_links = resolve_eventsource_reconnect_links(&groups);
 
     for (lifecycle_id, group) in groups {
         if group.events.is_empty() {
@@ -2868,6 +2875,87 @@ mod tests {
         );
     }
 
+
+    fn eventsource_test_group(
+        source_url: &str,
+        first_observed_at_ms: i64,
+        reconnect_last_event_id: Option<&str>,
+        event_id: Option<&str>,
+        event_captured_at_ms: i64,
+    ) -> EventSourceGroup {
+        let mut events = BTreeMap::new();
+        events.insert(
+            0,
+            EventSourceDerivedEvent {
+                transport_sequence: 0,
+                captured_at_ms: event_captured_at_ms,
+                source_capture_id: "capture".to_owned(),
+                source_body_hash: "hash".to_owned(),
+                event_name: Some("message".to_owned()),
+                event_id: event_id.map(str::to_owned),
+                data: "{}".to_owned(),
+                json_valid: true,
+            },
+        );
+        EventSourceGroup {
+            source_url: source_url.to_owned(),
+            privacy_class: "private".to_owned(),
+            first_observed_at_ms,
+            reconnect_last_event_id: reconnect_last_event_id.map(str::to_owned),
+            events,
+            ambiguous_sequences: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn eventsource_reconnect_links_require_unique_earlier_match() {
+        let source_url = "https://chatgpt.com/backend-api/events?keep=yes";
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "origin".to_owned(),
+            eventsource_test_group(source_url, 10, None, Some("cursor-1"), 10),
+        );
+        groups.insert(
+            "continuation".to_owned(),
+            eventsource_test_group(
+                source_url,
+                20,
+                Some("cursor-1"),
+                Some("cursor-2"),
+                20,
+            ),
+        );
+
+        let links = resolve_eventsource_reconnect_links(&groups);
+        assert_eq!(links.get("continuation").map(String::as_str), Some("origin"));
+
+        groups.insert(
+            "ambiguous-origin".to_owned(),
+            eventsource_test_group(source_url, 15, None, Some("cursor-1"), 15),
+        );
+        let ambiguous = resolve_eventsource_reconnect_links(&groups);
+        assert!(!ambiguous.contains_key("continuation"));
+
+        let mut future_only = BTreeMap::new();
+        future_only.insert(
+            "continuation".to_owned(),
+            eventsource_test_group(
+                source_url,
+                20,
+                Some("cursor-1"),
+                Some("cursor-2"),
+                20,
+            ),
+        );
+        future_only.insert(
+            "future".to_owned(),
+            eventsource_test_group(source_url, 30, None, Some("cursor-1"), 30),
+        );
+        assert!(
+            !resolve_eventsource_reconnect_links(&future_only)
+                .contains_key("continuation")
+        );
+    }
 
     #[test]
     fn parses_eventsource_event_id() {
