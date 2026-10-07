@@ -2794,6 +2794,66 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           canonicalObjectPath,
           Buffer.from("intentional damaged canonical fixture", "utf8"),
         );
+
+        const { stdout: damagedManifestStdout } = await execFileAsync(
+          cliPath,
+          ["corpus", "export-manifest"],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+        expect(damagedManifestStdout).toBe(corpusExportManifestStdout);
+
+        const { stdout: damagedIndexStdout } = await execFileAsync(
+          cliPath,
+          ["corpus", "export-index"],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+        expect(damagedIndexStdout).toBe(corpusExportIndexStdout);
+
+        const { stdout: damagedNoChangeDeltaStdout } = await execFileWithInput(
+          cliPath,
+          ["corpus", "export-delta"],
+          JSON.stringify(currentSyncState),
+          {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        );
+        const damagedNoChangeDelta = JSON.parse(damagedNoChangeDeltaStdout) as {
+          manifest: typeof exportManifest;
+          upserts: typeof exportRecords;
+          deleted_conversation_ids: string[];
+        };
+        expect(damagedNoChangeDelta.manifest).toEqual(exportManifest);
+        expect(damagedNoChangeDelta.upserts).toEqual([]);
+        expect(damagedNoChangeDelta.deleted_conversation_ids).toEqual([]);
+
+        let damagedUpsertRejected = false;
+        try {
+          await execFileWithInput(
+            cliPath,
+            ["corpus", "export-delta"],
+            JSON.stringify(staleSyncState),
+            {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          );
+        } catch (error) {
+          damagedUpsertRejected = true;
+          expect(String(error)).toContain("canonicalizing conversation");
+        }
+        expect(damagedUpsertRejected).toBe(true);
+
         try {
           await execFileAsync(
             cliPath,
