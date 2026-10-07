@@ -3104,6 +3104,17 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(noopBoundSync.delta).toEqual(currentSyncDelta);
       expect(noopBoundSync.checkpoint).toEqual(currentCheckpoint);
 
+      const { stdout: noopBoundSyncRepeatStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync"],
+        JSON.stringify(currentCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(noopBoundSyncRepeatStdout).toBe(noopBoundSyncStdout);
+
       const wrongArchiveCheckpoint = {
         ...currentCheckpoint,
         archive_id:
@@ -3339,6 +3350,25 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(damagedNoChangeDelta.manifest).toEqual(exportManifest);
         expect(damagedNoChangeDelta.upserts).toEqual([]);
         expect(damagedNoChangeDelta.deleted_conversation_ids).toEqual([]);
+
+        const { stdout: damagedNoChangeBoundSyncStdout } =
+          await execFileWithInput(
+            cliPath,
+            ["corpus", "export-sync"],
+            JSON.stringify(currentCheckpoint),
+            {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          );
+        const damagedNoChangeBoundSync = JSON.parse(
+          damagedNoChangeBoundSyncStdout,
+        ) as {
+          delta: typeof currentSyncDelta;
+          checkpoint: typeof currentCheckpoint;
+        };
+        expect(damagedNoChangeBoundSync.delta).toEqual(currentSyncDelta);
+        expect(damagedNoChangeBoundSync.checkpoint).toEqual(currentCheckpoint);
 
         let damagedStaleExpectedRejected = false;
         try {
