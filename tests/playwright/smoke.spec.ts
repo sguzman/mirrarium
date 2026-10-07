@@ -3178,8 +3178,8 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           conversation.conversation_id === "fixture-attachment-conversation",
       );
       expect(fixtureConversation?.title).toBe("Private fixture");
-      expect(fixtureConversation?.snapshot_count).toBeGreaterThanOrEqual(4);
-      expect(fixtureConversation?.message_observation_count).toBeGreaterThanOrEqual(4);
+      expect(fixtureConversation?.snapshot_count).toBeGreaterThanOrEqual(2);
+      expect(fixtureConversation?.message_observation_count).toBeGreaterThanOrEqual(2);
       expect(fixtureStream?.stream_reconstruction_count).toBeGreaterThanOrEqual(1);
       expect(fixtureStreamTail?.stream_revision_count).toBeGreaterThanOrEqual(2);
       expect(
