@@ -1679,6 +1679,37 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.attachment_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.attachment_downloads).toBeGreaterThanOrEqual(1);
 
+      const { stdout: corpusVerifyStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "verify"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusVerify = JSON.parse(corpusVerifyStdout) as {
+        sqlite_integrity_ok: boolean;
+        foreign_key_violations: number;
+        websocket_streams_checked: number;
+        websocket_frames_checked: number;
+        eventsource_streams_checked: number;
+        eventsource_events_checked: number;
+        raw_source_links_checked: number;
+        errors: string[];
+      };
+      expect(corpusVerify).toEqual({
+        sqlite_integrity_ok: true,
+        foreign_key_violations: 0,
+        websocket_streams_checked: 1,
+        websocket_frames_checked: 2,
+        eventsource_streams_checked: 3,
+        eventsource_events_checked: 4,
+        raw_source_links_checked: 6,
+        errors: [],
+      });
+
       const { stdout: webSocketStreamsStdout } = await execFileAsync(
         cliPath,
         ["corpus", "websocket-streams", "20"],
