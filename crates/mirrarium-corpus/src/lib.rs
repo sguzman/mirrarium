@@ -1361,10 +1361,12 @@ fn conversation_export_record(
                 "conversation {conversation_id:?} disappeared while exporting corpus"
             )
         })?;
-    let (canonical, canonical_error) = match canonical(raw_root, &conversation_id) {
-        Ok(canonical) => (canonical, None),
-        Err(error) => (None, Some(format!("{error:#}"))),
-    };
+    let canonical = canonical(raw_root, &conversation_id).with_context(|| {
+        format!(
+            "canonicalizing conversation {conversation_id:?} while exporting corpus"
+        )
+    })?;
+    let canonical_error = None;
     let stream_revisions =
         stream_message_revisions(raw_root, &conversation_id, i64::MAX as u64)?;
     let attachments =
