@@ -2651,6 +2651,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           },
         },
       );
+      const { stdout: currentSyncStateRepeatStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-state"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(currentSyncStateRepeatStdout).toBe(currentSyncStateStdout);
+
       const currentSyncState = JSON.parse(currentSyncStateStdout) as {
         schema: string;
         schema_version: number;
