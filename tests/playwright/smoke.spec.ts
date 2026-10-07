@@ -2189,6 +2189,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           },
         },
       );
+      const { stdout: corpusExportRepeatStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(corpusExportRepeatStdout).toBe(corpusExportStdout);
+
       const exportRecords = corpusExportStdout
         .trim()
         .split("\n")
