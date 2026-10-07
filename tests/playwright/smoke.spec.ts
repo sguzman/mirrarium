@@ -2059,6 +2059,30 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         json_valid: false,
       });
 
+      const { stdout: webSocketSkippedStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "websocket-skipped", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(webSocketSkippedStdout)).toEqual([]);
+
+      const { stdout: eventSourceSkippedStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "eventsource-skipped", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(eventSourceSkippedStdout)).toEqual([]);
+
       const { stdout: webSocketStreamsStdout } = await execFileAsync(
         cliPath,
         ["corpus", "websocket-streams", "20"],

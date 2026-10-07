@@ -292,6 +292,24 @@ fn run() -> Result<()> {
                     )?
                 );
             }
+            Some("websocket-skipped") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("WebSocket skipped-capture limit must be a positive integer")?
+                    .unwrap_or(100);
+                anyhow::ensure!(
+                    limit > 0,
+                    "WebSocket skipped-capture limit must be greater than zero"
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::websocket_skipped_captures(&root, limit)?
+                    )?
+                );
+            }
             Some("websocket-streams") => {
                 let limit = arguments
                     .get(2)
@@ -328,6 +346,24 @@ fn run() -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(
                         &corpus::websocket_frames(&root, lifecycle_id, limit)?
+                    )?
+                );
+            }
+            Some("eventsource-skipped") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("EventSource skipped-capture limit must be a positive integer")?
+                    .unwrap_or(100);
+                anyhow::ensure!(
+                    limit > 0,
+                    "EventSource skipped-capture limit must be greater than zero"
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::eventsource_skipped_captures(&root, limit)?
                     )?
                 );
             }
@@ -1245,8 +1281,10 @@ USAGE:
   mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
   mirrarium corpus streams [LIMIT]
   mirrarium corpus stream-events <CAPTURE_ID> [LIMIT]
+  mirrarium corpus websocket-skipped [LIMIT]
   mirrarium corpus websocket-streams [LIMIT]
   mirrarium corpus websocket-frames <LIFECYCLE_ID> [LIMIT]
+  mirrarium corpus eventsource-skipped [LIMIT]
   mirrarium corpus eventsource-streams [LIMIT]
   mirrarium corpus eventsource-events <LIFECYCLE_ID> [LIMIT]
   mirrarium corpus stream-revisions <CONVERSATION_ID> [LIMIT]

@@ -117,6 +117,13 @@ pub struct StreamEventView {
     pub json_valid: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TransportSkippedCaptureView {
+    pub capture_id: String,
+    pub source_url: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WebSocketStreamView {
     pub lifecycle_id: String,
@@ -818,6 +825,39 @@ pub fn stream_events(
     Ok(rows)
 }
 
+pub fn websocket_skipped_captures(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<TransportSkippedCaptureView>> {
+    anyhow::ensure!(limit > 0, "WebSocket skipped-capture limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+    websocket_skipped_captures_for_connection(&connection, limit as i64)
+}
+
+fn websocket_skipped_captures_for_connection(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<TransportSkippedCaptureView>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT capture_id, source_url, reason
+        FROM websocket_skipped_captures
+        ORDER BY capture_id
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map([limit], |row| {
+            Ok(TransportSkippedCaptureView {
+                capture_id: row.get(0)?,
+                source_url: row.get(1)?,
+                reason: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn websocket_streams(
     raw_root: impl AsRef<Path>,
     limit: u64,
@@ -881,6 +921,39 @@ pub fn websocket_frames(
                 source_capture_id: row.get(3)?,
                 source_body_hash: row.get(4)?,
                 data: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn eventsource_skipped_captures(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<TransportSkippedCaptureView>> {
+    anyhow::ensure!(limit > 0, "EventSource skipped-capture limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+    eventsource_skipped_captures_for_connection(&connection, limit as i64)
+}
+
+fn eventsource_skipped_captures_for_connection(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<TransportSkippedCaptureView>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT capture_id, source_url, reason
+        FROM eventsource_skipped_captures
+        ORDER BY capture_id
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map([limit], |row| {
+            Ok(TransportSkippedCaptureView {
+                capture_id: row.get(0)?,
+                source_url: row.get(1)?,
+                reason: row.get(2)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4601,6 +4674,40 @@ mod tests {
         ).unwrap();
 
         (corpus, raw)
+    }
+
+    #[test]
+    fn transport_skipped_capture_views_preserve_reason_and_source() {
+        let (corpus, _raw) = open_transport_verify_fixture();
+        corpus
+            .execute(
+                "INSERT INTO websocket_skipped_captures (capture_id, source_url, reason) VALUES ('ws-skip', 'wss://chatgpt.com/backend-api/ws-skipped', 'missing_transport_sequence')",
+                [],
+            )
+            .unwrap();
+        corpus
+            .execute(
+                "INSERT INTO eventsource_skipped_captures (capture_id, source_url, reason) VALUES ('sse-skip', 'https://chatgpt.com/backend-api/events-skipped', 'ambiguous_lifecycle_id')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            websocket_skipped_captures_for_connection(&corpus, 10).unwrap(),
+            vec![TransportSkippedCaptureView {
+                capture_id: "ws-skip".to_owned(),
+                source_url: "wss://chatgpt.com/backend-api/ws-skipped".to_owned(),
+                reason: "missing_transport_sequence".to_owned(),
+            }]
+        );
+        assert_eq!(
+            eventsource_skipped_captures_for_connection(&corpus, 10).unwrap(),
+            vec![TransportSkippedCaptureView {
+                capture_id: "sse-skip".to_owned(),
+                source_url: "https://chatgpt.com/backend-api/events-skipped".to_owned(),
+                reason: "ambiguous_lifecycle_id".to_owned(),
+            }]
+        );
     }
 
     #[test]
