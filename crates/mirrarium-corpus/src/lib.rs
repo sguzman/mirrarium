@@ -1751,6 +1751,80 @@ where
     Ok(written)
 }
 
+fn verify_export_record_scope(
+    conversation_id: &str,
+    evidence: &ConversationView,
+    stream_revisions: &[StreamMessageRevisionView],
+    attachments: &[AttachmentView],
+) -> Result<()> {
+    anyhow::ensure!(
+        evidence.summary.conversation_id == conversation_id,
+        "conversation export summary id {:?} disagrees with record id {conversation_id:?}",
+        evidence.summary.conversation_id
+    );
+
+    let message_count =
+        u64::try_from(evidence.messages.len()).context("message count overflow")?;
+    let stream_count =
+        u64::try_from(evidence.streams.len()).context("stream count overflow")?;
+    let revision_count =
+        u64::try_from(stream_revisions.len()).context("stream revision count overflow")?;
+    let attachment_count =
+        u64::try_from(attachments.len()).context("attachment count overflow")?;
+
+    anyhow::ensure!(
+        evidence.summary.message_observation_count == message_count,
+        "conversation {conversation_id:?} summary message count {} disagrees with exported evidence count {message_count}",
+        evidence.summary.message_observation_count
+    );
+    anyhow::ensure!(
+        evidence.summary.stream_reconstruction_count == stream_count,
+        "conversation {conversation_id:?} summary stream count {} disagrees with exported evidence count {stream_count}",
+        evidence.summary.stream_reconstruction_count
+    );
+    anyhow::ensure!(
+        evidence.summary.stream_revision_count == revision_count,
+        "conversation {conversation_id:?} summary revision count {} disagrees with exported revision count {revision_count}",
+        evidence.summary.stream_revision_count
+    );
+    anyhow::ensure!(
+        evidence.summary.attachment_observation_count == attachment_count,
+        "conversation {conversation_id:?} summary attachment count {} disagrees with exported attachment count {attachment_count}",
+        evidence.summary.attachment_observation_count
+    );
+
+    for message in &evidence.messages {
+        anyhow::ensure!(
+            message.conversation_id.as_deref() == Some(conversation_id),
+            "conversation {conversation_id:?} export contains message observation scoped to {:?}",
+            message.conversation_id
+        );
+    }
+    for stream in &evidence.streams {
+        anyhow::ensure!(
+            stream.conversation_id == conversation_id,
+            "conversation {conversation_id:?} export contains stream scoped to {:?}",
+            stream.conversation_id
+        );
+    }
+    for revision in stream_revisions {
+        anyhow::ensure!(
+            revision.conversation_id == conversation_id,
+            "conversation {conversation_id:?} export contains revision scoped to {:?}",
+            revision.conversation_id
+        );
+    }
+    for attachment in attachments {
+        anyhow::ensure!(
+            attachment.observation.conversation_id.as_deref() == Some(conversation_id),
+            "conversation {conversation_id:?} export contains attachment scoped to {:?}",
+            attachment.observation.conversation_id
+        );
+    }
+
+    Ok(())
+}
+
 fn export_source_capture_ids(
     evidence: &ConversationView,
     canonical: &Option<CanonicalConversationView>,
@@ -2008,6 +2082,12 @@ fn conversation_export_record_for_connections(
         stream_message_revisions_for_connection(corpus, &conversation_id, -1)?;
     let attachments =
         attachments_for_connection(corpus, Some(&conversation_id), -1)?;
+    verify_export_record_scope(
+        &conversation_id,
+        &evidence,
+        &stream_revisions,
+        &attachments,
+    )?;
     let source_capture_ids = export_source_capture_ids(
         &evidence,
         &canonical,
