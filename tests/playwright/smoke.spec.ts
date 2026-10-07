@@ -4483,6 +4483,31 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(staleProgressSync.stdout).toBe("");
       expect(staleProgressSync.stderr).toContain("published corpus is stale by");
 
+      const negotiatedFreshRequest = {
+        schema: "mirrarium.corpus.negotiated-sync-request",
+        schema_version: 1,
+        record_type: "negotiated-sync-request",
+        requirements: consumerRequirements,
+        checkpoint: checkpointC1,
+        require_fresh: true,
+      };
+      expect(
+        validateNegotiatedSyncRequest(negotiatedFreshRequest),
+        JSON.stringify(validateNegotiatedSyncRequest.errors),
+      ).toBe(true);
+      const staleNegotiatedSync = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-negotiated"],
+        JSON.stringify(negotiatedFreshRequest),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(staleNegotiatedSync.code).not.toBe(0);
+      expect(staleNegotiatedSync.stdout).toBe("");
+      expect(staleNegotiatedSync.stderr).toContain("published corpus is stale by");
+
       await execFileAsync(
         cliPath,
         ["corpus", "rebuild"],
@@ -4522,6 +4547,16 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         };
         checkpoint: typeof currentCheckpoint;
       };
+      const { stdout: negotiatedC1ToC2Stdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-negotiated"],
+        JSON.stringify(negotiatedFreshRequest),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(negotiatedC1ToC2Stdout).toBe(c1ToC2SyncStdout);
       expect(
         validateCorpusSyncTransaction(c1ToC2Sync),
         JSON.stringify(validateCorpusSyncTransaction.errors),
