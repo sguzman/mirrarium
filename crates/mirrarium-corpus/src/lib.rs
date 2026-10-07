@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -1114,47 +1115,118 @@ pub fn export_conversations(
     raw_root: impl AsRef<Path>,
     limit: Option<u64>,
 ) -> Result<Vec<ConversationExportRecord>> {
-    let raw_root = raw_root.as_ref();
-    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
-    if let Some(limit) = limit {
-        anyhow::ensure!(limit > 0, "export limit must be greater than zero");
-    }
-    let effective_limit = limit.unwrap_or(i64::MAX as u64);
-    let summaries = conversations(raw_root, effective_limit)?;
-    let mut records = Vec::with_capacity(summaries.len());
-
-    for summary in summaries {
-        let conversation_id = summary.conversation_id.clone();
-        let evidence = conversation(raw_root, &conversation_id, i64::MAX as u64)?
-            .with_context(|| {
-                format!(
-                    "conversation {conversation_id:?} disappeared while exporting corpus"
-                )
-            })?;
-        let (canonical, canonical_error) = match canonical(raw_root, &conversation_id) {
-            Ok(canonical) => (canonical, None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        };
-        let stream_revisions =
-            stream_message_revisions(raw_root, &conversation_id, i64::MAX as u64)?;
-        let attachments =
-            attachments(raw_root, Some(&conversation_id), i64::MAX as u64)?;
-
-        records.push(ConversationExportRecord {
-            schema: "mirrarium.corpus.conversation".to_owned(),
-            schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
-            producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
-            record_type: "conversation".to_owned(),
-            conversation_id,
-            evidence,
-            canonical,
-            canonical_error,
-            stream_revisions,
-            attachments,
-        });
-    }
-
+    let mut records = Vec::new();
+    for_each_export_conversation(raw_root.as_ref(), limit, |record| {
+        records.push(record);
+        Ok(())
+    })?;
     Ok(records)
+}
+
+pub fn write_conversation_export_jsonl<W: Write>(
+    raw_root: impl AsRef<Path>,
+    limit: Option<u64>,
+    writer: &mut W,
+) -> Result<u64> {
+    for_each_export_conversation(raw_root.as_ref(), limit, |record| {
+        serde_json::to_writer(&mut *writer, &record)
+            .context("serializing corpus export record")?;
+        writer
+            .write_all(b"\n")
+            .context("writing corpus export newline")?;
+        Ok(())
+    })
+}
+
+fn for_each_export_conversation<F>(
+    raw_root: &Path,
+    limit: Option<u64>,
+    mut visit: F,
+) -> Result<u64>
+where
+    F: FnMut(ConversationExportRecord) -> Result<()>,
+{
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let sql_limit = match limit {
+        Some(limit) => {
+            anyhow::ensure!(limit > 0, "export limit must be greater than zero");
+            i64::try_from(limit).context("export limit is too large")?
+        }
+        None => -1,
+    };
+
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT conversation_id
+        FROM (
+            SELECT conversation_id
+            FROM conversation_snapshots
+            UNION
+            SELECT conversation_id
+            FROM message_observations
+            WHERE conversation_id IS NOT NULL
+            UNION
+            SELECT conversation_id
+            FROM stream_reconstructions
+            UNION
+            SELECT conversation_id
+            FROM stream_message_revisions
+            UNION
+            SELECT conversation_id
+            FROM attachment_observations
+            WHERE conversation_id IS NOT NULL
+        )
+        ORDER BY conversation_id
+        LIMIT ?1
+        "#,
+    )?;
+    let mut rows = statement.query([sql_limit])?;
+    let mut written = 0_u64;
+
+    while let Some(row) = rows.next()? {
+        let conversation_id = row.get::<_, String>(0)?;
+        let record = conversation_export_record(raw_root, conversation_id)?;
+        visit(record)?;
+        written = written
+            .checked_add(1)
+            .context("corpus export record count overflow")?;
+    }
+
+    Ok(written)
+}
+
+fn conversation_export_record(
+    raw_root: &Path,
+    conversation_id: String,
+) -> Result<ConversationExportRecord> {
+    let evidence = conversation(raw_root, &conversation_id, i64::MAX as u64)?
+        .with_context(|| {
+            format!(
+                "conversation {conversation_id:?} disappeared while exporting corpus"
+            )
+        })?;
+    let (canonical, canonical_error) = match canonical(raw_root, &conversation_id) {
+        Ok(canonical) => (canonical, None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
+    let stream_revisions =
+        stream_message_revisions(raw_root, &conversation_id, i64::MAX as u64)?;
+    let attachments =
+        attachments(raw_root, Some(&conversation_id), i64::MAX as u64)?;
+
+    Ok(ConversationExportRecord {
+        schema: "mirrarium.corpus.conversation".to_owned(),
+        schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: "conversation".to_owned(),
+        conversation_id,
+        evidence,
+        canonical,
+        canonical_error,
+        stream_revisions,
+        attachments,
+    })
 }
 
 pub fn conversation(
