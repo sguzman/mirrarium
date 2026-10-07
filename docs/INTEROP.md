@@ -66,6 +66,8 @@ Canonicalization is not authoritative over evidence. Ambiguous or unsupported sn
 
 ## One-command delta synchronization
 
+If the consumer requires all raw evidence captured before synchronization to have been derived, first require `mirrarium corpus export-status` to report `fresh: true`. A successful delta without that check is still coherent and authoritative for the published derived generation, but that generation may intentionally lag newer raw captures. Because raw capture continues independently, freshness is a point-in-time observation rather than a global browser pause.
+
 `mirrarium corpus export-delta` is the direct consumer path for a local importer that can hold its known conversation hash map. It reads one sync-state JSON object from stdin and emits one sync-delta JSON object to stdout. The whole calculation holds a shared corpus-generation lock, so its manifest, upserts, and deletions all describe one published generation.
 
 The sync-state v1 contract is `schemas/mirrarium-corpus-sync-state-v1.schema.json` and is emitted by `mirrarium corpus export-sync-state-schema`. `mirrarium corpus export-sync-state` emits the exact current checkpoint from the verified materialized conversation hash index under one shared generation lock; its `records` object is equivalent to converting the complete `export-index` JSONL stream into conversation-ID→record-hash pairs. For an unchanged published generation, repeated checkpoint output is byte-for-byte deterministic, including key order and trailing newline framing. The emitter first verifies manifest/index agreement, then serializes directly from that ordered index into one capped output buffer rather than materializing a second conversation map. It enforces the same 64 MiB byte ceiling as `export-delta`, so every successfully emitted checkpoint is guaranteed to be acceptable as a later delta input. If a future archive exceeds that checkpoint size, use the manifest/index/`export-one` protocol instead:
@@ -90,6 +92,7 @@ For operational safety, `export-delta` accepts at most 64 MiB of UTF-8 sync-stat
 
 A downstream consumer can synchronize without re-ingesting unchanged conversation text while remaining safe against a rebuild between commands:
 
+0. If the goal is “derive everything captured so far,” read `corpus export-status` and require `fresh: true`; otherwise the protocol deliberately synchronizes the last published derived generation.
 1. Read `corpus export-manifest` as M1. If its `index_sha256` matches the consumer's previously completed synchronization, stop: the exported conversation set and every v1 record hash were unchanged at that observation point.
 2. Otherwise read a complete `corpus export-index`, hash its exact stdout bytes, and require that SHA-256 to equal M1.`index_sha256`. If it differs, a rebuild raced the commands; discard the index and restart from step 1.
 3. Compare each `conversation_id` / `record_sha256` pair with the consumer's local state.
