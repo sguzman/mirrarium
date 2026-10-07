@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -247,6 +247,28 @@ fn run() -> Result<()> {
             }
             Some("export-manifest-schema") => {
                 print!("{}", corpus::CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON);
+            }
+            Some("export-sync-state-schema") => {
+                print!("{}", corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON);
+            }
+            Some("export-delta-schema") => {
+                print!("{}", corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON);
+            }
+            Some("export-delta") => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .context("reading corpus sync state from stdin")?;
+                anyhow::ensure!(
+                    !input.trim().is_empty(),
+                    "corpus export-delta requires a sync-state JSON object on stdin"
+                );
+                let state: corpus::ConversationSyncState =
+                    serde_json::from_str(&input).context("parsing corpus sync-state JSON")?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&corpus::export_delta(&root, &state)?)?
+                );
             }
             Some("export-manifest") => {
                 println!("{}", serde_json::to_string(&corpus::export_manifest(&root)?)?);
@@ -1381,6 +1403,9 @@ USAGE:
   mirrarium corpus export-schema
   mirrarium corpus export-index-schema
   mirrarium corpus export-manifest-schema
+  mirrarium corpus export-sync-state-schema
+  mirrarium corpus export-delta-schema
+  mirrarium corpus export-delta
   mirrarium corpus export-manifest
   mirrarium corpus export-index [LIMIT]
   mirrarium corpus export-one <CONVERSATION_ID> [EXPECTED_RECORD_SHA256]
