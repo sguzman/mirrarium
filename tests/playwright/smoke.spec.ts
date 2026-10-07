@@ -2375,6 +2375,13 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         allErrors: true,
         strict: true,
       }).compile(corpusSyncStateSchema);
+      expect(
+        validateCorpusSyncState({
+          schema: "mirrarium.corpus.sync-state",
+          schema_version: 1,
+          records: { "   ": "0".repeat(64) },
+        }),
+      ).toBe(false);
 
       const { stdout: corpusSyncDeltaSchemaStdout } = await execFileAsync(
         cliPath,
