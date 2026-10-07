@@ -6257,6 +6257,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interop_schema_bundle_is_complete_and_deterministic() {
+        let bundle = interop_schema_bundle().unwrap();
+        assert_eq!(bundle.schema, "mirrarium.corpus.schema-bundle");
+        assert_eq!(bundle.schema_version, CORPUS_SCHEMA_BUNDLE_VERSION);
+        assert_eq!(bundle.record_type, "schema-bundle");
+
+        let ids = bundle
+            .schemas
+            .iter()
+            .map(|schema| {
+                schema
+                    .get("$id")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "urn:mirrarium:corpus:conversation:v1",
+                "urn:mirrarium:corpus:conversation-index:v1",
+                "urn:mirrarium:corpus:export-manifest:v1",
+                "urn:mirrarium:corpus:export-source:v1",
+                "urn:mirrarium:corpus:export-status:v1",
+                "urn:mirrarium:corpus:sync-state:v1",
+                "urn:mirrarium:corpus:sync-checkpoint:v1",
+                "urn:mirrarium:corpus:sync-delta:v1",
+                "urn:mirrarium:corpus:sync-transaction:v1",
+            ]
+        );
+        assert_eq!(
+            ids.iter().collect::<BTreeSet<_>>().len(),
+            ids.len()
+        );
+    }
+
+    #[test]
     fn sync_state_json_rejects_duplicate_conversation_ids() {
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
