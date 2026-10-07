@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -11,7 +12,10 @@ use mirrarium_store::{
     apply_private_database_key, open_raw_ledger_read_only, read_verified_object,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -300,7 +304,45 @@ pub struct ConversationExportManifest {
 pub struct ConversationSyncState {
     pub schema: String,
     pub schema_version: u32,
+    #[serde(deserialize_with = "deserialize_unique_string_map")]
     pub records: BTreeMap<String, String>,
+}
+
+fn deserialize_unique_string_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct UniqueStringMapVisitor;
+
+    impl<'de> Visitor<'de> for UniqueStringMapVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object with unique string keys and string values")
+        }
+
+        fn visit_map<M>(
+            self,
+            mut access: M,
+        ) -> std::result::Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some((key, value)) = access.next_entry::<String, String>()? {
+                if values.insert(key.clone(), value).is_some() {
+                    return Err(de::Error::custom(format!(
+                        "duplicate corpus sync-state conversation id {key:?}"
+                    )));
+                }
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueStringMapVisitor)
 }
 
 #[derive(Debug, Serialize)]
@@ -5516,6 +5558,19 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_state_json_rejects_duplicate_conversation_ids() {
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let input = format!(
+            r#"{{"schema":"mirrarium.corpus.sync-state","schema_version":1,"records":{{"fixture":"{hash_a}","fixture":"{hash_b}"}}}}"#
+        );
+        let error = serde_json::from_str::<ConversationSyncState>(&input).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("duplicate corpus sync-state conversation id"));
+    }
 
     #[test]
     fn sync_state_validation_rejects_noncanonical_input() {
