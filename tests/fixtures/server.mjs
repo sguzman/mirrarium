@@ -5,6 +5,7 @@ import http from "node:http";
 import https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 const httpsPort = 43117;
 const healthPort = 43118;
@@ -26,6 +27,7 @@ let privateDocumentHits = 0;
 let privateDocumentConditional304s = 0;
 let eventSourceReconnectHits = 0;
 const oversizedResponseBody = Buffer.alloc(16 * 1024 * 1024 + 1, 0x78);
+const oversizedCompressedResponseBody = gzipSync(oversizedResponseBody);
 
 execFileSync("openssl", [
   "req",
@@ -162,6 +164,9 @@ Promise.all([
     response.text(),
   ),
   fetch("/backend-api/oversized-response-fixture")
+    .then((response) => response.arrayBuffer())
+    .then((body) => body.byteLength),
+  fetch("/backend-api/oversized-compressed-response-fixture")
     .then((response) => response.arrayBuffer())
     .then((body) => body.byteLength),
   fetch("/backend-api/upload-fixture", {
@@ -510,6 +515,17 @@ const fixtureServer = https.createServer(
         "content-length": String(oversizedResponseBody.length),
       });
       response.end(oversizedResponseBody);
+      return;
+    }
+
+    if (request.url === "/backend-api/oversized-compressed-response-fixture") {
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-encoding": "gzip",
+        "cache-control": "no-store",
+        "content-length": String(oversizedCompressedResponseBody.length),
+      });
+      response.end(oversizedCompressedResponseBody);
       return;
     }
 
