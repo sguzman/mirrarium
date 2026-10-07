@@ -122,6 +122,7 @@ const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
 const webSockets = new Map<string, WebSocketMetadata>();
 const eventSourceSequences = new Map<string, number>();
+const pendingEventSourceLastEventIds = new Map<string, string>();
 const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
@@ -177,6 +178,10 @@ function clearTabState(tabId: number): void {
 
   for (const key of eventSourceSequences.keys()) {
     if (key.startsWith(prefix)) eventSourceSequences.delete(key);
+  }
+
+  for (const key of pendingEventSourceLastEventIds.keys()) {
+    if (key.startsWith(prefix)) pendingEventSourceLastEventIds.delete(key);
   }
 
   for (const key of privateRevalidations.keys()) {
@@ -1793,6 +1798,7 @@ async function captureBody(
   requests.delete(key);
   responses.delete(key);
   eventSourceSequences.delete(key);
+  pendingEventSourceLastEventIds.delete(key);
 
   if (!request && !response) return;
 
@@ -1994,6 +2000,27 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     return;
   }
 
+  if (method === "Network.requestWillBeSentExtraInfo") {
+    const event = params as {
+      requestId: string;
+      headers?: Record<string, string | number>;
+    };
+    const lastEventId = header(event.headers, "last-event-id");
+    if (lastEventId === undefined) return;
+
+    const key = requestKey(tabId, event.requestId);
+    const request = requests.get(key);
+    const sanitized = sanitizeEventSourceField(lastEventId);
+    if (request) {
+      if (request.resourceType === "EventSource") {
+        request.headers["Last-Event-ID"] = sanitized;
+      }
+    } else {
+      pendingEventSourceLastEventIds.set(key, sanitized);
+    }
+    return;
+  }
+
   if (method === "Network.requestWillBeSent") {
     const event = params as {
       requestId: string;
@@ -2032,6 +2059,13 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       redirectedFromUrl = previous.url;
     }
 
+    const requestHeaders = sanitizeHeaders(event.request.headers);
+    const pendingLastEventId = pendingEventSourceLastEventIds.get(key);
+    pendingEventSourceLastEventIds.delete(key);
+    if (event.type === "EventSource" && pendingLastEventId !== undefined) {
+      requestHeaders["Last-Event-ID"] = pendingLastEventId;
+    }
+
     requests.set(key, {
       method: event.request.method,
       url: event.request.url,
@@ -2042,7 +2076,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       declaredContentLength: parseNonNegativeInteger(
         header(event.request.headers, "content-length"),
       ),
-      headers: sanitizeHeaders(event.request.headers),
+      headers: requestHeaders,
       frameId: event.frameId,
       loaderId: event.loaderId,
       documentUrl: event.documentURL,
