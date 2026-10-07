@@ -1749,6 +1749,20 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         cleanup_on_next_writer_start: false,
       });
 
+      let livePruneRejected = false;
+      try {
+        await execFileAsync(cliPath, ["maintenance", "prune-orphans"], {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        });
+      } catch (error) {
+        livePruneRejected = true;
+        expect(String(error)).toContain("another Mirrarium writer");
+      }
+      expect(livePruneRejected).toBe(true);
+
       const liveStatsForVerify = await readStats();
       const { stdout: rawVerifyStdout } = await execFileAsync(
         cliPath,
@@ -3484,6 +3498,93 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
     } finally {
       await context.close();
     }
+
+    await expect
+      .poll(
+        async () => {
+          const { stdout } = await execFileAsync(
+            cliPath,
+            ["maintenance", "incoming"],
+            {
+              env: {
+                ...childEnv,
+                MIRRARIUM_DATA_DIR: dataDir,
+              },
+            },
+          );
+          return (JSON.parse(stdout) as { writer_active: boolean }).writer_active;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(false);
+
+    const pruneFixtureBytes = Buffer.from(
+      "fixture orphan crash residue",
+      "utf8",
+    );
+    const pruneFixtureHash = createHash("sha256")
+      .update("mirrarium prune fixture orphan")
+      .digest("hex");
+    const pruneFixtureDirectory = join(
+      dataDir,
+      "private",
+      "objects",
+      pruneFixtureHash.slice(0, 2),
+    );
+    const pruneFixturePath = join(pruneFixtureDirectory, pruneFixtureHash);
+    await mkdir(pruneFixtureDirectory, { recursive: true });
+    await writeFile(pruneFixturePath, pruneFixtureBytes);
+
+    const { stdout: pruneStdout } = await execFileAsync(
+      cliPath,
+      ["maintenance", "prune-orphans"],
+      {
+        env: {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      },
+    );
+    const prune = JSON.parse(pruneStdout) as {
+      orphan_objects_before: number;
+      orphan_object_bytes_before: number;
+      removed_objects: number;
+      removed_stored_bytes: number;
+    };
+    expect(prune).toEqual({
+      orphan_objects_before: 1,
+      orphan_object_bytes_before: pruneFixtureBytes.length,
+      removed_objects: 1,
+      removed_stored_bytes: pruneFixtureBytes.length,
+    });
+    await expect(readFile(pruneFixturePath)).rejects.toThrow();
+
+    const { stdout: verifyAfterPruneStdout } = await execFileAsync(
+      cliPath,
+      ["verify"],
+      {
+        env: {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      },
+    );
+    const verifyAfterPrune = JSON.parse(verifyAfterPruneStdout) as {
+      corrupt_objects: number;
+      unreferenced_indexed_objects: number;
+      orphan_objects: number;
+      unexpected_object_entries: number;
+      invalid_captures: number;
+      errors: string[];
+    };
+    expect(verifyAfterPrune).toMatchObject({
+      corrupt_objects: 0,
+      unreferenced_indexed_objects: 0,
+      orphan_objects: 0,
+      unexpected_object_entries: 0,
+      invalid_captures: 0,
+      errors: [],
+    });
 
     const { stdout: extensionUninstallStdout } = await execFileAsync(
       cliPath,
