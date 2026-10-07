@@ -2397,6 +2397,48 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         createHash("sha256").update(corpusExportIndexStdout).digest("hex"),
       );
 
+      const { stdout: limitedExportIndexStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-index", "1"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const limitedExportIndexRecords = limitedExportIndexStdout
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line)) as Array<{
+        conversation_id: string;
+        record_sha256: string;
+      }>;
+      expect(limitedExportIndexRecords).toHaveLength(1);
+      expect(limitedExportIndexRecords[0]).toEqual(exportIndexRecords[0]);
+      expect(
+        createHash("sha256").update(limitedExportIndexStdout).digest("hex"),
+      ).not.toBe(exportManifest.index_sha256);
+
+      let missingExportRejected = false;
+      try {
+        await execFileAsync(
+          cliPath,
+          ["corpus", "export-one", "fixture-missing-conversation"],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+      } catch (error) {
+        missingExportRejected = true;
+        expect(String(error)).toContain("not found");
+      }
+      expect(missingExportRejected).toBe(true);
+
       const exportedConversation = exportRecords.find(
         (record) => record.conversation_id === "fixture-conversation",
       );
