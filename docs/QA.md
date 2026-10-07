@@ -41,13 +41,22 @@ The installed-extension lifecycle test may use Chromium's browser-level unpacked
 
 The integration fixture runs locally but is resolved inside Chromium as `https://chatgpt.com`. This exercises the production origin gate without granting Mirrarium access to arbitrary localhost pages.
 
-The fixture deliberately includes:
+The fixture deliberately exercises the current production boundaries rather than only the recorder MVP. It includes:
 
-- versioned static CSS and JavaScript;
-- a private ChatGPT-shaped JSON read;
-- two distinct private URLs returning identical bytes.
+- immutable ChatGPT and `cdn.oaistatic.com` static assets for cold/warm replay;
+- concurrent static replay while private POST captures are writing;
+- private JSON, query-bearing JSON, and top-level HTML conditional revalidation;
+- duplicate private bodies at distinct URLs for privacy-scoped deduplication;
+- JSON request-body redaction plus metadata-only multipart upload capture;
+- 302, POST→307→POST, and POST→303→GET redirect semantics;
+- HEAD/204 no-body responses and a response that fails after headers;
+- streaming SSE plus long-lived EventSource messages and reconnects;
+- WebSocket sent/received JSON, plain-text, binary, and oversized-frame boundaries;
+- encrypted raw ledger/private CAS/derived corpus checks;
+- corpus rebuild, transport-derived views, reconnect edges, and `corpus verify`;
+- stable installed-extension update/reload behavior in disposable Chromium.
 
-That proves both classification and privacy-scoped deduplication.
+The suite therefore proves classification, privacy-scoped deduplication, failure semantics, replay/revalidation safety, transport evidence boundaries, encrypted persistence, derived-corpus integrity, and browser deployment lifecycle without using a real ChatGPT account.
 
 ## Live-site tests
 
