@@ -1549,6 +1549,39 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ).toBe(false);
       }
 
+      const { stdout: maintenanceStdout } = await execFileAsync(
+        cliPath,
+        ["maintenance", "incoming"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const maintenance = JSON.parse(maintenanceStdout) as {
+        incoming_exists: boolean;
+        writer_active: boolean;
+        incomplete_capture_files: number;
+        inflight_capture_files: number;
+        abandoned_capture_files: number;
+        ledger_recovery_files: number;
+        unexpected_files: number;
+        unexpected_non_file_entries: number;
+        cleanup_on_next_writer_start: boolean;
+      };
+      expect(maintenance).toMatchObject({
+        incoming_exists: true,
+        writer_active: true,
+        incomplete_capture_files: 0,
+        inflight_capture_files: 0,
+        abandoned_capture_files: 0,
+        ledger_recovery_files: 0,
+        unexpected_files: 0,
+        unexpected_non_file_entries: 0,
+        cleanup_on_next_writer_start: false,
+      });
+
       const { stdout: privacyStatusStdout } = await execFileAsync(
         cliPath,
         ["privacy", "status"],
