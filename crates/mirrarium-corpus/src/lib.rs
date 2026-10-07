@@ -35,6 +35,28 @@ pub struct CorpusStats {
     pub attachment_downloads: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CorpusVerifyReport {
+    pub sqlite_integrity_ok: bool,
+    pub foreign_key_violations: u64,
+    pub websocket_streams_checked: u64,
+    pub websocket_frames_checked: u64,
+    pub eventsource_streams_checked: u64,
+    pub eventsource_events_checked: u64,
+    pub raw_source_links_checked: u64,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RawTransportSource {
+    row_order: i64,
+    url: String,
+    privacy_class: String,
+    body_hash: Option<String>,
+    resource_type: String,
+    method: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AttachmentObservationView {
     pub capture_id: String,
@@ -684,6 +706,12 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             "SELECT COUNT(*) FROM attachment_downloads",
         )?,
     })
+}
+
+pub fn verify(raw_root: impl AsRef<Path>) -> Result<CorpusVerifyReport> {
+    let corpus = open_corpus_read_only(raw_root.as_ref())?;
+    let raw = open_raw_ledger_read_only(raw_root.as_ref())?;
+    verify_transport_corpus(&corpus, &raw)
 }
 
 pub fn websocket_streams(
@@ -1651,6 +1679,550 @@ fn capture_row_order(connection: &Connection, capture_id: &str) -> Result<Option
         )
         .optional()
         .map_err(Into::into)
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn collect_raw_transport_sources(
+    connection: &Connection,
+) -> Result<BTreeMap<String, RawTransportSource>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            rowid,
+            capture_id,
+            url,
+            privacy_class,
+            body_hash,
+            resource_type,
+            method
+        FROM captures
+        WHERE resource_type IN ('WebSocketFrame', 'EventSourceMessage')
+        ORDER BY rowid
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+
+    let mut sources = BTreeMap::new();
+    for row in rows {
+        let (
+            row_order,
+            capture_id,
+            url,
+            privacy_class,
+            body_hash,
+            resource_type,
+            method,
+        ) = row?;
+        sources.insert(
+            capture_id,
+            RawTransportSource {
+                row_order,
+                url,
+                privacy_class,
+                body_hash,
+                resource_type,
+                method,
+            },
+        );
+    }
+    Ok(sources)
+}
+
+fn verify_transport_corpus(
+    corpus: &Connection,
+    raw: &Connection,
+) -> Result<CorpusVerifyReport> {
+    let mut errors = Vec::new();
+
+    let mut integrity_statement = corpus.prepare("PRAGMA integrity_check")?;
+    let integrity_rows = integrity_statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let sqlite_integrity_ok =
+        integrity_rows.len() == 1 && integrity_rows[0].eq_ignore_ascii_case("ok");
+    if !sqlite_integrity_ok {
+        for result in integrity_rows {
+            errors.push(format!("sqlite integrity_check: {result}"));
+        }
+    }
+
+    let mut foreign_key_violations = 0_u64;
+    let mut foreign_key_statement = corpus.prepare("PRAGMA foreign_key_check")?;
+    let foreign_key_rows = foreign_key_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in foreign_key_rows {
+        let (table, rowid, parent, fk_index) = row?;
+        foreign_key_violations = foreign_key_violations
+            .checked_add(1)
+            .context("foreign key violation count overflow")?;
+        errors.push(format!(
+            "foreign key violation: table={table:?} rowid={rowid:?} parent={parent:?} fk_index={fk_index}"
+        ));
+    }
+
+    let raw_sources = collect_raw_transport_sources(raw)?;
+    let mut websocket_streams_checked = 0_u64;
+    let mut websocket_frames_checked = 0_u64;
+    let mut eventsource_streams_checked = 0_u64;
+    let mut eventsource_events_checked = 0_u64;
+    let mut raw_source_links_checked = 0_u64;
+
+    let mut websocket_stream_statement = corpus.prepare(
+        "SELECT lifecycle_id, source_url, privacy_class, frame_count FROM websocket_streams ORDER BY lifecycle_id",
+    )?;
+    let websocket_stream_rows = websocket_stream_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in websocket_stream_rows {
+        let (lifecycle_id, _source_url, privacy_class, declared_count) = row?;
+        websocket_streams_checked = websocket_streams_checked
+            .checked_add(1)
+            .context("WebSocket stream count overflow")?;
+        if privacy_class != "private" {
+            errors.push(format!(
+                "WebSocket lifecycle {lifecycle_id:?} has non-private class {privacy_class:?}"
+            ));
+        }
+        if declared_count < 0 {
+            errors.push(format!(
+                "WebSocket lifecycle {lifecycle_id:?} has negative frame_count {declared_count}"
+            ));
+            continue;
+        }
+        let actual_count: i64 = corpus.query_row(
+            "SELECT COUNT(*) FROM websocket_frames WHERE lifecycle_id = ?1",
+            [lifecycle_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if declared_count != actual_count {
+            errors.push(format!(
+                "WebSocket lifecycle {lifecycle_id:?} declares {declared_count} frames but has {actual_count}"
+            ));
+        }
+    }
+
+    let mut websocket_frame_statement = corpus.prepare(
+        r#"
+        SELECT
+            frames.lifecycle_id,
+            frames.transport_sequence,
+            frames.direction,
+            frames.source_capture_id,
+            frames.source_body_hash,
+            frames.data,
+            streams.source_url
+        FROM websocket_frames AS frames
+        JOIN websocket_streams AS streams
+          ON streams.lifecycle_id = frames.lifecycle_id
+        ORDER BY frames.lifecycle_id, frames.transport_sequence
+        "#,
+    )?;
+    let websocket_frame_rows = websocket_frame_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    for row in websocket_frame_rows {
+        let (
+            lifecycle_id,
+            transport_sequence,
+            direction,
+            source_capture_id,
+            source_body_hash,
+            data,
+            source_url,
+        ) = row?;
+        websocket_frames_checked = websocket_frames_checked
+            .checked_add(1)
+            .context("WebSocket frame count overflow")?;
+        if transport_sequence < 0 {
+            errors.push(format!(
+                "WebSocket frame {source_capture_id:?} has negative transport sequence {transport_sequence}"
+            ));
+        }
+        let expected_method = match direction.as_str() {
+            "sent" => Some("WS_SEND"),
+            "received" => Some("WS_RECV"),
+            _ => {
+                errors.push(format!(
+                    "WebSocket frame {source_capture_id:?} has invalid direction {direction:?}"
+                ));
+                None
+            }
+        };
+        if !valid_sha256_hex(&source_body_hash) {
+            errors.push(format!(
+                "WebSocket frame {source_capture_id:?} has invalid source body hash {source_body_hash:?}"
+            ));
+        }
+        if serde_json::from_str::<Value>(&data).is_err() {
+            errors.push(format!(
+                "WebSocket frame {source_capture_id:?} is not valid JSON"
+            ));
+        }
+
+        match raw_sources.get(&source_capture_id) {
+            Some(source) => {
+                raw_source_links_checked = raw_source_links_checked
+                    .checked_add(1)
+                    .context("raw source link count overflow")?;
+                if source.resource_type != "WebSocketFrame" {
+                    errors.push(format!(
+                        "WebSocket frame {source_capture_id:?} links raw resource type {:?}",
+                        source.resource_type
+                    ));
+                }
+                if let Some(expected_method) = expected_method {
+                    if source.method != expected_method {
+                        errors.push(format!(
+                            "WebSocket frame {source_capture_id:?} direction {direction:?} disagrees with raw method {:?}",
+                            source.method
+                        ));
+                    }
+                }
+                if source.privacy_class != "private" {
+                    errors.push(format!(
+                        "WebSocket frame {source_capture_id:?} links non-private raw evidence {:?}",
+                        source.privacy_class
+                    ));
+                }
+                if source.body_hash.as_deref() != Some(source_body_hash.as_str()) {
+                    errors.push(format!(
+                        "WebSocket frame {source_capture_id:?} source hash disagrees with raw evidence"
+                    ));
+                }
+                if source.url != source_url {
+                    errors.push(format!(
+                        "WebSocket lifecycle {lifecycle_id:?} source URL disagrees with raw capture {source_capture_id:?}"
+                    ));
+                }
+            }
+            None => errors.push(format!(
+                "WebSocket frame {source_capture_id:?} has no raw transport source"
+            )),
+        }
+    }
+
+    let websocket_overlap: u64 = corpus.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM websocket_frames AS frames
+        JOIN websocket_skipped_captures AS skipped
+          ON skipped.capture_id = frames.source_capture_id
+        "#,
+        [],
+        |row| row.get::<_, i64>(0),
+    )?
+    .try_into()
+    .context("negative WebSocket skipped overlap count")?;
+    if websocket_overlap > 0 {
+        errors.push(format!(
+            "{websocket_overlap} WebSocket capture(s) appear in both derived and skipped views"
+        ));
+    }
+
+    let mut eventsource_stream_statement = corpus.prepare(
+        r#"
+        SELECT
+            lifecycle_id,
+            source_url,
+            privacy_class,
+            event_count,
+            reconnect_last_event_id,
+            reconnect_from_lifecycle_id
+        FROM eventsource_streams
+        ORDER BY lifecycle_id
+        "#,
+    )?;
+    let eventsource_stream_rows = eventsource_stream_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    for row in eventsource_stream_rows {
+        let (
+            lifecycle_id,
+            source_url,
+            privacy_class,
+            declared_count,
+            reconnect_last_event_id,
+            reconnect_from_lifecycle_id,
+        ) = row?;
+        eventsource_streams_checked = eventsource_streams_checked
+            .checked_add(1)
+            .context("EventSource stream count overflow")?;
+        if privacy_class != "private" {
+            errors.push(format!(
+                "EventSource lifecycle {lifecycle_id:?} has non-private class {privacy_class:?}"
+            ));
+        }
+        if declared_count < 0 {
+            errors.push(format!(
+                "EventSource lifecycle {lifecycle_id:?} has negative event_count {declared_count}"
+            ));
+        } else {
+            let actual_count: i64 = corpus.query_row(
+                "SELECT COUNT(*) FROM eventsource_events WHERE lifecycle_id = ?1",
+                [lifecycle_id.as_str()],
+                |row| row.get(0),
+            )?;
+            if declared_count != actual_count {
+                errors.push(format!(
+                    "EventSource lifecycle {lifecycle_id:?} declares {declared_count} events but has {actual_count}"
+                ));
+            }
+        }
+
+        if let Some(parent_lifecycle_id) = reconnect_from_lifecycle_id.as_deref() {
+            if parent_lifecycle_id == lifecycle_id {
+                errors.push(format!(
+                    "EventSource lifecycle {lifecycle_id:?} reconnects to itself"
+                ));
+            }
+            let Some(last_event_id) = reconnect_last_event_id.as_deref() else {
+                errors.push(format!(
+                    "EventSource lifecycle {lifecycle_id:?} has reconnect predecessor but no Last-Event-ID"
+                ));
+                continue;
+            };
+            let parent_source_url = corpus
+                .query_row(
+                    "SELECT source_url FROM eventsource_streams WHERE lifecycle_id = ?1",
+                    [parent_lifecycle_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            match parent_source_url {
+                Some(parent_source_url) => {
+                    if parent_source_url != source_url {
+                        errors.push(format!(
+                            "EventSource lifecycle {lifecycle_id:?} reconnect predecessor {parent_lifecycle_id:?} has a different source URL"
+                        ));
+                    }
+                    let matching_parent_captures = {
+                        let mut statement = corpus.prepare(
+                            r#"
+                            SELECT source_capture_id
+                            FROM eventsource_events
+                            WHERE lifecycle_id = ?1 AND event_id = ?2
+                            "#,
+                        )?;
+                        statement
+                            .query_map(params![parent_lifecycle_id, last_event_id], |row| {
+                                row.get::<_, String>(0)
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()?
+                    };
+                    if matching_parent_captures.is_empty() {
+                        errors.push(format!(
+                            "EventSource lifecycle {lifecycle_id:?} reconnect predecessor {parent_lifecycle_id:?} does not contain Last-Event-ID {last_event_id:?}"
+                        ));
+                    } else {
+                        let child_first_row_order = {
+                            let mut statement = corpus.prepare(
+                                "SELECT source_capture_id FROM eventsource_events WHERE lifecycle_id = ?1",
+                            )?;
+                            let capture_ids = statement
+                                .query_map([lifecycle_id.as_str()], |row| {
+                                    row.get::<_, String>(0)
+                                })?
+                                .collect::<rusqlite::Result<Vec<_>>>()?;
+                            capture_ids
+                                .iter()
+                                .filter_map(|capture_id| raw_sources.get(capture_id))
+                                .map(|source| source.row_order)
+                                .min()
+                        };
+                        let parent_latest_matching_row_order = matching_parent_captures
+                            .iter()
+                            .filter_map(|capture_id| raw_sources.get(capture_id))
+                            .map(|source| source.row_order)
+                            .max();
+                        if let (Some(parent_row), Some(child_row)) = (
+                            parent_latest_matching_row_order,
+                            child_first_row_order,
+                        ) {
+                            if parent_row >= child_row {
+                                errors.push(format!(
+                                    "EventSource lifecycle {lifecycle_id:?} reconnect predecessor is not earlier in raw evidence"
+                                ));
+                            }
+                        }
+                    }
+                }
+                None => errors.push(format!(
+                    "EventSource lifecycle {lifecycle_id:?} points to missing reconnect predecessor {parent_lifecycle_id:?}"
+                )),
+            }
+        }
+    }
+
+    let mut eventsource_event_statement = corpus.prepare(
+        r#"
+        SELECT
+            events.lifecycle_id,
+            events.transport_sequence,
+            events.source_capture_id,
+            events.source_body_hash,
+            events.data,
+            events.json_valid,
+            streams.source_url
+        FROM eventsource_events AS events
+        JOIN eventsource_streams AS streams
+          ON streams.lifecycle_id = events.lifecycle_id
+        ORDER BY events.lifecycle_id, events.transport_sequence
+        "#,
+    )?;
+    let eventsource_event_rows = eventsource_event_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    for row in eventsource_event_rows {
+        let (
+            lifecycle_id,
+            transport_sequence,
+            source_capture_id,
+            source_body_hash,
+            data,
+            json_valid,
+            source_url,
+        ) = row?;
+        eventsource_events_checked = eventsource_events_checked
+            .checked_add(1)
+            .context("EventSource event count overflow")?;
+        if transport_sequence < 0 {
+            errors.push(format!(
+                "EventSource event {source_capture_id:?} has negative transport sequence {transport_sequence}"
+            ));
+        }
+        if !valid_sha256_hex(&source_body_hash) {
+            errors.push(format!(
+                "EventSource event {source_capture_id:?} has invalid source body hash {source_body_hash:?}"
+            ));
+        }
+        if !matches!(json_valid, 0 | 1) {
+            errors.push(format!(
+                "EventSource event {source_capture_id:?} has invalid json_valid value {json_valid}"
+            ));
+        } else {
+            let actual_json_valid = serde_json::from_str::<Value>(&data).is_ok();
+            if actual_json_valid != (json_valid == 1) {
+                errors.push(format!(
+                    "EventSource event {source_capture_id:?} json_valid flag disagrees with data"
+                ));
+            }
+        }
+
+        match raw_sources.get(&source_capture_id) {
+            Some(source) => {
+                raw_source_links_checked = raw_source_links_checked
+                    .checked_add(1)
+                    .context("raw source link count overflow")?;
+                if source.resource_type != "EventSourceMessage" {
+                    errors.push(format!(
+                        "EventSource event {source_capture_id:?} links raw resource type {:?}",
+                        source.resource_type
+                    ));
+                }
+                if source.method != "SSE_RECV" {
+                    errors.push(format!(
+                        "EventSource event {source_capture_id:?} links raw method {:?}",
+                        source.method
+                    ));
+                }
+                if source.privacy_class != "private" {
+                    errors.push(format!(
+                        "EventSource event {source_capture_id:?} links non-private raw evidence {:?}",
+                        source.privacy_class
+                    ));
+                }
+                if source.body_hash.as_deref() != Some(source_body_hash.as_str()) {
+                    errors.push(format!(
+                        "EventSource event {source_capture_id:?} source hash disagrees with raw evidence"
+                    ));
+                }
+                if source.url != source_url {
+                    errors.push(format!(
+                        "EventSource lifecycle {lifecycle_id:?} source URL disagrees with raw capture {source_capture_id:?}"
+                    ));
+                }
+            }
+            None => errors.push(format!(
+                "EventSource event {source_capture_id:?} has no raw transport source"
+            )),
+        }
+    }
+
+    let eventsource_overlap: u64 = corpus.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM eventsource_events AS events
+        JOIN eventsource_skipped_captures AS skipped
+          ON skipped.capture_id = events.source_capture_id
+        "#,
+        [],
+        |row| row.get::<_, i64>(0),
+    )?
+    .try_into()
+    .context("negative EventSource skipped overlap count")?;
+    if eventsource_overlap > 0 {
+        errors.push(format!(
+            "{eventsource_overlap} EventSource capture(s) appear in both derived and skipped views"
+        ));
+    }
+
+    Ok(CorpusVerifyReport {
+        sqlite_integrity_ok,
+        foreign_key_violations,
+        websocket_streams_checked,
+        websocket_frames_checked,
+        eventsource_streams_checked,
+        eventsource_events_checked,
+        raw_source_links_checked,
+        errors,
+    })
 }
 
 fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
@@ -3235,6 +3807,188 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_transport_verify_fixture() -> (Connection, Connection) {
+        let corpus = Connection::open_in_memory().unwrap();
+        corpus
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = ON;
+
+                CREATE TABLE websocket_streams (
+                    lifecycle_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    frame_count INTEGER NOT NULL
+                );
+                CREATE TABLE websocket_frames (
+                    lifecycle_id TEXT NOT NULL
+                        REFERENCES websocket_streams(lifecycle_id) ON DELETE CASCADE,
+                    transport_sequence INTEGER NOT NULL,
+                    direction TEXT NOT NULL,
+                    source_capture_id TEXT NOT NULL UNIQUE,
+                    source_body_hash TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    PRIMARY KEY (lifecycle_id, transport_sequence)
+                );
+                CREATE TABLE websocket_skipped_captures (
+                    capture_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                );
+                CREATE TABLE eventsource_streams (
+                    lifecycle_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    event_count INTEGER NOT NULL,
+                    reconnect_last_event_id TEXT,
+                    reconnect_from_lifecycle_id TEXT
+                );
+                CREATE TABLE eventsource_events (
+                    lifecycle_id TEXT NOT NULL
+                        REFERENCES eventsource_streams(lifecycle_id) ON DELETE CASCADE,
+                    transport_sequence INTEGER NOT NULL,
+                    source_capture_id TEXT NOT NULL UNIQUE,
+                    source_body_hash TEXT NOT NULL,
+                    event_name TEXT,
+                    event_id TEXT,
+                    data TEXT NOT NULL,
+                    json_valid INTEGER NOT NULL,
+                    PRIMARY KEY (lifecycle_id, transport_sequence)
+                );
+                CREATE TABLE eventsource_skipped_captures (
+                    capture_id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+
+        let raw = Connection::open_in_memory().unwrap();
+        raw.execute_batch(
+            r#"
+            CREATE TABLE captures (
+                capture_id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                privacy_class TEXT NOT NULL,
+                body_hash TEXT,
+                resource_type TEXT NOT NULL,
+                method TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let ws_hash = "a".repeat(64);
+        let event_hash_1 = "b".repeat(64);
+        let event_hash_2 = "c".repeat(64);
+        raw.execute(
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, resource_type, method) VALUES (?1, ?2, 'private', ?3, 'WebSocketFrame', 'WS_RECV')",
+            params!["ws-capture", "wss://chatgpt.com/backend-api/ws", ws_hash],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, resource_type, method) VALUES (?1, ?2, 'private', ?3, 'EventSourceMessage', 'SSE_RECV')",
+            params!["event-capture-1", "https://chatgpt.com/backend-api/events", event_hash_1],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO captures (capture_id, url, privacy_class, body_hash, resource_type, method) VALUES (?1, ?2, 'private', ?3, 'EventSourceMessage', 'SSE_RECV')",
+            params!["event-capture-2", "https://chatgpt.com/backend-api/events", event_hash_2],
+        )
+        .unwrap();
+
+        corpus.execute(
+            "INSERT INTO websocket_streams (lifecycle_id, source_url, privacy_class, frame_count) VALUES ('ws-life', 'wss://chatgpt.com/backend-api/ws', 'private', 1)",
+            [],
+        ).unwrap();
+        corpus.execute(
+            "INSERT INTO websocket_frames (lifecycle_id, transport_sequence, direction, source_capture_id, source_body_hash, data) VALUES ('ws-life', 0, 'received', 'ws-capture', ?1, '{"ok":true}')",
+            [ws_hash],
+        ).unwrap();
+
+        corpus.execute(
+            "INSERT INTO eventsource_streams (lifecycle_id, source_url, privacy_class, event_count, reconnect_last_event_id, reconnect_from_lifecycle_id) VALUES ('event-life-1', 'https://chatgpt.com/backend-api/events', 'private', 1, NULL, NULL)",
+            [],
+        ).unwrap();
+        corpus.execute(
+            "INSERT INTO eventsource_events (lifecycle_id, transport_sequence, source_capture_id, source_body_hash, event_name, event_id, data, json_valid) VALUES ('event-life-1', 0, 'event-capture-1', ?1, 'message', 'cursor-1', '{"leg":1}', 1)",
+            [event_hash_1],
+        ).unwrap();
+        corpus.execute(
+            "INSERT INTO eventsource_streams (lifecycle_id, source_url, privacy_class, event_count, reconnect_last_event_id, reconnect_from_lifecycle_id) VALUES ('event-life-2', 'https://chatgpt.com/backend-api/events', 'private', 1, 'cursor-1', 'event-life-1')",
+            [],
+        ).unwrap();
+        corpus.execute(
+            "INSERT INTO eventsource_events (lifecycle_id, transport_sequence, source_capture_id, source_body_hash, event_name, event_id, data, json_valid) VALUES ('event-life-2', 0, 'event-capture-2', ?1, 'message', 'cursor-2', '[DONE]', 0)",
+            [event_hash_2],
+        ).unwrap();
+
+        (corpus, raw)
+    }
+
+    #[test]
+    fn transport_corpus_verify_accepts_consistent_derived_evidence() {
+        let (corpus, raw) = open_transport_verify_fixture();
+        let report = verify_transport_corpus(&corpus, &raw).unwrap();
+        assert!(report.sqlite_integrity_ok);
+        assert_eq!(report.foreign_key_violations, 0);
+        assert_eq!(report.websocket_streams_checked, 1);
+        assert_eq!(report.websocket_frames_checked, 1);
+        assert_eq!(report.eventsource_streams_checked, 2);
+        assert_eq!(report.eventsource_events_checked, 2);
+        assert_eq!(report.raw_source_links_checked, 3);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn transport_corpus_verify_reports_derived_corruption() {
+        let (corpus, raw) = open_transport_verify_fixture();
+        corpus
+            .execute(
+                "UPDATE websocket_streams SET frame_count = 9 WHERE lifecycle_id = 'ws-life'",
+                [],
+            )
+            .unwrap();
+        corpus
+            .execute(
+                "UPDATE websocket_frames SET direction = 'sideways' WHERE source_capture_id = 'ws-capture'",
+                [],
+            )
+            .unwrap();
+        corpus
+            .execute(
+                "UPDATE eventsource_events SET json_valid = 1 WHERE source_capture_id = 'event-capture-2'",
+                [],
+            )
+            .unwrap();
+        corpus
+            .execute(
+                "UPDATE eventsource_streams SET reconnect_from_lifecycle_id = 'missing-life' WHERE lifecycle_id = 'event-life-2'",
+                [],
+            )
+            .unwrap();
+
+        let report = verify_transport_corpus(&corpus, &raw).unwrap();
+        assert!(!report.errors.is_empty());
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("declares 9 frames")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid direction")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("json_valid flag disagrees")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("missing reconnect predecessor")));
+    }
 
     #[test]
     fn rejects_outdated_derived_corpus_schema() {

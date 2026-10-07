@@ -186,6 +186,17 @@ fn run() -> Result<()> {
             Some("stats") => {
                 println!("{}", serde_json::to_string_pretty(&corpus::stats(&root)?)?);
             }
+            Some("verify") => {
+                let report = corpus::verify(&root)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                anyhow::ensure!(
+                    report.sqlite_integrity_ok
+                        && report.foreign_key_violations == 0
+                        && report.errors.is_empty(),
+                    "derived corpus verification found {} error(s)",
+                    report.errors.len() + report.foreign_key_violations as usize
+                );
+            }
             Some("conversations") => {
                 let limit = arguments
                     .get(2)
@@ -1016,6 +1027,7 @@ USAGE:
   mirrarium cache private-coverage
   mirrarium corpus rebuild
   mirrarium corpus stats
+  mirrarium corpus verify
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>

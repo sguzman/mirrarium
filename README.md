@@ -83,6 +83,7 @@ mirrarium cache private-reads [limit]
 mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
+mirrarium corpus verify
 mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
@@ -141,7 +142,7 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 
 `corpus stream-revisions` exposes per-event full-message stream evidence with explicit message and parent IDs. Canonicalization uses that evidence conservatively: exact message IDs may refine prefix-compatible snapshot text, and a streamed child may extend the canonical tail only when its explicit parent is the current tail and there is exactly one child candidate. Branches, conflicting revisions, older-than-snapshot streams, and otherwise ambiguous evidence are preserved but never guessed into the canonical transcript.
 
-The derived corpus is explicitly schema-versioned. When its rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors.
+The derived corpus is explicitly schema-versioned. When its rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors. `corpus verify` is a read-only integrity pass over the encrypted derived database: it runs SQLite integrity and foreign-key checks, verifies declared WebSocket/EventSource stream counts and transport semantics, validates JSON markers, rejects derived/skipped overlap, checks EventSource reconnect edges, and cross-checks every promoted transport source capture/hash/URL/direction against the authoritative raw ledger.
 
 ## Linux extension install/update
 
