@@ -24,6 +24,8 @@ const MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES: u64 =
     corpus::CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES;
 const MAX_CORPUS_CONSUMER_REQUIREMENTS_INPUT_BYTES: u64 =
     corpus::CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES;
+const MAX_CORPUS_NEGOTIATED_SYNC_REQUEST_INPUT_BYTES: u64 =
+    corpus::CORPUS_NEGOTIATED_SYNC_REQUEST_MAX_BYTES;
 
 struct BoundedBuffer {
     bytes: Vec<u8>,
@@ -380,6 +382,12 @@ fn run() -> Result<()> {
                     "writing corpus compatibility schema",
                 )?;
             }
+            Some("export-sync-negotiated-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_NEGOTIATED_SYNC_REQUEST_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus negotiated-sync request schema",
+                )?;
+            }
             Some("export-sync-state-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON.as_bytes(),
@@ -418,6 +426,30 @@ fn run() -> Result<()> {
                         .context("serializing corpus sync checkpoint")?,
                     "writing corpus sync checkpoint",
                 )?;
+            }
+            Some("export-sync-negotiated") => {
+                let input = read_bounded_utf8_input(
+                    std::io::stdin().lock(),
+                    MAX_CORPUS_NEGOTIATED_SYNC_REQUEST_INPUT_BYTES,
+                )
+                .context("reading negotiated corpus sync request from stdin")?;
+                anyhow::ensure!(
+                    !input.trim().is_empty(),
+                    "corpus export-sync-negotiated requires a negotiated-sync-request JSON object on stdin"
+                );
+                let request: corpus::CorpusNegotiatedSyncRequest =
+                    serde_json::from_str(&input)
+                        .context("parsing negotiated corpus sync request JSON")?;
+                let stdout = std::io::stdout();
+                let mut stdout = std::io::BufWriter::new(stdout.lock());
+                corpus::write_conversation_negotiated_sync_transaction_json(
+                    &root,
+                    &request,
+                    &mut stdout,
+                )?;
+                stdout
+                    .flush()
+                    .context("flushing negotiated corpus sync transaction JSON")?;
             }
             Some("export-sync") => {
                 let require_fresh = match arguments.get(2).map(String::as_str) {
@@ -1674,11 +1706,13 @@ USAGE:
   mirrarium corpus export-capabilities-schema
   mirrarium corpus export-consumer-requirements-schema
   mirrarium corpus export-compatibility-schema
+  mirrarium corpus export-sync-negotiated-schema
   mirrarium corpus export-sync-state-schema
   mirrarium corpus export-sync-checkpoint-schema
   mirrarium corpus export-sync-schema
   mirrarium corpus export-sync-checkpoint
   mirrarium corpus export-sync [--require-fresh]
+  mirrarium corpus export-sync-negotiated
   mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta

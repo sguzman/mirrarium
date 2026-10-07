@@ -46,6 +46,9 @@ pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_V1_JSON: &str =
 pub const CORPUS_COMPATIBILITY_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_COMPATIBILITY_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-compatibility-v1.schema.json");
+pub const CORPUS_NEGOTIATED_SYNC_REQUEST_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_NEGOTIATED_SYNC_REQUEST_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-negotiated-sync-request-v1.schema.json");
 pub const CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES: u64 = 64 * 1024;
 pub const CORPUS_SYNC_STATE_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_STATE_SCHEMA_V1_JSON: &str =
@@ -59,6 +62,8 @@ pub const CORPUS_SYNC_TRANSACTION_SCHEMA_V1_JSON: &str =
 pub const CORPUS_SYNC_STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES: u64 =
     CORPUS_SYNC_STATE_MAX_BYTES + 1024 * 1024;
+pub const CORPUS_NEGOTIATED_SYNC_REQUEST_MAX_BYTES: u64 =
+    CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES + CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES + 1024 * 1024;
 pub const CORPUS_SYNC_DELTA_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
@@ -430,6 +435,34 @@ fn evaluate_interop_compatibility(
         capabilities,
         mismatches,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorpusNegotiatedSyncRequest {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub requirements: CorpusConsumerRequirements,
+    pub checkpoint: Option<ConversationSyncCheckpoint>,
+    pub require_fresh: bool,
+}
+
+fn validate_negotiated_sync_request(request: &CorpusNegotiatedSyncRequest) -> Result<()> {
+    anyhow::ensure!(
+        request.schema == "mirrarium.corpus.negotiated-sync-request",
+        "negotiated sync request schema must be \"mirrarium.corpus.negotiated-sync-request\""
+    );
+    anyhow::ensure!(
+        request.schema_version == CORPUS_NEGOTIATED_SYNC_REQUEST_SCHEMA_VERSION,
+        "unsupported negotiated sync request schema version {}",
+        request.schema_version
+    );
+    anyhow::ensure!(
+        request.record_type == "negotiated-sync-request",
+        "negotiated sync request record_type must be \"negotiated-sync-request\""
+    );
+    validate_consumer_requirements(&request.requirements)
 }
 
 #[derive(Debug, Serialize)]
@@ -2327,6 +2360,32 @@ pub fn write_conversation_sync_delta_json<W: Write>(
         .write_all(b"\n")
         .context("writing corpus sync-delta newline")?;
     Ok(())
+}
+
+pub fn write_conversation_negotiated_sync_transaction_json<W: Write>(
+    raw_root: impl AsRef<Path>,
+    request: &CorpusNegotiatedSyncRequest,
+    writer: &mut W,
+) -> Result<()> {
+    validate_negotiated_sync_request(request)?;
+    let compatibility = interop_compatibility(raw_root.as_ref(), request.requirements.clone())?;
+    if !compatibility.compatible {
+        let summary = compatibility
+            .mismatches
+            .iter()
+            .map(|mismatch| format!("{}:{}", mismatch.code, mismatch.field))
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "consumer requirements are incompatible with this Mirrarium producer: {summary}"
+        );
+    }
+    write_conversation_sync_transaction_json_with_options(
+        raw_root,
+        request.checkpoint.as_ref(),
+        request.require_fresh,
+        writer,
+    )
 }
 
 pub fn write_conversation_sync_transaction_json<W: Write>(
@@ -6723,6 +6782,20 @@ mod tests {
                 ("insufficient_limit", "limits.sync_state_max_bytes"),
             ]
         );
+    }
+
+    #[test]
+    fn negotiated_sync_request_validation_rejects_wrong_metadata() {
+        let request = CorpusNegotiatedSyncRequest {
+            schema: "wrong".to_owned(),
+            schema_version: 1,
+            record_type: "negotiated-sync-request".to_owned(),
+            requirements: fixture_consumer_requirements(),
+            checkpoint: None,
+            require_fresh: false,
+        };
+        let error = validate_negotiated_sync_request(&request).unwrap_err();
+        assert!(error.to_string().contains("negotiated sync request schema"));
     }
 
     #[test]

@@ -2837,6 +2837,27 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         "consumer requirements are incompatible",
       );
 
+      const { stdout: negotiatedSyncRequestSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-negotiated-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const negotiatedSyncRequestSchema = JSON.parse(
+        negotiatedSyncRequestSchemaStdout,
+      );
+      const negotiatedSyncRequestAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      negotiatedSyncRequestAjv.addSchema(consumerRequirementsSchema);
+      const validateNegotiatedSyncRequest =
+        negotiatedSyncRequestAjv.compile(negotiatedSyncRequestSchema);
+
       const { stdout: corpusExportManifestSchemaStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-manifest-schema"],
@@ -3347,6 +3368,47 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(bootstrapSync.archive_id).toBe(exportSource.archive_id);
       expect(bootstrapSync.delta).toEqual(emptySyncDelta);
       expect(bootstrapSync.checkpoint).toEqual(currentCheckpoint);
+
+      const negotiatedBootstrapRequest = {
+        schema: "mirrarium.corpus.negotiated-sync-request",
+        schema_version: 1,
+        record_type: "negotiated-sync-request",
+        requirements: consumerRequirements,
+        checkpoint: null,
+        require_fresh: false,
+      };
+      expect(
+        validateNegotiatedSyncRequest(negotiatedBootstrapRequest),
+        JSON.stringify(validateNegotiatedSyncRequest.errors),
+      ).toBe(true);
+      const { stdout: negotiatedBootstrapStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-negotiated"],
+        JSON.stringify(negotiatedBootstrapRequest),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(negotiatedBootstrapStdout).toBe(bootstrapSyncStdout);
+
+      const incompatibleNegotiatedSync = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-negotiated"],
+        JSON.stringify({
+          ...negotiatedBootstrapRequest,
+          requirements: incompatibleRequirements,
+        }),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(incompatibleNegotiatedSync.code).not.toBe(0);
+      expect(incompatibleNegotiatedSync.stdout).toBe("");
+      expect(incompatibleNegotiatedSync.stderr).toContain(
+        "consumer requirements are incompatible",
+      );
 
       const { stdout: noopBoundSyncStdout } = await execFileWithInput(
         cliPath,

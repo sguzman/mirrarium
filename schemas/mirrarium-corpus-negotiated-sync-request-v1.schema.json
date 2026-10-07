@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:negotiated-sync-request:v1",
+  "title": "Mirrarium negotiated corpus sync request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "record_type",
+    "requirements",
+    "checkpoint",
+    "require_fresh"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.negotiated-sync-request" },
+    "schema_version": { "const": 1 },
+    "record_type": { "const": "negotiated-sync-request" },
+    "requirements": { "$ref": "urn:mirrarium:corpus:consumer-requirements:v1" },
+    "checkpoint": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "urn:mirrarium:corpus:sync-checkpoint:v1" }
+      ]
+    },
+    "require_fresh": { "type": "boolean" }
+  }
+}

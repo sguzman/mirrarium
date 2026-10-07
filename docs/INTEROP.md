@@ -8,6 +8,8 @@
 
 Capabilities v1 and schema-bundle v1 are intentionally not mutated to advertise this later additive negotiation surface. Their already-published member sets remain stable; negotiation is separately versioned and discoverable through its dedicated schema commands/files.
 
+For consumers that want the compatibility check and private synchronization bound to one producer invocation, `mirrarium corpus export-sync-negotiated` accepts a v1 `negotiated-sync-request` object containing `requirements`, an optional prior source-bound `checkpoint`, and `require_fresh`. The command validates compatibility before entering the existing sync writer. Incompatible requirements therefore produce a nonzero exit with **empty stdout**, so no private upsert prefix can escape. On success stdout is the existing `sync-transaction` v1 byte contract unchanged. This command closes the upgrade race between a standalone preflight and the actual sync without creating a second delta implementation. Its request schema is `schemas/mirrarium-corpus-negotiated-sync-request-v1.schema.json` / `mirrarium corpus export-sync-negotiated-schema`.
+
 `mirrarium corpus export [limit]` is a read-only interoperability surface for local consumers such as Chatarium. The normative machine-readable v1 contract is checked in at `schemas/mirrarium-corpus-conversation-v1.schema.json` and is also emitted by `mirrarium corpus export-schema` for installed-binary consumers.
 
 ## v1 framing
