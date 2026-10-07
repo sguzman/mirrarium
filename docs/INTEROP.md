@@ -58,6 +58,8 @@ The exporter does not crawl ChatGPT, mutate the archive, or read new network dat
 
 The encrypted-at-rest guarantee ends at this explicit interoperability boundary: JSONL records written to stdout contain the private conversation/evidence text represented by the derived corpus in plaintext. Pipes pass that plaintext to the receiving process, and shell redirection creates an ordinary plaintext file with permissions determined by the shell/filesystem environment. Consumers such as Chatarium should treat the stream as sensitive local data and establish their own at-rest protections if they persist it.
 
+Interop stdout is pipe-friendly on Unix-style workflows: if the downstream reader closes the pipe, Mirrarium treats the resulting broken pipe as quiet successful termination rather than printing an error or panicking. This does not make a truncated export authoritative; consumers that require a complete export/delta must still require the producer process to complete normally and, where applicable, verify the manifest/hash protocol.
+
 Canonicalization is not authoritative over evidence. Ambiguous or unsupported snapshot shapes remain explicit through the canonical view's `basis_kind` and warnings, and a conversation with no canonical snapshot simply exports `canonical: null`. Actual canonical read/decryption/JSON/database errors are structural failures and abort the export. They are never downgraded into `canonical_error` on an otherwise valid v1 record.
 
 ## One-command delta synchronization

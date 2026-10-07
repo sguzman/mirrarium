@@ -72,9 +72,33 @@ fn read_bounded_utf8_input<R: Read>(reader: R, max_bytes: u64) -> Result<String>
     String::from_utf8(bytes).context("input is not valid UTF-8")
 }
 
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn write_stdout_bytes(bytes: &[u8], context: &'static str) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(bytes).context(context)?;
+    stdout.flush().context("flushing stdout")
+}
+
+fn write_stdout_json_line<T: serde::Serialize>(
+    value: &T,
+    context: &'static str,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value).context("serializing stdout JSON")?;
+    bytes.push(b'\n');
+    write_stdout_bytes(&bytes, context)
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("mirrarium: {error:#}");
             ExitCode::FAILURE
@@ -299,19 +323,34 @@ fn run() -> Result<()> {
                 );
             }
             Some("export-schema") => {
-                print!("{}", corpus::CORPUS_EXPORT_SCHEMA_V1_JSON);
+                write_stdout_bytes(
+                    corpus::CORPUS_EXPORT_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus export schema",
+                )?;
             }
             Some("export-index-schema") => {
-                print!("{}", corpus::CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON);
+                write_stdout_bytes(
+                    corpus::CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus export-index schema",
+                )?;
             }
             Some("export-manifest-schema") => {
-                print!("{}", corpus::CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON);
+                write_stdout_bytes(
+                    corpus::CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus export-manifest schema",
+                )?;
             }
             Some("export-sync-state-schema") => {
-                print!("{}", corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON);
+                write_stdout_bytes(
+                    corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus sync-state schema",
+                )?;
             }
             Some("export-delta-schema") => {
-                print!("{}", corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON);
+                write_stdout_bytes(
+                    corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus sync-delta schema",
+                )?;
             }
             Some("export-sync-state") => {
                 let mut output = BoundedBuffer::new(MAX_CORPUS_SYNC_STATE_INPUT_BYTES);
@@ -343,7 +382,11 @@ fn run() -> Result<()> {
                     .context("flushing corpus sync-delta JSON")?;
             }
             Some("export-manifest") => {
-                println!("{}", serde_json::to_string(&corpus::export_manifest(&root)?)?);
+                let manifest = corpus::export_manifest(&root)?;
+                write_stdout_json_line(
+                    &manifest,
+                    "writing corpus export manifest",
+                )?;
             }
             Some("export-index") => {
                 let limit = arguments
@@ -379,7 +422,10 @@ fn run() -> Result<()> {
                     expected_record_sha256,
                 )?
                 .with_context(|| format!("conversation {conversation_id:?} not found"))?;
-                println!("{}", serde_json::to_string(&record)?);
+                write_stdout_json_line(
+                    &record,
+                    "writing corpus conversation export",
+                )?;
             }
             Some("export") => {
                 let limit = arguments
@@ -1541,6 +1587,22 @@ PRIVATE KEY:
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn broken_pipe_errors_are_quiet_process_termination() {
+        let broken = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "consumer closed pipe",
+        ))
+        .context("writing corpus export");
+        assert!(is_broken_pipe(&broken));
+
+        let other = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "short write",
+        ));
+        assert!(!is_broken_pipe(&other));
+    }
 
     #[test]
     fn bounded_buffer_rejects_overflow_without_extending_past_limit() {
