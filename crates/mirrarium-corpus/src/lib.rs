@@ -1418,13 +1418,39 @@ fn ensure_record_matches_cached_hash(
     Ok(())
 }
 
+fn verified_materialized_export_index(
+    corpus: &Connection,
+) -> Result<(ConversationExportManifest, Vec<(String, String)>)> {
+    let cached_index = conversation_export_index_records_for_connection(corpus, -1)?;
+    let manifest = materialized_export_manifest_for_connection(corpus)?;
+    let mut index_hasher = Sha256::new();
+    let mut conversation_count = 0_u64;
+
+    for (conversation_id, record_sha256) in &cached_index {
+        let index_line =
+            conversation_export_index_line_from_parts(conversation_id, record_sha256)?;
+        index_hasher.update(&index_line);
+        conversation_count = conversation_count
+            .checked_add(1)
+            .context("export index conversation count overflow")?;
+    }
+
+    let computed_index_sha256 = format!("{:x}", index_hasher.finalize());
+    anyhow::ensure!(
+        manifest.conversation_count == conversation_count
+            && manifest.index_sha256 == computed_index_sha256,
+        "materialized export manifest disagrees with conversation export index; run 'mirrarium corpus verify' or 'mirrarium corpus rebuild'"
+    );
+
+    Ok((manifest, cached_index))
+}
+
 pub fn export_sync_state(raw_root: impl AsRef<Path>) -> Result<ConversationSyncState> {
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
-    let records = conversation_export_index_records_for_connection(&corpus, -1)?
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
+    let (_manifest, cached_index) = verified_materialized_export_index(&corpus)?;
+    let records = cached_index.into_iter().collect::<BTreeMap<_, _>>();
     let state = ConversationSyncState {
         schema: "mirrarium.corpus.sync-state".to_owned(),
         schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
@@ -1466,37 +1492,19 @@ fn conversation_sync_delta_plan(
     corpus: &Connection,
     state: &ConversationSyncState,
 ) -> Result<ConversationSyncDeltaPlan> {
-    let cached_index = conversation_export_index_records_for_connection(corpus, -1)?;
-    let manifest = materialized_export_manifest_for_connection(corpus)?;
-
+    let (manifest, cached_index) = verified_materialized_export_index(corpus)?;
     let mut current_ids = BTreeSet::new();
     let mut changed_records = Vec::new();
-    let mut index_hasher = Sha256::new();
-    let mut conversation_count = 0_u64;
 
     for (conversation_id, record_sha256) in cached_index {
         current_ids.insert(conversation_id.clone());
-        let index_line =
-            conversation_export_index_line_from_parts(&conversation_id, &record_sha256)?;
-        index_hasher.update(&index_line);
 
         if state.records.get(&conversation_id).map(String::as_str)
             != Some(record_sha256.as_str())
         {
             changed_records.push((conversation_id, record_sha256));
         }
-
-        conversation_count = conversation_count
-            .checked_add(1)
-            .context("sync delta conversation count overflow")?;
     }
-
-    let computed_index_sha256 = format!("{:x}", index_hasher.finalize());
-    anyhow::ensure!(
-        manifest.conversation_count == conversation_count
-            && manifest.index_sha256 == computed_index_sha256,
-        "materialized export manifest disagrees with conversation export index; run 'mirrarium corpus verify' or 'mirrarium corpus rebuild'"
-    );
 
     let deleted_conversation_ids = state
         .records
