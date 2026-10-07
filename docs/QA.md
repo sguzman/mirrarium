@@ -52,7 +52,7 @@ The fixture deliberately exercises the current production boundaries rather than
 - HEAD/204 no-body responses and a response that fails after headers;
 - streaming SSE plus long-lived EventSource messages and reconnects;
 - WebSocket sent/received JSON, plain-text, binary, and oversized-frame boundaries;
-- encrypted raw ledger/private CAS/derived corpus checks;
+- encrypted raw ledger/private CAS/derived corpus checks, including live-writer `mirrarium verify` with response/request-body object-reference validation and zero orphan/malformed CAS expectations;
 - corpus rebuild, transport-derived views, reconnect edges, whole-corpus `corpus verify`, failed-rebuild preservation, stale crash-staging recovery, and native-host kill/restart proof that preserves a committed SQLCipher/WAL capture while purging only an abandoned in-flight capture;
 - stable installed-extension update/reload behavior in disposable Chromium.
 

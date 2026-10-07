@@ -1601,6 +1601,38 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         cleanup_on_next_writer_start: false,
       });
 
+      const liveStatsForVerify = await readStats();
+      const { stdout: rawVerifyStdout } = await execFileAsync(
+        cliPath,
+        ["verify"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const rawVerify = JSON.parse(rawVerifyStdout) as {
+        checked_objects: number;
+        corrupt_objects: number;
+        orphan_objects: number;
+        orphan_object_bytes: number;
+        unexpected_object_entries: number;
+        checked_capture_invariants: number;
+        invalid_captures: number;
+        errors: string[];
+      };
+      expect(rawVerify).toEqual({
+        checked_objects: liveStatsForVerify.objects,
+        corrupt_objects: 0,
+        orphan_objects: 0,
+        orphan_object_bytes: 0,
+        unexpected_object_entries: 0,
+        checked_capture_invariants: liveStatsForVerify.captures,
+        invalid_captures: 0,
+        errors: [],
+      });
+
       const { stdout: privacyStatusStdout } = await execFileAsync(
         cliPath,
         ["privacy", "status"],
