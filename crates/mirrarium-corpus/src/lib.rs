@@ -16,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-const CORPUS_SCHEMA_VERSION: i64 = 5;
+const CORPUS_SCHEMA_VERSION: i64 = 6;
 pub const CORPUS_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-conversation-v1.schema.json");
@@ -510,6 +510,7 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
         DROP TABLE IF EXISTS eventsource_events;
         DROP TABLE IF EXISTS eventsource_streams;
         DROP TABLE IF EXISTS eventsource_skipped_captures;
+        DROP TABLE IF EXISTS conversation_export_meta;
         DROP TABLE IF EXISTS conversation_export_index;
         DROP TABLE IF EXISTS attachment_downloads;
         DROP TABLE IF EXISTS attachment_observations;
@@ -628,6 +629,15 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
             conversation_id TEXT PRIMARY KEY,
             record_sha256 TEXT NOT NULL
                 CHECK(length(record_sha256) = 64)
+        );
+
+        CREATE TABLE conversation_export_meta (
+            singleton INTEGER PRIMARY KEY
+                CHECK(singleton = 1),
+            conversation_count INTEGER NOT NULL
+                CHECK(conversation_count >= 0),
+            index_sha256 TEXT NOT NULL
+                CHECK(length(index_sha256) = 64)
         );
 
         CREATE TABLE stream_reconstructions (
@@ -1396,6 +1406,7 @@ pub fn export_delta(
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
     let cached_index = conversation_export_index_records_for_connection(&corpus, -1)?;
+    let manifest = materialized_export_manifest_for_connection(&corpus)?;
     let mut raw: Option<Connection> = None;
 
     let mut current_ids = BTreeSet::new();
@@ -1437,16 +1448,12 @@ pub fn export_delta(
         .cloned()
         .collect();
 
-    let manifest = ConversationExportManifest {
-        schema: "mirrarium.corpus.export-manifest".to_owned(),
-        schema_version: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
-        conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
-        index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
-        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
-        record_type: "export-manifest".to_owned(),
-        conversation_count,
-        index_sha256: format!("{:x}", index_hasher.finalize()),
-    };
+    let computed_index_sha256 = format!("{:x}", index_hasher.finalize());
+    anyhow::ensure!(
+        manifest.conversation_count == conversation_count
+            && manifest.index_sha256 == computed_index_sha256,
+        "materialized export manifest disagrees with conversation export index; run 'mirrarium corpus verify' or 'mirrarium corpus rebuild'"
+    );
 
     Ok(ConversationSyncDelta {
         schema: "mirrarium.corpus.sync-delta".to_owned(),
@@ -1465,28 +1472,7 @@ pub fn export_manifest(raw_root: impl AsRef<Path>) -> Result<ConversationExportM
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let corpus = open_corpus_read_only(raw_root)?;
-    let cached_index = conversation_export_index_records_for_connection(&corpus, -1)?;
-    let mut hasher = Sha256::new();
-
-    for (conversation_id, record_sha256) in &cached_index {
-        let line =
-            conversation_export_index_line_from_parts(conversation_id, record_sha256)?;
-        hasher.update(&line);
-    }
-
-    let conversation_count = u64::try_from(cached_index.len())
-        .context("export manifest conversation count overflow")?;
-
-    Ok(ConversationExportManifest {
-        schema: "mirrarium.corpus.export-manifest".to_owned(),
-        schema_version: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
-        conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
-        index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
-        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
-        record_type: "export-manifest".to_owned(),
-        conversation_count,
-        index_sha256: format!("{:x}", hasher.finalize()),
-    })
+    materialized_export_manifest_for_connection(&corpus)
 }
 
 pub fn write_conversation_export_index_jsonl<W: Write>(
@@ -1625,6 +1611,8 @@ fn materialize_conversation_export_index(
 ) -> Result<()> {
     let transaction = corpus.transaction()?;
     let conversation_ids = conversation_ids_for_connection(&transaction, -1)?;
+    let mut index_hasher = Sha256::new();
+    let mut conversation_count = 0_u64;
 
     for conversation_id in conversation_ids {
         let record = conversation_export_record_for_connections(
@@ -1642,10 +1630,74 @@ fn materialize_conversation_export_index(
             "#,
             params![conversation_id, record.record_sha256],
         )?;
+        let line = conversation_export_index_line_from_parts(
+            &record.conversation_id,
+            &record.record_sha256,
+        )?;
+        index_hasher.update(&line);
+        conversation_count = conversation_count
+            .checked_add(1)
+            .context("materialized export conversation count overflow")?;
     }
+
+    transaction.execute(
+        r#"
+        INSERT INTO conversation_export_meta (
+            singleton,
+            conversation_count,
+            index_sha256
+        ) VALUES (1, ?1, ?2)
+        "#,
+        params![
+            i64::try_from(conversation_count)
+                .context("materialized export conversation count is too large")?,
+            format!("{:x}", index_hasher.finalize()),
+        ],
+    )?;
 
     transaction.commit()?;
     Ok(())
+}
+
+fn materialized_export_manifest_for_connection(
+    corpus: &Connection,
+) -> Result<ConversationExportManifest> {
+    let (conversation_count, index_sha256) = corpus
+        .query_row(
+            r#"
+            SELECT conversation_count, index_sha256
+            FROM conversation_export_meta
+            WHERE singleton = 1
+            "#,
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .context("materialized corpus export manifest is missing; run 'mirrarium corpus rebuild'")?;
+
+    anyhow::ensure!(
+        conversation_count >= 0,
+        "materialized corpus export manifest has negative conversation count"
+    );
+    anyhow::ensure!(
+        valid_sha256_hex(&index_sha256)
+            && index_sha256
+                .bytes()
+                .all(|byte| !byte.is_ascii_uppercase()),
+        "materialized corpus export manifest has invalid index SHA-256 {index_sha256:?}; run 'mirrarium corpus verify' or rebuild"
+    );
+
+    Ok(ConversationExportManifest {
+        schema: "mirrarium.corpus.export-manifest".to_owned(),
+        schema_version: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
+        conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+        index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: "export-manifest".to_owned(),
+        conversation_count: u64::try_from(conversation_count)
+            .context("materialized export conversation count overflow")?,
+        index_sha256,
+    })
 }
 
 fn verify_materialized_conversation_export_index(
@@ -1676,6 +1728,38 @@ fn verify_materialized_conversation_export_index(
         errors.push(format!(
             "conversation export index ids disagree with derived conversation universe: index={indexed_ids:?}, expected={expected_ids:?}"
         ));
+    }
+
+    let mut index_hasher = Sha256::new();
+    for (conversation_id, record_sha256) in &indexed {
+        match conversation_export_index_line_from_parts(conversation_id, record_sha256) {
+            Ok(line) => index_hasher.update(&line),
+            Err(error) => errors.push(format!(
+                "conversation export index {conversation_id:?} could not serialize canonical index line: {error:#}"
+            )),
+        }
+    }
+    let computed_index_sha256 = format!("{:x}", index_hasher.finalize());
+    match materialized_export_manifest_for_connection(corpus) {
+        Ok(manifest) => {
+            if manifest.conversation_count != indexed.len() as u64 {
+                errors.push(format!(
+                    "materialized export manifest conversation count {} disagrees with index row count {}",
+                    manifest.conversation_count,
+                    indexed.len()
+                ));
+            }
+            if manifest.index_sha256 != computed_index_sha256 {
+                errors.push(format!(
+                    "materialized export manifest index SHA-256 {} disagrees with rebuilt index SHA-256 {}",
+                    manifest.index_sha256,
+                    computed_index_sha256
+                ));
+            }
+        }
+        Err(error) => errors.push(format!(
+            "materialized export manifest is invalid: {error:#}"
+        )),
     }
 
     for (conversation_id, record_sha256) in indexed {
@@ -3659,6 +3743,7 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         "attachment_observations",
         "attachment_downloads",
         "conversation_export_index",
+        "conversation_export_meta",
         "websocket_streams",
         "websocket_frames",
         "websocket_skipped_captures",
