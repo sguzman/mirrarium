@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:capabilities:v1",
+  "title": "Mirrarium corpus interoperability capabilities v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "record_type",
+    "archive_id",
+    "producer_corpus_schema_version",
+    "wire_versions",
+    "limits",
+    "record_hash_algorithm",
+    "index_hash_algorithm",
+    "source_bound_sync",
+    "require_fresh_sync"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.capabilities" },
+    "schema_version": { "const": 1 },
+    "record_type": { "const": "capabilities" },
+    "archive_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "producer_corpus_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "wire_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conversation",
+        "conversation_index",
+        "export_manifest",
+        "export_source",
+        "export_status",
+        "capabilities",
+        "sync_state",
+        "sync_checkpoint",
+        "sync_delta",
+        "sync_transaction",
+        "schema_bundle"
+      ],
+      "properties": {
+        "conversation": { "const": 1 },
+        "conversation_index": { "const": 1 },
+        "export_manifest": { "const": 1 },
+        "export_source": { "const": 1 },
+        "export_status": { "const": 1 },
+        "capabilities": { "const": 1 },
+        "sync_state": { "const": 1 },
+        "sync_checkpoint": { "const": 1 },
+        "sync_delta": { "const": 1 },
+        "sync_transaction": { "const": 1 },
+        "schema_bundle": { "const": 1 }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sync_state_max_bytes",
+        "sync_checkpoint_input_max_bytes"
+      ],
+      "properties": {
+        "sync_state_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sync_checkpoint_input_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "record_hash_algorithm": { "const": "sha256" },
+    "index_hash_algorithm": { "const": "sha256" },
+    "source_bound_sync": { "const": true },
+    "require_fresh_sync": { "const": true }
+  }
+}
