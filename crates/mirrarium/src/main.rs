@@ -106,13 +106,15 @@ fn run() -> Result<()> {
             anyhow::ensure!(
                 report.sqlite_integrity_ok
                     && report.foreign_key_violations == 0
+                    && report.schema_ok
                     && report.corrupt_objects == 0
                     && report.unreferenced_indexed_objects == 0
                     && report.invalid_captures == 0
                     && report.unexpected_object_entries == 0,
-                "raw verification failed: sqlite_integrity_ok={}, {} foreign-key violation(s), {} corrupt object(s), {} unreferenced indexed object(s), {} invalid capture(s), {} unexpected CAS entrie(s)",
+                "raw verification failed: sqlite_integrity_ok={}, foreign_key_violations={}, schema_ok={}, corrupt_objects={}, unreferenced_indexed_objects={}, invalid_captures={}, unexpected_object_entries={}",
                 report.sqlite_integrity_ok,
                 report.foreign_key_violations,
+                report.schema_ok,
                 report.corrupt_objects,
                 report.unreferenced_indexed_objects,
                 report.invalid_captures,

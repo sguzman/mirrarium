@@ -1712,6 +1712,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const rawVerify = JSON.parse(rawVerifyStdout) as {
         sqlite_integrity_ok: boolean;
         foreign_key_violations: number;
+        schema_ok: boolean;
         checked_objects: number;
         corrupt_objects: number;
         unreferenced_indexed_objects: number;
@@ -1725,6 +1726,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(rawVerify).toEqual({
         sqlite_integrity_ok: true,
         foreign_key_violations: 0,
+        schema_ok: true,
         checked_objects: liveStatsForVerify.objects,
         corrupt_objects: 0,
         unreferenced_indexed_objects: 0,
