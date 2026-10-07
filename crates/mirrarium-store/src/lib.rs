@@ -214,6 +214,14 @@ pub struct VerifyReport {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OrphanPruneReport {
+    pub orphan_objects_before: u64,
+    pub orphan_object_bytes_before: u64,
+    pub removed_objects: u64,
+    pub removed_stored_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct IncomingMaintenanceStatus {
     pub incoming_exists: bool,
     pub writer_active: bool,
@@ -2621,6 +2629,154 @@ fn add_maintenance_file(
     Ok(())
 }
 
+fn collect_indexed_object_paths(connection: &Connection) -> Result<BTreeSet<PathBuf>> {
+    let mut statement =
+        connection.prepare("SELECT storage_class, hash FROM objects ORDER BY storage_class, hash")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut indexed_paths = BTreeSet::new();
+    for row in rows {
+        let (storage_class, hash) = row?;
+        let class = PrivacyClass::parse(&storage_class)
+            .with_context(|| format!("invalid indexed storage class {storage_class:?}"))?;
+        anyhow::ensure!(
+            hash.len() == 64 && is_lower_hex(&hash),
+            "invalid indexed SHA-256 key {hash:?}"
+        );
+        indexed_paths.insert(object_relative_path(class, &hash));
+    }
+    Ok(indexed_paths)
+}
+
+fn collect_orphan_object_files(
+    root: &Path,
+    indexed_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<(PathBuf, u64)>> {
+    let mut candidates = Vec::new();
+    for class in [
+        PrivacyClass::Public,
+        PrivacyClass::Private,
+        PrivacyClass::Unknown,
+    ] {
+        let objects_root = root.join(class.as_str()).join("objects");
+        if !objects_root.exists() {
+            continue;
+        }
+        anyhow::ensure!(
+            objects_root.is_dir(),
+            "refusing orphan prune: object root is not a directory: {}",
+            objects_root.display()
+        );
+
+        for prefix_entry in fs::read_dir(&objects_root)
+            .with_context(|| format!("reading {}", objects_root.display()))?
+        {
+            let prefix_entry = prefix_entry?;
+            let prefix_path = prefix_entry.path();
+            let prefix_name = prefix_entry.file_name().to_string_lossy().into_owned();
+            let prefix_type = prefix_entry.file_type()?;
+            anyhow::ensure!(
+                prefix_type.is_dir()
+                    && prefix_name.len() == 2
+                    && is_lower_hex(&prefix_name),
+                "refusing orphan prune: unexpected CAS entry {}",
+                prefix_path.display()
+            );
+
+            for object_entry in fs::read_dir(&prefix_path)
+                .with_context(|| format!("reading {}", prefix_path.display()))?
+            {
+                let object_entry = object_entry?;
+                let object_path = object_entry.path();
+                let object_name = object_entry.file_name().to_string_lossy().into_owned();
+                let object_type = object_entry.file_type()?;
+                anyhow::ensure!(
+                    object_type.is_file()
+                        && object_name.len() == 64
+                        && is_lower_hex(&object_name)
+                        && object_name.starts_with(&prefix_name),
+                    "refusing orphan prune: unexpected CAS entry {}",
+                    object_path.display()
+                );
+
+                let relative_path = object_relative_path(class, &object_name);
+                if indexed_paths.contains(&relative_path) {
+                    continue;
+                }
+                candidates.push((object_path, object_entry.metadata()?.len()));
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+pub fn prune_orphan_objects(root: impl AsRef<Path>) -> Result<OrphanPruneReport> {
+    let root = root.as_ref();
+    let _writer_lock = acquire_writer_lock(root)?;
+    let store = CaptureStore::open_read_only(root)?;
+    let verify = store.verify()?;
+
+    anyhow::ensure!(
+        verify.sqlite_integrity_ok
+            && verify.foreign_key_violations == 0
+            && verify.schema_ok
+            && verify.corrupt_objects == 0
+            && verify.unreferenced_indexed_objects == 0
+            && verify.invalid_captures == 0
+            && verify.unexpected_object_entries == 0
+            && verify.errors.is_empty(),
+        "refusing orphan prune because raw verification is not clean"
+    );
+
+    let indexed_paths = collect_indexed_object_paths(&store.connection)?;
+    let candidates = collect_orphan_object_files(root, &indexed_paths)?;
+    let candidate_count =
+        u64::try_from(candidates.len()).context("orphan candidate count overflow")?;
+    let candidate_bytes = candidates.iter().try_fold(0_u64, |total, (_, bytes)| {
+        total
+            .checked_add(*bytes)
+            .context("orphan candidate byte count overflow")
+    })?;
+
+    anyhow::ensure!(
+        candidate_count == verify.orphan_objects
+            && candidate_bytes == verify.orphan_object_bytes,
+        "refusing orphan prune because CAS changed after verification: verifier={} objects/{} bytes, rescan={} objects/{} bytes",
+        verify.orphan_objects,
+        verify.orphan_object_bytes,
+        candidate_count,
+        candidate_bytes
+    );
+
+    let mut touched_directories = BTreeSet::new();
+    let mut removed_objects = 0_u64;
+    let mut removed_stored_bytes = 0_u64;
+    for (path, bytes) in candidates {
+        fs::remove_file(&path)
+            .with_context(|| format!("removing orphan CAS object {}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            touched_directories.insert(parent.to_path_buf());
+        }
+        removed_objects = removed_objects
+            .checked_add(1)
+            .context("removed orphan object count overflow")?;
+        removed_stored_bytes = removed_stored_bytes
+            .checked_add(bytes)
+            .context("removed orphan object byte count overflow")?;
+    }
+    for directory in touched_directories {
+        sync_directory(&directory)?;
+    }
+
+    Ok(OrphanPruneReport {
+        orphan_objects_before: verify.orphan_objects,
+        orphan_object_bytes_before: verify.orphan_object_bytes,
+        removed_objects,
+        removed_stored_bytes,
+    })
+}
+
 pub fn incoming_maintenance_status(
     root: impl AsRef<Path>,
 ) -> Result<IncomingMaintenanceStatus> {
@@ -4713,6 +4869,85 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("unexpected CAS entry")));
+    }
+
+    #[test]
+    fn orphan_prune_removes_only_verified_unindexed_objects() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let mut store = CaptureStore::open(root).unwrap();
+
+        let item = metadata(
+            "indexed-capture",
+            "https://chatgpt.com/backend-api/indexed",
+            "Fetch",
+        );
+        store.begin(item).unwrap();
+        store
+            .append_chunk("indexed-capture", 0, &BASE64.encode(b"indexed body"))
+            .unwrap();
+        store.finish("indexed-capture", Some(12), None).unwrap();
+        let indexed_hash = store.recent_captures(1).unwrap()[0]
+            .body_hash
+            .clone()
+            .unwrap();
+        let indexed_path = root.join(object_relative_path(
+            PrivacyClass::Private,
+            &indexed_hash,
+        ));
+        drop(store);
+
+        let orphan_hash = "e".repeat(64);
+        let orphan_path = root.join(object_relative_path(
+            PrivacyClass::Private,
+            &orphan_hash,
+        ));
+        fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        fs::write(&orphan_path, b"orphan crash residue").unwrap();
+
+        let report = prune_orphan_objects(root).unwrap();
+        assert_eq!(report.orphan_objects_before, 1);
+        assert_eq!(report.removed_objects, 1);
+        assert_eq!(
+            report.removed_stored_bytes,
+            b"orphan crash residue".len() as u64
+        );
+        assert!(indexed_path.is_file());
+        assert!(!orphan_path.exists());
+
+        let reader = CaptureStore::open_read_only(root).unwrap();
+        let verify = reader.verify().unwrap();
+        assert_eq!(verify.orphan_objects, 0);
+        assert!(verify.errors.is_empty());
+    }
+
+    #[test]
+    fn orphan_prune_refuses_live_writer_and_malformed_cas_without_deleting() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let store = CaptureStore::open(root).unwrap();
+
+        let orphan_hash = "d".repeat(64);
+        let orphan_path = root.join(object_relative_path(
+            PrivacyClass::Private,
+            &orphan_hash,
+        ));
+        fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        fs::write(&orphan_path, b"keep me").unwrap();
+
+        let error = prune_orphan_objects(root).unwrap_err();
+        assert!(error.to_string().contains("another Mirrarium writer"));
+        assert!(orphan_path.is_file());
+        drop(store);
+
+        let malformed = root.join("private/objects/not-a-prefix");
+        fs::write(&malformed, b"unexpected").unwrap();
+        let error = prune_orphan_objects(root).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("refusing orphan prune because raw verification is not clean"));
+        assert!(orphan_path.is_file());
+        assert!(malformed.is_file());
     }
 
     #[test]
