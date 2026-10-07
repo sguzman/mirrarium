@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES: u64 = 1024 * 1024;
 const MAX_EVENTSOURCE_MESSAGE_BYTES: u64 = 1024 * 1024;
 const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
@@ -33,6 +34,22 @@ const PRIVATE_NONCE_BYTES: usize = 24;
 const PRIVATE_STREAM_NONCE_PREFIX_BYTES: usize = 16;
 const PRIVATE_STREAM_TAG_BYTES: usize = 16;
 const PRIVATE_STREAM_REWRITE_CHUNK_BYTES: usize = 256 * 1024;
+
+fn capture_size_suppression_reason(
+    resource_type: &str,
+    next_bytes: u64,
+) -> Option<&'static str> {
+    match resource_type {
+        "WebSocketFrame" if next_bytes > MAX_WEBSOCKET_FRAME_BYTES => {
+            Some("websocket_text_frame_too_large")
+        }
+        "EventSourceMessage" if next_bytes > MAX_EVENTSOURCE_MESSAGE_BYTES => {
+            Some("eventsource_message_too_large")
+        }
+        _ if next_bytes > MAX_RESPONSE_BODY_BYTES => Some("response_body_too_large"),
+        _ => None,
+    }
+}
 const SQLITE_PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
 const LEDGER_KEY_PURPOSE: &str = "ledger-sqlcipher-v1";
 const READ_ONLY_LEDGER_BUSY_TIMEOUT_MS: u64 = 250;
@@ -554,15 +571,8 @@ impl CaptureStore {
             .bytes
             .checked_add(bytes.len() as u64)
             .context("capture byte count overflow")?;
-        let oversized_reason = match capture.metadata.resource_type.as_str() {
-            "WebSocketFrame" if next_bytes > MAX_WEBSOCKET_FRAME_BYTES => {
-                Some("websocket_text_frame_too_large")
-            }
-            "EventSourceMessage" if next_bytes > MAX_EVENTSOURCE_MESSAGE_BYTES => {
-                Some("eventsource_message_too_large")
-            }
-            _ => None,
-        };
+        let oversized_reason =
+            capture_size_suppression_reason(&capture.metadata.resource_type, next_bytes);
         if let Some(reason) = oversized_reason {
             capture.suppressed_reason = Some(reason.to_owned());
             capture.next_sequence = capture
@@ -4252,6 +4262,76 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn capture_size_limits_allow_exact_boundary_and_suppress_overflow() {
+        assert_eq!(
+            capture_size_suppression_reason("Fetch", MAX_RESPONSE_BODY_BYTES),
+            None
+        );
+        assert_eq!(
+            capture_size_suppression_reason("Fetch", MAX_RESPONSE_BODY_BYTES + 1),
+            Some("response_body_too_large")
+        );
+        assert_eq!(
+            capture_size_suppression_reason("WebSocketFrame", MAX_WEBSOCKET_FRAME_BYTES),
+            None
+        );
+        assert_eq!(
+            capture_size_suppression_reason(
+                "WebSocketFrame",
+                MAX_WEBSOCKET_FRAME_BYTES + 1,
+            ),
+            Some("websocket_text_frame_too_large")
+        );
+        assert_eq!(
+            capture_size_suppression_reason(
+                "EventSourceMessage",
+                MAX_EVENTSOURCE_MESSAGE_BYTES,
+            ),
+            None
+        );
+        assert_eq!(
+            capture_size_suppression_reason(
+                "EventSourceMessage",
+                MAX_EVENTSOURCE_MESSAGE_BYTES + 1,
+            ),
+            Some("eventsource_message_too_large")
+        );
+    }
+
+    #[test]
+    fn oversized_response_is_suppressed_before_cas() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let item = metadata(
+            "response-too-large",
+            "https://chatgpt.com/backend-api/large-fixture",
+            "Fetch",
+        );
+        store.begin(item).unwrap();
+
+        {
+            let capture = store.in_flight.get_mut("response-too-large").unwrap();
+            capture.bytes = MAX_RESPONSE_BODY_BYTES;
+        }
+        store
+            .append_chunk(
+                "response-too-large",
+                0,
+                &BASE64.encode(b"x"),
+            )
+            .unwrap();
+        store.finish("response-too-large", None, None).unwrap();
+
+        let capture = store.recent_captures(10).unwrap().pop().unwrap();
+        assert_eq!(capture.body_hash, None);
+        assert_eq!(capture.body_bytes, 0);
+        assert_eq!(
+            capture.body_error.as_deref(),
+            Some("suppressed:response_body_too_large")
+        );
     }
 
     #[test]
