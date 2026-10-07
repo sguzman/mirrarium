@@ -5,6 +5,8 @@ const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
+const CDP_MAX_TOTAL_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_JSON_FRAME_BYTES = 1024 * 1024;
 const MAX_EVENTSOURCE_MESSAGE_BYTES = 1024 * 1024;
 const RUNNING_BUILD_ID =
@@ -939,7 +941,10 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
   try {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
     debuggerAttached = true;
-    await chrome.debugger.sendCommand({ tabId }, "Network.enable");
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", {
+      maxResourceBufferSize: CDP_MAX_RESOURCE_BUFFER_BYTES,
+      maxTotalBufferSize: CDP_MAX_TOTAL_BUFFER_BYTES,
+    });
     fetchSetupTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Fetch.enable", {
       patterns: [
