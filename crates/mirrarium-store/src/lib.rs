@@ -5715,6 +5715,12 @@ mod tests {
         drop(plain);
         assert!(database_has_plaintext_sqlite_header(&ledger).unwrap());
 
+        let identity_writer = CaptureStore::open(directory.path()).unwrap();
+        let archive_id_before = archive_identity(directory.path()).unwrap();
+        drop(identity_writer);
+        assert!(valid_archive_id(&archive_id_before));
+        assert!(database_has_plaintext_sqlite_header(&ledger).unwrap());
+
         let report = migrate_private_storage(directory.path()).unwrap();
         assert!(report.ledger_migrated);
         assert!(!report.ledger_already_encrypted);
@@ -5731,6 +5737,10 @@ mod tests {
             .unwrap();
         assert_eq!(version, 7);
         drop(encrypted);
+        assert_eq!(
+            archive_identity(directory.path()).unwrap(),
+            archive_id_before
+        );
 
         let second = migrate_private_storage(directory.path()).unwrap();
         assert!(!second.ledger_migrated);
