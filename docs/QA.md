@@ -53,7 +53,7 @@ The fixture deliberately exercises the current production boundaries rather than
 - streaming SSE plus long-lived EventSource messages and reconnects;
 - WebSocket sent/received JSON, plain-text, binary, and oversized-frame boundaries;
 - encrypted raw ledger/private CAS/derived corpus checks;
-- corpus rebuild, transport-derived views, reconnect edges, whole-corpus `corpus verify`, failed-rebuild preservation, and stale crash-staging recovery;
+- corpus rebuild, transport-derived views, reconnect edges, whole-corpus `corpus verify`, failed-rebuild preservation, stale crash-staging recovery, and native-host kill/restart proof that preserves a committed SQLCipher/WAL capture while purging only an abandoned in-flight capture;
 - stable installed-extension update/reload behavior in disposable Chromium.
 
 The suite therefore proves classification, privacy-scoped deduplication, failure semantics, replay/revalidation safety, transport evidence boundaries, encrypted persistence, derived-corpus integrity, and browser deployment lifecycle without using a real ChatGPT account.

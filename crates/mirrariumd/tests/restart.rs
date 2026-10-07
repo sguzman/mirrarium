@@ -120,6 +120,33 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
     let key_path = root.join("private.key");
 
     let mut first = NativeHost::spawn(root, &key_path);
+
+    expect_ack(
+        first.send(&HostRequest::CaptureStart {
+            metadata: metadata(
+                "committed-before-crash",
+                "https://chatgpt.com/backend-api/committed-before-crash",
+            ),
+        }),
+        "committed-before-crash",
+    );
+    let committed_body = br#"{"committed":true}"#;
+    expect_ack(
+        first.send(&HostRequest::CaptureChunk {
+            capture_id: "committed-before-crash".to_owned(),
+            sequence: 0,
+            data_base64: BASE64.encode(committed_body),
+        }),
+        "committed-before-crash",
+    );
+    expect_ack(
+        first.send(&HostRequest::CaptureFinish {
+            capture_id: "committed-before-crash".to_owned(),
+            encoded_data_length: Some(committed_body.len() as u64),
+            body_error: None,
+        }),
+        "committed-before-crash",
+    );
     expect_ack(
         first.send(&HostRequest::CaptureStart {
             metadata: metadata(
@@ -198,9 +225,12 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
     );
     let stats: serde_json::Value =
         serde_json::from_slice(&stats_output.stdout).expect("parse recovered stats");
-    assert_eq!(stats["captures"], 1);
-    assert_eq!(stats["private_captures"], 1);
-    assert_eq!(stats["private_objects"], 1);
+    assert_eq!(stats["captures"], 2);
+    assert_eq!(stats["private_captures"], 2);
+    assert_eq!(stats["private_objects"], 2);
     assert_eq!(stats["body_errors"], 0);
-    assert_eq!(stats["captured_body_bytes"], recovered_body.len() as u64);
+    assert_eq!(
+        stats["captured_body_bytes"],
+        (committed_body.len() + recovered_body.len()) as u64
+    );
 }
