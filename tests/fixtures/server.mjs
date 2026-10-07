@@ -120,6 +120,11 @@ Promise.all([
       access_token: requestSecret,
     }),
   }).then((response) => response.json()),
+  fetch("/backend-api/oversized-request-fixture", {
+    method: "POST",
+    headers: { "content-type": "text/plain; charset=utf-8" },
+    body: "x".repeat(16 * 1024 * 1024 + 1),
+  }).then((response) => response.json()),
   fetch("/backend-api/conversation/stream").then((response) => response.text()),
   fetch("/backend-api/conversation/stream-tail")
     .then((response) => response.json())
@@ -726,6 +731,24 @@ const fixtureServer = https.createServer(
       response.write("event: message\n");
       response.write('data: {"conversation_id":"fixture-stream","delta":" world"}\n\n');
       response.end("data: [DONE]\n\n");
+      return;
+    }
+
+    if (
+      request.url === "/backend-api/oversized-request-fixture" &&
+      request.method === "POST"
+    ) {
+      let receivedBytes = 0;
+      request.on("data", (chunk) => {
+        receivedBytes += chunk.length;
+      });
+      request.on("end", () => {
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end(JSON.stringify({ ok: true, received_bytes: receivedBytes }));
+      });
       return;
     }
 

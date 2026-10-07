@@ -1347,6 +1347,20 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(requestHeaders["x-mirrarium-fixture"]).toBe("preserve-me");
       expect(responseHeaders["x-mirrarium-response"]).toBe("preserve-me-too");
 
+      const oversizedRequestCapture = captures.find(
+        (capture) =>
+          capture.method === "POST" &&
+          capture.url.includes("/backend-api/oversized-request-fixture"),
+      );
+      expect(oversizedRequestCapture).toBeTruthy();
+      expect(oversizedRequestCapture?.request_body_hash).toBeFalsy();
+      expect(oversizedRequestCapture?.request_body_bytes).toBe(0);
+      expect(oversizedRequestCapture?.request_body_error).toBe(
+        "suppressed:request_body_too_large",
+      );
+      expect(oversizedRequestCapture?.body_hash).toBeTruthy();
+      expect(oversizedRequestCapture?.body_error).toBeFalsy();
+
       const redirectStart = captures.find(
         (capture) =>
           capture.status === 302 &&
