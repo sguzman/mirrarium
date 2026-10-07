@@ -4580,6 +4580,57 @@ mod tests {
     }
 
     #[test]
+    fn raw_snapshot_stays_stable_while_wal_writer_appends() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("raw.sqlite3");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                r#"
+                PRAGMA journal_mode = WAL;
+                CREATE TABLE captures (
+                    capture_id TEXT PRIMARY KEY,
+                    captured_at_ms INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    privacy_class TEXT NOT NULL,
+                    body_hash TEXT,
+                    mime_type TEXT NOT NULL,
+                    resource_type TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO captures (capture_id, captured_at_ms, url, privacy_class, body_hash, mime_type, resource_type) VALUES ('a', 1, 'https://chatgpt.com/a', 'private', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'application/json', 'Fetch')",
+                [],
+            )
+            .unwrap();
+
+        let mut reader = Connection::open(&database).unwrap();
+        let snapshot = reader.transaction().unwrap();
+        let query = r#"
+            SELECT capture_id, url, privacy_class, body_hash
+            FROM captures
+            WHERE body_hash IS NOT NULL
+              AND lower(mime_type) LIKE '%json%'
+            ORDER BY captured_at_ms, capture_id
+        "#;
+        assert_eq!(collect_sources(&snapshot, query).unwrap().len(), 1);
+
+        writer
+            .execute(
+                "INSERT INTO captures (capture_id, captured_at_ms, url, privacy_class, body_hash, mime_type, resource_type) VALUES ('b', 2, 'https://chatgpt.com/b', 'private', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'application/json', 'Fetch')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(collect_sources(&snapshot, query).unwrap().len(), 1);
+        snapshot.commit().unwrap();
+        assert_eq!(collect_sources(&reader, query).unwrap().len(), 2);
+    }
+
+    #[test]
     fn corpus_rebuild_lock_excludes_competing_writer_and_recovers_after_drop() {
         let directory = tempfile::tempdir().unwrap();
         let derived_root = directory.path().join("derived");
