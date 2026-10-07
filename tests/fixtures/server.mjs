@@ -379,7 +379,7 @@ const fixtureServer = https.createServer(
     if (request.url === "/backend-api/conversation/sync-new") {
       response.writeHead(200, {
         "content-type": "application/json",
-        etag: ""fixture-sync-new-v1"",
+        etag: '"fixture-sync-new-v1"',
       });
       response.end(JSON.stringify({
         id: "fixture-sync-new",
