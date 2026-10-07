@@ -16,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-const CORPUS_SCHEMA_VERSION: i64 = 4;
+const CORPUS_SCHEMA_VERSION: i64 = 5;
 pub const CORPUS_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-conversation-v1.schema.json");
@@ -510,6 +510,7 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
         DROP TABLE IF EXISTS eventsource_events;
         DROP TABLE IF EXISTS eventsource_streams;
         DROP TABLE IF EXISTS eventsource_skipped_captures;
+        DROP TABLE IF EXISTS conversation_export_index;
         DROP TABLE IF EXISTS attachment_downloads;
         DROP TABLE IF EXISTS attachment_observations;
         DROP TABLE IF EXISTS message_observations;
@@ -621,6 +622,12 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
             FOREIGN KEY (attachment_capture_id, attachment_sequence)
                 REFERENCES attachment_observations(capture_id, sequence)
                 ON DELETE CASCADE
+        );
+
+        CREATE TABLE conversation_export_index (
+            conversation_id TEXT PRIMARY KEY,
+            record_sha256 TEXT NOT NULL
+                CHECK(length(record_sha256) = 64)
         );
 
         CREATE TABLE stream_reconstructions (
@@ -758,6 +765,12 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
 
     transaction.commit()?;
 
+    materialize_conversation_export_index(
+        raw_root,
+        &mut corpus,
+        &raw_snapshot,
+    )?;
+
     let report = verify_corpus_connections(&corpus, &raw_snapshot)?;
     anyhow::ensure!(
         report.sqlite_integrity_ok
@@ -766,6 +779,13 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
         "staged derived corpus verification failed: {} foreign-key violation(s), {} semantic error(s)",
         report.foreign_key_violations,
         report.errors.len()
+    );
+    let export_index_errors =
+        verify_materialized_conversation_export_index(raw_root, &corpus, &raw_snapshot)?;
+    anyhow::ensure!(
+        export_index_errors.is_empty(),
+        "staged derived corpus export index verification failed: {}",
+        export_index_errors.join("; ")
     );
     let stats = corpus_stats_from_connection(&corpus)?;
     raw_snapshot
@@ -846,9 +866,14 @@ fn corpus_stats_from_connection(connection: &Connection) -> Result<CorpusStats> 
 }
 
 pub fn verify(raw_root: impl AsRef<Path>) -> Result<CorpusVerifyReport> {
-    let corpus = open_corpus_read_only(raw_root.as_ref())?;
-    let raw = open_raw_ledger_read_only(raw_root.as_ref())?;
-    verify_corpus_connections(&corpus, &raw)
+    let raw_root = raw_root.as_ref();
+    let corpus = open_corpus_read_only(raw_root)?;
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    let mut report = verify_corpus_connections(&corpus, &raw)?;
+    report.errors.extend(
+        verify_materialized_conversation_export_index(raw_root, &corpus, &raw)?,
+    );
+    Ok(report)
 }
 
 pub fn streams(
@@ -1465,6 +1490,97 @@ fn conversation_export_record_sha256(
     let bytes = serde_json::to_vec(payload)
         .context("serializing corpus export hash payload")?;
     Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+fn materialize_conversation_export_index(
+    raw_root: &Path,
+    corpus: &mut Connection,
+    raw: &Connection,
+) -> Result<()> {
+    let transaction = corpus.transaction()?;
+    let conversation_ids = conversation_ids_for_connection(&transaction, -1)?;
+
+    for conversation_id in conversation_ids {
+        let record = conversation_export_record_for_connections(
+            raw_root,
+            &transaction,
+            raw,
+            conversation_id.clone(),
+        )?;
+        transaction.execute(
+            r#"
+            INSERT INTO conversation_export_index (
+                conversation_id,
+                record_sha256
+            ) VALUES (?1, ?2)
+            "#,
+            params![conversation_id, record.record_sha256],
+        )?;
+    }
+
+    transaction.commit()?;
+    Ok(())
+}
+
+fn verify_materialized_conversation_export_index(
+    raw_root: &Path,
+    corpus: &Connection,
+    raw: &Connection,
+) -> Result<Vec<String>> {
+    let expected_ids = conversation_ids_for_connection(corpus, -1)?;
+    let mut statement = corpus.prepare(
+        r#"
+        SELECT conversation_id, record_sha256
+        FROM conversation_export_index
+        ORDER BY conversation_id
+        "#,
+    )?;
+    let indexed = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut errors = Vec::new();
+    let indexed_ids: Vec<String> = indexed
+        .iter()
+        .map(|(conversation_id, _)| conversation_id.clone())
+        .collect();
+    if indexed_ids != expected_ids {
+        errors.push(format!(
+            "conversation export index ids disagree with derived conversation universe: index={indexed_ids:?}, expected={expected_ids:?}"
+        ));
+    }
+
+    for (conversation_id, record_sha256) in indexed {
+        if !valid_sha256_hex(&record_sha256) {
+            errors.push(format!(
+                "conversation export index {conversation_id:?} has invalid SHA-256 {record_sha256:?}"
+            ));
+            continue;
+        }
+        if !expected_ids.binary_search(&conversation_id).is_ok() {
+            continue;
+        }
+
+        match conversation_export_record_for_connections(
+            raw_root,
+            corpus,
+            raw,
+            conversation_id.clone(),
+        ) {
+            Ok(record) if record.record_sha256 == record_sha256 => {}
+            Ok(record) => errors.push(format!(
+                "conversation export index {conversation_id:?} hash {record_sha256} disagrees with rebuilt v1 record {}",
+                record.record_sha256
+            )),
+            Err(error) => errors.push(format!(
+                "conversation export index {conversation_id:?} could not rebuild v1 record: {error:#}"
+            )),
+        }
+    }
+
+    Ok(errors)
 }
 
 fn conversation_export_record_for_connections(
@@ -3416,6 +3532,7 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         "stream_reconstructions",
         "attachment_observations",
         "attachment_downloads",
+        "conversation_export_index",
         "websocket_streams",
         "websocket_frames",
         "websocket_skipped_captures",
