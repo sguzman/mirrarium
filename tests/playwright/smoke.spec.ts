@@ -2499,6 +2499,25 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         createHash("sha256").update(corpusExportIndexStdout).digest("hex"),
       );
 
+      let emptyDeltaInputRejected = false;
+      try {
+        await execFileWithInput(
+          cliPath,
+          ["corpus", "export-delta"],
+          "",
+          {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        );
+      } catch (error) {
+        emptyDeltaInputRejected = true;
+        expect(String(error)).toContain(
+          "requires a sync-state JSON object on stdin",
+        );
+      }
+      expect(emptyDeltaInputRejected).toBe(true);
+
       const emptySyncState = {
         schema: "mirrarium.corpus.sync-state",
         schema_version: 1,
