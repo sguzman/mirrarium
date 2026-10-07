@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:consumer-requirements:v1",
+  "title": "Mirrarium corpus consumer requirements v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "record_type",
+    "wire_versions",
+    "accepted_record_hash_algorithms",
+    "accepted_index_hash_algorithms",
+    "source_bound_sync",
+    "require_fresh_sync",
+    "min_sync_state_max_bytes",
+    "min_sync_checkpoint_input_max_bytes"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.consumer-requirements" },
+    "schema_version": { "const": 1 },
+    "record_type": { "const": "consumer-requirements" },
+    "wire_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "conversation": { "$ref": "#/$defs/versionSet" },
+        "conversation_index": { "$ref": "#/$defs/versionSet" },
+        "export_manifest": { "$ref": "#/$defs/versionSet" },
+        "export_source": { "$ref": "#/$defs/versionSet" },
+        "export_status": { "$ref": "#/$defs/versionSet" },
+        "capabilities": { "$ref": "#/$defs/versionSet" },
+        "sync_state": { "$ref": "#/$defs/versionSet" },
+        "sync_checkpoint": { "$ref": "#/$defs/versionSet" },
+        "sync_delta": { "$ref": "#/$defs/versionSet" },
+        "sync_transaction": { "$ref": "#/$defs/versionSet" },
+        "schema_bundle": { "$ref": "#/$defs/versionSet" }
+      }
+    },
+    "accepted_record_hash_algorithms": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "accepted_index_hash_algorithms": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "source_bound_sync": { "type": "boolean" },
+    "require_fresh_sync": { "type": "boolean" },
+    "min_sync_state_max_bytes": { "type": "integer", "minimum": 1 },
+    "min_sync_checkpoint_input_max_bytes": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "versionSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1 }
+    }
+  }
+}

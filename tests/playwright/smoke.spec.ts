@@ -2697,6 +2697,146 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         JSON.stringify(validateBundledCapabilities?.errors),
       ).toBe(true);
 
+      const { stdout: consumerRequirementsSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-consumer-requirements-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const consumerRequirementsSchema = JSON.parse(
+        consumerRequirementsSchemaStdout,
+      );
+      const validateConsumerRequirements = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(consumerRequirementsSchema);
+
+      const { stdout: compatibilitySchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-compatibility-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const compatibilitySchema = JSON.parse(compatibilitySchemaStdout);
+      const compatibilityAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      compatibilityAjv.addSchema(corpusCapabilitiesSchema);
+      compatibilityAjv.addSchema(consumerRequirementsSchema);
+      const validateCompatibility = compatibilityAjv.compile(
+        compatibilitySchema,
+      );
+
+      const consumerRequirements = {
+        schema: "mirrarium.corpus.consumer-requirements",
+        schema_version: 1,
+        record_type: "consumer-requirements",
+        wire_versions: {
+          conversation: [1],
+          sync_checkpoint: [1],
+          sync_delta: [1],
+          sync_transaction: [1],
+        },
+        accepted_record_hash_algorithms: ["sha256"],
+        accepted_index_hash_algorithms: ["sha256"],
+        source_bound_sync: true,
+        require_fresh_sync: true,
+        min_sync_state_max_bytes: 64 * 1024 * 1024,
+        min_sync_checkpoint_input_max_bytes: 65 * 1024 * 1024,
+      };
+      expect(
+        validateConsumerRequirements(consumerRequirements),
+        JSON.stringify(validateConsumerRequirements.errors),
+      ).toBe(true);
+      const { stdout: compatibleStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-negotiate"],
+        JSON.stringify(consumerRequirements),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const compatibility = JSON.parse(compatibleStdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        archive_id: string;
+        compatible: boolean;
+        requirements: typeof consumerRequirements;
+        capabilities: typeof corpusCapabilities;
+        mismatches: Array<{ code: string; field: string }>;
+      };
+      expect(
+        validateCompatibility(compatibility),
+        JSON.stringify(validateCompatibility.errors),
+      ).toBe(true);
+      expect(compatibility).toMatchObject({
+        schema: "mirrarium.corpus.compatibility",
+        schema_version: 1,
+        record_type: "compatibility",
+        archive_id: exportSource.archive_id,
+        compatible: true,
+        requirements: consumerRequirements,
+        capabilities: corpusCapabilities,
+        mismatches: [],
+      });
+
+      const incompatibleRequirements = {
+        ...consumerRequirements,
+        wire_versions: {
+          ...consumerRequirements.wire_versions,
+          sync_transaction: [999],
+        },
+        accepted_record_hash_algorithms: ["sha512"],
+        min_sync_state_max_bytes: 64 * 1024 * 1024 + 1,
+      };
+      const incompatibleResult = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-negotiate"],
+        JSON.stringify(incompatibleRequirements),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(incompatibleResult.code).not.toBe(0);
+      const incompatibleCompatibility = JSON.parse(incompatibleResult.stdout) as {
+        compatible: boolean;
+        mismatches: Array<{ code: string; field: string }>;
+      };
+      expect(
+        validateCompatibility(JSON.parse(incompatibleResult.stdout)),
+        JSON.stringify(validateCompatibility.errors),
+      ).toBe(true);
+      expect(incompatibleCompatibility.compatible).toBe(false);
+      expect(incompatibleCompatibility.mismatches).toEqual([
+        expect.objectContaining({
+          code: "unsupported_wire_version",
+          field: "wire_versions.sync_transaction",
+        }),
+        expect.objectContaining({
+          code: "unsupported_record_hash_algorithm",
+          field: "record_hash_algorithm",
+        }),
+        expect.objectContaining({
+          code: "insufficient_limit",
+          field: "limits.sync_state_max_bytes",
+        }),
+      ]);
+      expect(incompatibleResult.stderr).toContain(
+        "consumer requirements are incompatible",
+      );
+
       const { stdout: corpusExportManifestSchemaStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-manifest-schema"],

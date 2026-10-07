@@ -95,6 +95,8 @@ mirrarium corpus export-index-schema
 mirrarium corpus export-manifest-schema
 mirrarium corpus export-status-schema
 mirrarium corpus export-capabilities-schema
+mirrarium corpus export-consumer-requirements-schema
+mirrarium corpus export-compatibility-schema
 mirrarium corpus export-sync-state-schema
 mirrarium corpus export-sync-checkpoint-schema
 mirrarium corpus export-sync-schema
@@ -104,6 +106,7 @@ mirrarium corpus export-sync-state
 mirrarium corpus export-delta-schema
 mirrarium corpus export-delta
 mirrarium corpus export-capabilities
+mirrarium corpus export-negotiate
 mirrarium corpus export-source
 mirrarium corpus export-manifest
 mirrarium corpus export-status

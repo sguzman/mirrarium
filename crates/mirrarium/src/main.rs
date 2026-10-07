@@ -22,6 +22,8 @@ const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = corpus::CORPUS_SYNC_STATE_MAX_BYTES;
 const MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES: u64 =
     corpus::CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES;
+const MAX_CORPUS_CONSUMER_REQUIREMENTS_INPUT_BYTES: u64 =
+    corpus::CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES;
 
 struct BoundedBuffer {
     bytes: Vec<u8>,
@@ -366,6 +368,18 @@ fn run() -> Result<()> {
                     "writing corpus capabilities schema",
                 )?;
             }
+            Some("export-consumer-requirements-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus consumer-requirements schema",
+                )?;
+            }
+            Some("export-compatibility-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_COMPATIBILITY_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus compatibility schema",
+                )?;
+            }
             Some("export-sync-state-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON.as_bytes(),
@@ -474,6 +488,32 @@ fn run() -> Result<()> {
                         .context("serializing corpus interop capabilities")?,
                     "writing corpus interop capabilities",
                 )?;
+            }
+            Some("export-negotiate") => {
+                let input = read_bounded_utf8_input(
+                    std::io::stdin().lock(),
+                    MAX_CORPUS_CONSUMER_REQUIREMENTS_INPUT_BYTES,
+                )
+                .context("reading corpus consumer requirements from stdin")?;
+                anyhow::ensure!(
+                    !input.trim().is_empty(),
+                    "corpus export-negotiate requires a consumer-requirements JSON object on stdin"
+                );
+                let requirements: corpus::CorpusConsumerRequirements =
+                    serde_json::from_str(&input)
+                        .context("parsing corpus consumer-requirements JSON")?;
+                let compatibility = corpus::interop_compatibility(&root, requirements)?;
+                let compatible = compatibility.compatible;
+                let mismatch_count = compatibility.mismatches.len();
+                write_stdout_json_line(
+                    serde_json::to_vec(&compatibility)
+                        .context("serializing corpus compatibility result")?,
+                    "writing corpus compatibility result",
+                )?;
+                anyhow::ensure!(
+                    compatible,
+                    "consumer requirements are incompatible with this Mirrarium producer ({mismatch_count} mismatch(es))"
+                );
             }
             Some("export-source") => {
                 let source = corpus::export_source(&root)?;
@@ -1632,6 +1672,8 @@ USAGE:
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-status-schema
   mirrarium corpus export-capabilities-schema
+  mirrarium corpus export-consumer-requirements-schema
+  mirrarium corpus export-compatibility-schema
   mirrarium corpus export-sync-state-schema
   mirrarium corpus export-sync-checkpoint-schema
   mirrarium corpus export-sync-schema
@@ -1641,6 +1683,7 @@ USAGE:
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta
   mirrarium corpus export-capabilities
+  mirrarium corpus export-negotiate
   mirrarium corpus export-source
   mirrarium corpus export-manifest
   mirrarium corpus export-status

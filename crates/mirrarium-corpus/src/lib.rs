@@ -17,7 +17,7 @@ use serde::{
     de::{self, MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -40,6 +40,13 @@ pub const CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON: &str =
 pub const CORPUS_CAPABILITIES_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_CAPABILITIES_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-capabilities-v1.schema.json");
+pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-consumer-requirements-v1.schema.json");
+pub const CORPUS_COMPATIBILITY_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_COMPATIBILITY_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-compatibility-v1.schema.json");
+pub const CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES: u64 = 64 * 1024;
 pub const CORPUS_SYNC_STATE_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_STATE_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-state-v1.schema.json");
@@ -123,6 +130,305 @@ pub fn interop_capabilities(
         index_hash_algorithm: "sha256".to_owned(),
         source_bound_sync: true,
         require_fresh_sync: true,
+    })
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CorpusAcceptedWireVersions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_index: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_manifest: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_source: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_status: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_state: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_checkpoint: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_delta: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_transaction: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_bundle: Option<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorpusConsumerRequirements {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub wire_versions: CorpusAcceptedWireVersions,
+    pub accepted_record_hash_algorithms: Vec<String>,
+    pub accepted_index_hash_algorithms: Vec<String>,
+    pub source_bound_sync: bool,
+    pub require_fresh_sync: bool,
+    pub min_sync_state_max_bytes: u64,
+    pub min_sync_checkpoint_input_max_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusCompatibilityMismatch {
+    pub code: String,
+    pub field: String,
+    pub required: Value,
+    pub actual: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropCompatibility {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
+    pub compatible: bool,
+    pub requirements: CorpusConsumerRequirements,
+    pub capabilities: CorpusInteropCapabilities,
+    pub mismatches: Vec<CorpusCompatibilityMismatch>,
+}
+
+pub fn interop_compatibility(
+    raw_root: impl AsRef<Path>,
+    requirements: CorpusConsumerRequirements,
+) -> Result<CorpusInteropCompatibility> {
+    let capabilities = interop_capabilities(raw_root)?;
+    evaluate_interop_compatibility(capabilities, requirements)
+}
+
+fn validate_accepted_versions(field: &str, values: &Option<Vec<u32>>) -> Result<()> {
+    let Some(values) = values else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !values.is_empty(),
+        "{field} accepted-version list must not be empty"
+    );
+    anyhow::ensure!(
+        values.iter().all(|value| *value > 0),
+        "{field} accepted versions must be positive integers"
+    );
+    let unique = values.iter().copied().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        unique.len() == values.len(),
+        "{field} accepted-version list contains duplicates"
+    );
+    Ok(())
+}
+
+fn validate_algorithm_list(field: &str, values: &[String]) -> Result<()> {
+    anyhow::ensure!(!values.is_empty(), "{field} must not be empty");
+    anyhow::ensure!(
+        values.iter().all(|value| !value.trim().is_empty()),
+        "{field} contains an empty algorithm name"
+    );
+    let unique = values.iter().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        unique.len() == values.len(),
+        "{field} contains duplicate algorithm names"
+    );
+    Ok(())
+}
+
+fn validate_consumer_requirements(requirements: &CorpusConsumerRequirements) -> Result<()> {
+    anyhow::ensure!(
+        requirements.schema == "mirrarium.corpus.consumer-requirements",
+        "consumer requirements schema must be \"mirrarium.corpus.consumer-requirements\""
+    );
+    anyhow::ensure!(
+        requirements.schema_version == CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_VERSION,
+        "unsupported consumer requirements schema version {}",
+        requirements.schema_version
+    );
+    anyhow::ensure!(
+        requirements.record_type == "consumer-requirements",
+        "consumer requirements record_type must be \"consumer-requirements\""
+    );
+
+    let versions = &requirements.wire_versions;
+    for (field, values) in [
+        ("wire_versions.conversation", &versions.conversation),
+        ("wire_versions.conversation_index", &versions.conversation_index),
+        ("wire_versions.export_manifest", &versions.export_manifest),
+        ("wire_versions.export_source", &versions.export_source),
+        ("wire_versions.export_status", &versions.export_status),
+        ("wire_versions.capabilities", &versions.capabilities),
+        ("wire_versions.sync_state", &versions.sync_state),
+        ("wire_versions.sync_checkpoint", &versions.sync_checkpoint),
+        ("wire_versions.sync_delta", &versions.sync_delta),
+        ("wire_versions.sync_transaction", &versions.sync_transaction),
+        ("wire_versions.schema_bundle", &versions.schema_bundle),
+    ] {
+        validate_accepted_versions(field, values)?;
+    }
+    validate_algorithm_list(
+        "accepted_record_hash_algorithms",
+        &requirements.accepted_record_hash_algorithms,
+    )?;
+    validate_algorithm_list(
+        "accepted_index_hash_algorithms",
+        &requirements.accepted_index_hash_algorithms,
+    )?;
+    anyhow::ensure!(
+        requirements.min_sync_state_max_bytes > 0,
+        "min_sync_state_max_bytes must be greater than zero"
+    );
+    anyhow::ensure!(
+        requirements.min_sync_checkpoint_input_max_bytes > 0,
+        "min_sync_checkpoint_input_max_bytes must be greater than zero"
+    );
+    Ok(())
+}
+
+fn compare_wire_version(
+    mismatches: &mut Vec<CorpusCompatibilityMismatch>,
+    field: &str,
+    accepted: &Option<Vec<u32>>,
+    actual: u32,
+) {
+    let Some(accepted) = accepted else {
+        return;
+    };
+    if !accepted.contains(&actual) {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "unsupported_wire_version".to_owned(),
+            field: field.to_owned(),
+            required: json!(accepted),
+            actual: json!(actual),
+        });
+    }
+}
+
+fn evaluate_interop_compatibility(
+    capabilities: CorpusInteropCapabilities,
+    requirements: CorpusConsumerRequirements,
+) -> Result<CorpusInteropCompatibility> {
+    validate_consumer_requirements(&requirements)?;
+
+    let mut mismatches = Vec::new();
+    let versions = &requirements.wire_versions;
+    let actual = &capabilities.wire_versions;
+    for (field, accepted, actual_version) in [
+        ("wire_versions.conversation", &versions.conversation, actual.conversation),
+        (
+            "wire_versions.conversation_index",
+            &versions.conversation_index,
+            actual.conversation_index,
+        ),
+        (
+            "wire_versions.export_manifest",
+            &versions.export_manifest,
+            actual.export_manifest,
+        ),
+        (
+            "wire_versions.export_source",
+            &versions.export_source,
+            actual.export_source,
+        ),
+        (
+            "wire_versions.export_status",
+            &versions.export_status,
+            actual.export_status,
+        ),
+        (
+            "wire_versions.capabilities",
+            &versions.capabilities,
+            actual.capabilities,
+        ),
+        ("wire_versions.sync_state", &versions.sync_state, actual.sync_state),
+        (
+            "wire_versions.sync_checkpoint",
+            &versions.sync_checkpoint,
+            actual.sync_checkpoint,
+        ),
+        ("wire_versions.sync_delta", &versions.sync_delta, actual.sync_delta),
+        (
+            "wire_versions.sync_transaction",
+            &versions.sync_transaction,
+            actual.sync_transaction,
+        ),
+        (
+            "wire_versions.schema_bundle",
+            &versions.schema_bundle,
+            actual.schema_bundle,
+        ),
+    ] {
+        compare_wire_version(&mut mismatches, field, accepted, actual_version);
+    }
+
+    if !requirements
+        .accepted_record_hash_algorithms
+        .contains(&capabilities.record_hash_algorithm)
+    {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "unsupported_record_hash_algorithm".to_owned(),
+            field: "record_hash_algorithm".to_owned(),
+            required: json!(requirements.accepted_record_hash_algorithms),
+            actual: json!(capabilities.record_hash_algorithm),
+        });
+    }
+    if !requirements
+        .accepted_index_hash_algorithms
+        .contains(&capabilities.index_hash_algorithm)
+    {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "unsupported_index_hash_algorithm".to_owned(),
+            field: "index_hash_algorithm".to_owned(),
+            required: json!(requirements.accepted_index_hash_algorithms),
+            actual: json!(capabilities.index_hash_algorithm),
+        });
+    }
+    if requirements.source_bound_sync && !capabilities.source_bound_sync {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "missing_feature".to_owned(),
+            field: "source_bound_sync".to_owned(),
+            required: json!(true),
+            actual: json!(false),
+        });
+    }
+    if requirements.require_fresh_sync && !capabilities.require_fresh_sync {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "missing_feature".to_owned(),
+            field: "require_fresh_sync".to_owned(),
+            required: json!(true),
+            actual: json!(false),
+        });
+    }
+    if capabilities.limits.sync_state_max_bytes < requirements.min_sync_state_max_bytes {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "insufficient_limit".to_owned(),
+            field: "limits.sync_state_max_bytes".to_owned(),
+            required: json!(requirements.min_sync_state_max_bytes),
+            actual: json!(capabilities.limits.sync_state_max_bytes),
+        });
+    }
+    if capabilities.limits.sync_checkpoint_input_max_bytes
+        < requirements.min_sync_checkpoint_input_max_bytes
+    {
+        mismatches.push(CorpusCompatibilityMismatch {
+            code: "insufficient_limit".to_owned(),
+            field: "limits.sync_checkpoint_input_max_bytes".to_owned(),
+            required: json!(requirements.min_sync_checkpoint_input_max_bytes),
+            actual: json!(capabilities.limits.sync_checkpoint_input_max_bytes),
+        });
+    }
+
+    Ok(CorpusInteropCompatibility {
+        schema: "mirrarium.corpus.compatibility".to_owned(),
+        schema_version: CORPUS_COMPATIBILITY_SCHEMA_VERSION,
+        record_type: "compatibility".to_owned(),
+        archive_id: capabilities.archive_id.clone(),
+        compatible: mismatches.is_empty(),
+        requirements,
+        capabilities,
+        mismatches,
     })
 }
 
@@ -6330,6 +6636,94 @@ fn harden_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_interop_capabilities() -> CorpusInteropCapabilities {
+        CorpusInteropCapabilities {
+            schema: "mirrarium.corpus.capabilities".to_owned(),
+            schema_version: CORPUS_CAPABILITIES_SCHEMA_VERSION,
+            record_type: "capabilities".to_owned(),
+            archive_id: "a".repeat(64),
+            producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+            wire_versions: CorpusInteropWireVersions {
+                conversation: 1,
+                conversation_index: 1,
+                export_manifest: 1,
+                export_source: 1,
+                export_status: 1,
+                capabilities: 1,
+                sync_state: 1,
+                sync_checkpoint: 1,
+                sync_delta: 1,
+                sync_transaction: 1,
+                schema_bundle: 1,
+            },
+            limits: CorpusInteropLimits {
+                sync_state_max_bytes: CORPUS_SYNC_STATE_MAX_BYTES,
+                sync_checkpoint_input_max_bytes: CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES,
+            },
+            record_hash_algorithm: "sha256".to_owned(),
+            index_hash_algorithm: "sha256".to_owned(),
+            source_bound_sync: true,
+            require_fresh_sync: true,
+        }
+    }
+
+    fn fixture_consumer_requirements() -> CorpusConsumerRequirements {
+        CorpusConsumerRequirements {
+            schema: "mirrarium.corpus.consumer-requirements".to_owned(),
+            schema_version: 1,
+            record_type: "consumer-requirements".to_owned(),
+            wire_versions: CorpusAcceptedWireVersions {
+                conversation: Some(vec![1]),
+                sync_checkpoint: Some(vec![1]),
+                sync_delta: Some(vec![1]),
+                sync_transaction: Some(vec![1]),
+                ..Default::default()
+            },
+            accepted_record_hash_algorithms: vec!["sha256".to_owned()],
+            accepted_index_hash_algorithms: vec!["sha256".to_owned()],
+            source_bound_sync: true,
+            require_fresh_sync: true,
+            min_sync_state_max_bytes: CORPUS_SYNC_STATE_MAX_BYTES,
+            min_sync_checkpoint_input_max_bytes: CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES,
+        }
+    }
+
+    #[test]
+    fn interop_compatibility_accepts_supported_consumer_profile() {
+        let result = evaluate_interop_compatibility(
+            fixture_interop_capabilities(),
+            fixture_consumer_requirements(),
+        )
+        .unwrap();
+        assert!(result.compatible);
+        assert!(result.mismatches.is_empty());
+        assert_eq!(result.archive_id, "a".repeat(64));
+    }
+
+    #[test]
+    fn interop_compatibility_reports_deterministic_mismatches() {
+        let mut requirements = fixture_consumer_requirements();
+        requirements.wire_versions.sync_transaction = Some(vec![2, 3]);
+        requirements.accepted_record_hash_algorithms = vec!["sha512".to_owned()];
+        requirements.min_sync_state_max_bytes = CORPUS_SYNC_STATE_MAX_BYTES + 1;
+
+        let result =
+            evaluate_interop_compatibility(fixture_interop_capabilities(), requirements).unwrap();
+        assert!(!result.compatible);
+        assert_eq!(
+            result
+                .mismatches
+                .iter()
+                .map(|mismatch| (mismatch.code.as_str(), mismatch.field.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("unsupported_wire_version", "wire_versions.sync_transaction"),
+                ("unsupported_record_hash_algorithm", "record_hash_algorithm"),
+                ("insufficient_limit", "limits.sync_state_max_bytes"),
+            ]
+        );
+    }
 
     #[test]
     fn interop_schema_bundle_is_complete_and_deterministic() {

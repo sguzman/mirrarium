@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:compatibility:v1",
+  "title": "Mirrarium corpus compatibility result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "record_type",
+    "archive_id",
+    "compatible",
+    "requirements",
+    "capabilities",
+    "mismatches"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.compatibility" },
+    "schema_version": { "const": 1 },
+    "record_type": { "const": "compatibility" },
+    "archive_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "compatible": { "type": "boolean" },
+    "requirements": { "$ref": "urn:mirrarium:corpus:consumer-requirements:v1" },
+    "capabilities": { "$ref": "urn:mirrarium:corpus:capabilities:v1" },
+    "mismatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "field", "required", "actual"],
+        "properties": {
+          "code": {
+            "enum": [
+              "unsupported_wire_version",
+              "unsupported_record_hash_algorithm",
+              "unsupported_index_hash_algorithm",
+              "missing_feature",
+              "insufficient_limit"
+            ]
+          },
+          "field": { "type": "string", "minLength": 1 },
+          "required": true,
+          "actual": true
+        }
+      }
+    }
+  }
+}
