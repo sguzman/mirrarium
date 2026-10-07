@@ -88,6 +88,9 @@ mirrarium corpus verify
 mirrarium corpus export-schema
 mirrarium corpus export-index-schema
 mirrarium corpus export-manifest-schema
+mirrarium corpus export-sync-state-schema
+mirrarium corpus export-delta-schema
+mirrarium corpus export-delta
 mirrarium corpus export-manifest
 mirrarium corpus export-index [limit]
 mirrarium corpus export-one <conversation-id> [expected-record-sha256]
@@ -228,4 +231,4 @@ Chatarium owns the local conversation ecology.
 
 `mirrarium corpus export [limit]` is the first explicit bridge between them. It emits versioned JSONL, one conversation record per line in deterministic conversation-ID order, containing the derived evidence view, a canonical view when safely derivable, stream revisions, attachment/download provenance, and the raw capture IDs needed to drill back into Mirrarium. Canonical ambiguity remains explicit through warnings, while structural CAS/JSON/database failures abort export rather than being serialized as apparently valid records. The export does not expose Mirrarium's encrypted SQLite schema and does not add raw CAS payloads beyond content already present in the derived corpus. The CLI streams one record at a time under a pinned corpus generation, so exporting a large archive does not require first holding every conversation record in memory. Repeating the same export against an unchanged generation produces identical JSONL bytes.
 
-The v1 contract is documented in `docs/INTEROP.md`. Chatarium can consume that stream without independently crawling account history. The export stream is intentionally plaintext private data at the interoperability boundary; Mirrarium's SQLCipher/CAS at-rest encryption does not automatically extend to a pipe or redirected file.
+The v1 contract is documented in `docs/INTEROP.md`. Chatarium can consume that stream without independently crawling account history. For incremental import it can either use the manifest/index/`export-one` optimistic protocol or send its known ID→record-hash map to `mirrarium corpus export-delta` on stdin and receive one generation-pinned transaction containing only changed/new records plus explicit deletions. The export/delta stream is intentionally plaintext private data at the interoperability boundary; Mirrarium's SQLCipher/CAS at-rest encryption does not automatically extend to a pipe or redirected file.

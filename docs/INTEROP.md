@@ -56,6 +56,24 @@ The encrypted-at-rest guarantee ends at this explicit interoperability boundary:
 
 Canonicalization is not authoritative over evidence. Ambiguous or unsupported snapshot shapes remain explicit through the canonical view's `basis_kind` and warnings, and a conversation with no canonical snapshot simply exports `canonical: null`. Actual canonical read/decryption/JSON/database errors are structural failures and abort the export. They are never downgraded into `canonical_error` on an otherwise valid v1 record.
 
+## One-command delta synchronization
+
+`mirrarium corpus export-delta` is the direct consumer path for a local importer that can hold its known conversation hash map. It reads one sync-state JSON object from stdin and emits one sync-delta JSON object to stdout. The whole calculation holds a shared corpus-generation lock, so its manifest, upserts, and deletions all describe one published generation.
+
+The sync-state v1 contract is `schemas/mirrarium-corpus-sync-state-v1.schema.json` and is emitted by `mirrarium corpus export-sync-state-schema`:
+
+```json
+{"schema":"mirrarium.corpus.sync-state","schema_version":1,"records":{"conversation-id":"<record_sha256>"}}
+```
+
+For a first import, send an empty `records` object. For subsequent imports, `records` should describe the consumer's currently committed conversation state.
+
+The sync-delta v1 contract is `schemas/mirrarium-corpus-sync-delta-v1.schema.json` and is emitted by `mirrarium corpus export-delta-schema`. Its `manifest` is the authoritative manifest for the same pinned generation; `upserts` contains every current conversation whose hash is absent or different in the supplied state; and `deleted_conversation_ids` contains supplied IDs that no longer exist in the current export universe. Both arrays are deterministic in conversation-ID order.
+
+A consumer should apply the delta atomically: stage all `upserts`, remove the explicit deleted IDs, then persist the resulting ID→`record_sha256` map and the returned manifest fingerprint together. If the command fails, apply nothing. Because the entire response is generated under one shared generation lock, no second manifest recheck is needed for this one-command path.
+
+The sync-state request contains only conversation IDs and content hashes, but the delta response contains the same private derived conversation text as ordinary export records. Treat stdout as sensitive plaintext at the interoperability boundary.
+
 ## Incremental synchronization
 
 A downstream consumer can synchronize without re-ingesting unchanged conversation text while remaining safe against a rebuild between commands:
