@@ -182,6 +182,8 @@ fn capture_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Capture
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyReport {
+    pub sqlite_integrity_ok: bool,
+    pub foreign_key_violations: u64,
     pub checked_objects: u64,
     pub corrupt_objects: u64,
     pub unreferenced_indexed_objects: u64,
@@ -1368,6 +1370,8 @@ impl CaptureStore {
         })?;
 
         let mut report = VerifyReport {
+            sqlite_integrity_ok: true,
+            foreign_key_violations: 0,
             checked_objects: 0,
             corrupt_objects: 0,
             unreferenced_indexed_objects: 0,
@@ -1379,6 +1383,53 @@ impl CaptureStore {
             errors: Vec::new(),
         };
         let mut indexed_object_paths = BTreeSet::new();
+
+        {
+            let mut integrity_statement = self.connection.prepare("PRAGMA integrity_check")?;
+            let integrity_rows = integrity_statement.query_map([], |row| {
+                row.get::<_, String>(0)
+            })?;
+            let integrity_results =
+                integrity_rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            report.sqlite_integrity_ok = integrity_results.len() == 1
+                && integrity_results[0].eq_ignore_ascii_case("ok");
+            if !report.sqlite_integrity_ok {
+                if integrity_results.is_empty() {
+                    report
+                        .errors
+                        .push("sqlite integrity_check returned no rows".to_owned());
+                } else {
+                    for result in integrity_results {
+                        report
+                            .errors
+                            .push(format!("sqlite integrity_check: {result}"));
+                    }
+                }
+            }
+        }
+
+        {
+            let mut foreign_key_statement =
+                self.connection.prepare("PRAGMA foreign_key_check")?;
+            let foreign_key_rows = foreign_key_statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in foreign_key_rows {
+                let (table, rowid, parent, fk_index) = row?;
+                report.foreign_key_violations = report
+                    .foreign_key_violations
+                    .checked_add(1)
+                    .context("foreign key violation count overflow")?;
+                report.errors.push(format!(
+                    "foreign key violation: table={table:?} rowid={rowid:?} parent={parent:?} fk_index={fk_index}"
+                ));
+            }
+        }
 
         for row in rows {
             let (storage_class, hash, expected_bytes, indexed_relative_path) = row?;
@@ -4323,6 +4374,52 @@ mod tests {
             error.contains("request body byte count")
                 && error.contains("indexed object bytes")
         }));
+    }
+
+    #[test]
+    fn verify_reports_raw_ledger_foreign_key_violation() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+
+        store
+            .connection
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = OFF;
+                INSERT INTO request_bodies (
+                    capture_id,
+                    content_type,
+                    body_hash,
+                    body_bytes,
+                    body_error,
+                    body_kind,
+                    has_post_data,
+                    post_data_entry_count,
+                    declared_content_length
+                )
+                VALUES (
+                    'dangling-request-body',
+                    NULL,
+                    NULL,
+                    0,
+                    'fixture dangling row',
+                    'unknown',
+                    0,
+                    NULL,
+                    NULL
+                );
+                PRAGMA foreign_keys = ON;
+                "#,
+            )
+            .unwrap();
+
+        let report = store.verify().unwrap();
+        assert!(report.sqlite_integrity_ok);
+        assert_eq!(report.foreign_key_violations, 1);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("foreign key violation")));
     }
 
     #[test]
