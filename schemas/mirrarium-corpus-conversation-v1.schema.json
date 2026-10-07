@@ -98,7 +98,9 @@
         "title",
         "snapshot_count",
         "message_observation_count",
-        "stream_reconstruction_count"
+        "stream_reconstruction_count",
+        "stream_revision_count",
+        "attachment_observation_count"
       ],
       "properties": {
         "conversation_id": {
@@ -117,6 +119,14 @@
           "minimum": 0
         },
         "stream_reconstruction_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stream_revision_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attachment_observation_count": {
           "type": "integer",
           "minimum": 0
         }
