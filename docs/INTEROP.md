@@ -96,7 +96,7 @@ For operational safety, `export-delta` accepts at most 64 MiB of UTF-8 sync-stat
 
 ## Preferred source-bound synchronization
 
-For a new consumer, run `mirrarium corpus export-sync` with empty stdin. Apply the returned `delta`, then persist the returned `checkpoint`.
+For a new consumer, run `mirrarium corpus export-sync` with empty stdin. Apply the returned `delta`, then persist the returned `checkpoint`. If the importer requires all raw captures committed before synchronization begins to already be represented in the published corpus, use `mirrarium corpus export-sync --require-fresh`. That option compares the current raw watermark with the pinned corpus watermark before writing stdout and fails with no output when the corpus is stale or the lineage is inconsistent. Browser capture may continue after the freshness observation; later captures belong to the next sync.
 
 For every later synchronization, pipe that exact checkpoint back to `mirrarium corpus export-sync`. Mirrarium refuses checkpoints belonging to a different raw archive and refuses internally inconsistent/torn checkpoints before emitting private upsert content. On success, the response's top-level `archive_id`, nested checkpoint `archive_id`, delta manifest, and checkpoint manifest all describe one pinned generation.
 

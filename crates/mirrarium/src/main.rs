@@ -393,6 +393,13 @@ fn run() -> Result<()> {
                 )?;
             }
             Some("export-sync") => {
+                let require_fresh = match arguments.get(2).map(String::as_str) {
+                    None => false,
+                    Some("--require-fresh") => true,
+                    Some(argument) => anyhow::bail!(
+                        "unknown corpus export-sync option {argument:?}; use --require-fresh or no option"
+                    ),
+                };
                 let input = read_bounded_utf8_input(
                     std::io::stdin().lock(),
                     MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES,
@@ -408,9 +415,10 @@ fn run() -> Result<()> {
                 };
                 let stdout = std::io::stdout();
                 let mut stdout = std::io::BufWriter::new(stdout.lock());
-                corpus::write_conversation_sync_transaction_json(
+                corpus::write_conversation_sync_transaction_json_with_options(
                     &root,
                     checkpoint.as_ref(),
+                    require_fresh,
                     &mut stdout,
                 )?;
                 stdout
@@ -1601,7 +1609,7 @@ USAGE:
   mirrarium corpus export-index-schema
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-status-schema
-  mirrarium corpus export-sync-state-schema
+  mirrarium corpus export-sync [--require-fresh]-state-schema
   mirrarium corpus export-sync-checkpoint-schema
   mirrarium corpus export-sync-schema
   mirrarium corpus export-sync-checkpoint

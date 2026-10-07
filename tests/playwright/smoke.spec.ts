@@ -2172,6 +2172,19 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(staleExportStatus.manifest).toEqual(freshExportStatus.manifest);
 
+      const staleFreshSync = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync", "--require-fresh"],
+        "",
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(staleFreshSync.code).not.toBe(0);
+      expect(staleFreshSync.stdout).toBe("");
+      expect(staleFreshSync.stderr).toContain("published corpus is stale by");
+
       const { stdout: staleCorpusVerifyStdout } = await execFileAsync(
         cliPath,
         ["corpus", "verify"],
@@ -2206,6 +2219,34 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         staleExportStatus.current_raw_max_rowid,
       );
       expect(refreshedExportStatus.manifest).toEqual(freshExportStatus.manifest);
+
+      const { stdout: refreshedFreshSyncStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync", "--require-fresh"],
+        "",
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const refreshedFreshSync = JSON.parse(refreshedFreshSyncStdout) as {
+        archive_id: string;
+        delta: { manifest: typeof freshExportStatus.manifest };
+        checkpoint: {
+          archive_id: string;
+          manifest: typeof freshExportStatus.manifest;
+        };
+      };
+      expect(refreshedFreshSync.archive_id).toBe(exportSource.archive_id);
+      expect(refreshedFreshSync.delta.manifest).toEqual(
+        refreshedExportStatus.manifest,
+      );
+      expect(refreshedFreshSync.checkpoint.archive_id).toBe(
+        exportSource.archive_id,
+      );
+      expect(refreshedFreshSync.checkpoint.manifest).toEqual(
+        refreshedExportStatus.manifest,
+      );
 
       const rebuildFailureCapture = captures.find(
         (capture) =>
