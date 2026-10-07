@@ -68,6 +68,7 @@ pub const CORPUS_SYNC_DELTA_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
 pub const CORPUS_SCHEMA_BUNDLE_VERSION: u32 = 1;
+pub const CORPUS_NEGOTIATION_SCHEMA_BUNDLE_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize)]
 pub struct CorpusInteropWireVersions {
@@ -471,6 +472,40 @@ pub struct CorpusInteropSchemaBundle {
     pub schema_version: u32,
     pub record_type: String,
     pub schemas: Vec<Value>,
+}
+
+pub fn interop_negotiation_schema_bundle() -> Result<CorpusInteropSchemaBundle> {
+    let schema_sources = [
+        CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON,
+        CORPUS_SYNC_STATE_SCHEMA_V1_JSON,
+        CORPUS_SYNC_CHECKPOINT_SCHEMA_V1_JSON,
+        CORPUS_CAPABILITIES_SCHEMA_V1_JSON,
+        CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_V1_JSON,
+        CORPUS_COMPATIBILITY_SCHEMA_V1_JSON,
+        CORPUS_NEGOTIATED_SYNC_REQUEST_SCHEMA_V1_JSON,
+    ];
+    let mut schemas = Vec::with_capacity(schema_sources.len());
+    let mut ids = BTreeSet::new();
+    for source in schema_sources {
+        let value: Value =
+            serde_json::from_str(source).context("parsing embedded corpus negotiation schema")?;
+        let id = value
+            .get("$id")
+            .and_then(Value::as_str)
+            .context("embedded corpus negotiation schema is missing $id")?;
+        anyhow::ensure!(
+            ids.insert(id.to_owned()),
+            "duplicate embedded corpus negotiation schema id {id:?}"
+        );
+        schemas.push(value);
+    }
+
+    Ok(CorpusInteropSchemaBundle {
+        schema: "mirrarium.corpus.negotiation-schema-bundle".to_owned(),
+        schema_version: CORPUS_NEGOTIATION_SCHEMA_BUNDLE_VERSION,
+        record_type: "negotiation-schema-bundle".to_owned(),
+        schemas,
+    })
 }
 
 pub fn interop_schema_bundle() -> Result<CorpusInteropSchemaBundle> {
@@ -6796,6 +6831,48 @@ mod tests {
         };
         let error = validate_negotiated_sync_request(&request).unwrap_err();
         assert!(error.to_string().contains("negotiated sync request schema"));
+    }
+
+    #[test]
+    fn negotiation_schema_bundle_is_complete_and_deterministic() {
+        let bundle = interop_negotiation_schema_bundle().unwrap();
+        assert_eq!(
+            bundle.schema,
+            "mirrarium.corpus.negotiation-schema-bundle"
+        );
+        assert_eq!(
+            bundle.schema_version,
+            CORPUS_NEGOTIATION_SCHEMA_BUNDLE_VERSION
+        );
+        assert_eq!(bundle.record_type, "negotiation-schema-bundle");
+
+        let ids = bundle
+            .schemas
+            .iter()
+            .map(|schema| {
+                schema
+                    .get("$id")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "urn:mirrarium:corpus:export-manifest:v1",
+                "urn:mirrarium:corpus:sync-state:v1",
+                "urn:mirrarium:corpus:sync-checkpoint:v1",
+                "urn:mirrarium:corpus:capabilities:v1",
+                "urn:mirrarium:corpus:consumer-requirements:v1",
+                "urn:mirrarium:corpus:compatibility:v1",
+                "urn:mirrarium:corpus:negotiated-sync-request:v1",
+            ]
+        );
+        assert_eq!(
+            ids.iter().collect::<BTreeSet<_>>().len(),
+            ids.len()
+        );
     }
 
     #[test]

@@ -2542,6 +2542,56 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(validateBundledSyncTransaction).toBeTruthy();
 
+      const { stdout: negotiationSchemaBundleStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-negotiation-schema-bundle"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const negotiationSchemaBundle = JSON.parse(
+        negotiationSchemaBundleStdout,
+      ) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        schemas: Array<{ $id?: string }>;
+      };
+      expect(negotiationSchemaBundle).toMatchObject({
+        schema: "mirrarium.corpus.negotiation-schema-bundle",
+        schema_version: 1,
+        record_type: "negotiation-schema-bundle",
+      });
+      expect(
+        negotiationSchemaBundle.schemas.map((schema) => schema.$id),
+      ).toEqual([
+        "urn:mirrarium:corpus:export-manifest:v1",
+        "urn:mirrarium:corpus:sync-state:v1",
+        "urn:mirrarium:corpus:sync-checkpoint:v1",
+        "urn:mirrarium:corpus:capabilities:v1",
+        "urn:mirrarium:corpus:consumer-requirements:v1",
+        "urn:mirrarium:corpus:compatibility:v1",
+        "urn:mirrarium:corpus:negotiated-sync-request:v1",
+      ]);
+      const negotiationAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      for (const schema of negotiationSchemaBundle.schemas) {
+        negotiationAjv.addSchema(schema);
+      }
+      expect(
+        negotiationAjv.getSchema("urn:mirrarium:corpus:compatibility:v1"),
+      ).toBeTruthy();
+      expect(
+        negotiationAjv.getSchema(
+          "urn:mirrarium:corpus:negotiated-sync-request:v1",
+        ),
+      ).toBeTruthy();
+
       const { stdout: corpusExportSchemaStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-schema"],

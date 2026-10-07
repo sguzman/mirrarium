@@ -334,6 +334,13 @@ fn run() -> Result<()> {
                     "writing corpus interop schema bundle",
                 )?;
             }
+            Some("export-negotiation-schema-bundle") => {
+                write_stdout_json_line(
+                    serde_json::to_vec(&corpus::interop_negotiation_schema_bundle()?)
+                        .context("serializing corpus negotiation schema bundle")?,
+                    "writing corpus negotiation schema bundle",
+                )?;
+            }
             Some("export-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_EXPORT_SCHEMA_V1_JSON.as_bytes(),
@@ -1698,6 +1705,7 @@ USAGE:
   mirrarium corpus stats
   mirrarium corpus verify
   mirrarium corpus export-schema-bundle
+  mirrarium corpus export-negotiation-schema-bundle
   mirrarium corpus export-schema
   mirrarium corpus export-source-schema
   mirrarium corpus export-index-schema
