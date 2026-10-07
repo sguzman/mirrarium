@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:sync-plan:v1",
+  "title": "Mirrarium corpus source-bound sync plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "sync_checkpoint_schema_version",
+    "conversation_index_schema_version",
+    "record_type",
+    "archive_id",
+    "manifest",
+    "upserts",
+    "deleted_conversation_ids",
+    "checkpoint"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.sync-plan" },
+    "schema_version": { "const": 1 },
+    "sync_checkpoint_schema_version": { "const": 1 },
+    "conversation_index_schema_version": { "const": 1 },
+    "record_type": { "const": "sync-plan" },
+    "archive_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "manifest": { "$ref": "urn:mirrarium:corpus:export-manifest:v1" },
+    "upserts": {
+      "type": "array",
+      "items": { "$ref": "urn:mirrarium:corpus:conversation-index:v1" }
+    },
+    "deleted_conversation_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" }
+    },
+    "checkpoint": { "$ref": "urn:mirrarium:corpus:sync-checkpoint:v1" }
+  }
+}

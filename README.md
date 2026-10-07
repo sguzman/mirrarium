@@ -102,6 +102,8 @@ mirrarium corpus export-sync-negotiated-schema
 mirrarium corpus export-sync-state-schema
 mirrarium corpus export-sync-checkpoint-schema
 mirrarium corpus export-sync-schema
+mirrarium corpus export-sync-plan-schema
+mirrarium corpus export-sync-plan [--require-fresh]
 mirrarium corpus export-sync-checkpoint
 mirrarium corpus export-sync [--require-fresh]
 mirrarium corpus export-sync-negotiated

@@ -59,6 +59,9 @@ pub const CORPUS_SYNC_CHECKPOINT_SCHEMA_V1_JSON: &str =
 pub const CORPUS_SYNC_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_TRANSACTION_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-transaction-v1.schema.json");
+pub const CORPUS_SYNC_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SYNC_PLAN_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-sync-plan-v1.schema.json");
 pub const CORPUS_SYNC_STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES: u64 =
     CORPUS_SYNC_STATE_MAX_BYTES + 1024 * 1024;
@@ -860,6 +863,20 @@ pub struct ConversationSyncTransaction {
     pub record_type: String,
     pub archive_id: String,
     pub delta: ConversationSyncDelta,
+    pub checkpoint: ConversationSyncCheckpoint,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationSyncPlan {
+    pub schema: String,
+    pub schema_version: u32,
+    pub sync_checkpoint_schema_version: u32,
+    pub conversation_index_schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
+    pub manifest: ConversationExportManifest,
+    pub upserts: Vec<ConversationExportIndexRecord>,
+    pub deleted_conversation_ids: Vec<String>,
     pub checkpoint: ConversationSyncCheckpoint,
 }
 
@@ -2395,6 +2412,82 @@ pub fn write_conversation_sync_delta_json<W: Write>(
         .write_all(b"\n")
         .context("writing corpus sync-delta newline")?;
     Ok(())
+}
+
+pub fn export_sync_plan(
+    raw_root: impl AsRef<Path>,
+    previous_checkpoint: Option<&ConversationSyncCheckpoint>,
+    require_fresh: bool,
+) -> Result<ConversationSyncPlan> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let archive_id = raw_archive_identity(raw_root)?;
+
+    let bootstrap_state;
+    let previous_state = match previous_checkpoint {
+        Some(checkpoint) => {
+            validate_sync_checkpoint_for_archive(checkpoint, &archive_id)?;
+            &checkpoint.sync_state
+        }
+        None => {
+            bootstrap_state = ConversationSyncState {
+                schema: "mirrarium.corpus.sync-state".to_owned(),
+                schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+                records: BTreeMap::new(),
+            };
+            &bootstrap_state
+        }
+    };
+
+    let corpus = open_corpus_read_only(raw_root)?;
+    if require_fresh {
+        let raw = open_raw_ledger_read_only(raw_root)?;
+        let freshness = export_freshness_for_connections(&corpus, &raw)?;
+        anyhow::ensure!(
+            freshness.fresh,
+            "published corpus is stale by {} raw capture(s); run 'mirrarium corpus rebuild' before source-bound sync",
+            freshness.pending_raw_captures
+        );
+    }
+
+    let plan = conversation_sync_delta_plan(&corpus, previous_state)?;
+    let next_sync_state = sync_state_from_cached_index(plan.current_index.clone())?;
+    let next_sync_state_bytes =
+        serde_json::to_vec(&next_sync_state).context("serializing next corpus sync-state")?;
+    anyhow::ensure!(
+        next_sync_state_bytes.len() as u64 <= CORPUS_SYNC_STATE_MAX_BYTES,
+        "next corpus sync-state exceeds the {}-byte source-bound sync ceiling; use export-manifest/export-index/export-one instead",
+        CORPUS_SYNC_STATE_MAX_BYTES
+    );
+
+    let next_checkpoint = ConversationSyncCheckpoint {
+        schema: "mirrarium.corpus.sync-checkpoint".to_owned(),
+        schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        record_type: "sync-checkpoint".to_owned(),
+        archive_id: archive_id.clone(),
+        manifest: plan.manifest.clone(),
+        sync_state: next_sync_state,
+    };
+    let upserts = plan
+        .changed_records
+        .into_iter()
+        .map(|(conversation_id, record_sha256)| {
+            conversation_export_index_record(conversation_id, record_sha256)
+        })
+        .collect();
+
+    Ok(ConversationSyncPlan {
+        schema: "mirrarium.corpus.sync-plan".to_owned(),
+        schema_version: CORPUS_SYNC_PLAN_SCHEMA_VERSION,
+        sync_checkpoint_schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        conversation_index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+        record_type: "sync-plan".to_owned(),
+        archive_id,
+        manifest: plan.manifest,
+        upserts,
+        deleted_conversation_ids: plan.deleted_conversation_ids,
+        checkpoint: next_checkpoint,
+    })
 }
 
 pub fn write_conversation_negotiated_sync_transaction_json<W: Write>(

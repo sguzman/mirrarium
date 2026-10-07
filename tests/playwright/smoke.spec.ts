@@ -3032,6 +3032,27 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         }),
       ).toBe(false);
 
+      const { stdout: corpusSyncPlanSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-plan-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSyncPlanSchema = JSON.parse(corpusSyncPlanSchemaStdout);
+      const syncPlanAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      syncPlanAjv.addSchema(corpusExportIndexSchema);
+      syncPlanAjv.addSchema(corpusExportManifestSchema);
+      syncPlanAjv.addSchema(corpusSyncStateSchema);
+      syncPlanAjv.addSchema(corpusSyncCheckpointSchema);
+      const validateCorpusSyncPlan = syncPlanAjv.compile(corpusSyncPlanSchema);
+
       const { stdout: corpusSyncTransactionSchemaStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-sync-schema"],
@@ -3388,6 +3409,60 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(currentCheckpoint.archive_id).toBe(exportSource.archive_id);
       expect(currentCheckpoint.manifest).toEqual(exportManifest);
       expect(currentCheckpoint.sync_state).toEqual(currentSyncState);
+
+      const { stdout: bootstrapPlanStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-plan", "--require-fresh"],
+        "",
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const bootstrapPlan = JSON.parse(bootstrapPlanStdout) as {
+        archive_id: string;
+        manifest: typeof exportManifest;
+        upserts: Array<{
+          conversation_id: string;
+          record_sha256: string;
+        }>;
+        deleted_conversation_ids: string[];
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(
+        validateCorpusSyncPlan(bootstrapPlan),
+        JSON.stringify(validateCorpusSyncPlan.errors),
+      ).toBe(true);
+      expect(bootstrapPlan.archive_id).toBe(exportSource.archive_id);
+      expect(bootstrapPlan.manifest).toEqual(exportManifest);
+      expect(bootstrapPlan.deleted_conversation_ids).toEqual([]);
+      expect(bootstrapPlan.checkpoint).toEqual(currentCheckpoint);
+      expect(
+        Object.fromEntries(
+          bootstrapPlan.upserts.map((record) => [
+            record.conversation_id,
+            record.record_sha256,
+          ]),
+        ),
+      ).toEqual(currentSyncState.records);
+
+      const { stdout: noopPlanStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-plan"],
+        JSON.stringify(currentCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const noopPlan = JSON.parse(noopPlanStdout) as typeof bootstrapPlan;
+      expect(
+        validateCorpusSyncPlan(noopPlan),
+        JSON.stringify(validateCorpusSyncPlan.errors),
+      ).toBe(true);
+      expect(noopPlan.upserts).toEqual([]);
+      expect(noopPlan.deleted_conversation_ids).toEqual([]);
+      expect(noopPlan.checkpoint).toEqual(currentCheckpoint);
 
       const { stdout: bootstrapSyncStdout } = await execFileWithInput(
         cliPath,

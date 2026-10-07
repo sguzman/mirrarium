@@ -413,10 +413,48 @@ fn run() -> Result<()> {
                     "writing corpus sync-transaction schema",
                 )?;
             }
+            Some("export-sync-plan-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_SYNC_PLAN_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus sync-plan schema",
+                )?;
+            }
             Some("export-delta-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON.as_bytes(),
                     "writing corpus sync-delta schema",
+                )?;
+            }
+            Some("export-sync-plan") => {
+                let require_fresh = match arguments.get(2).map(String::as_str) {
+                    None => false,
+                    Some("--require-fresh") => true,
+                    Some(argument) => anyhow::bail!(
+                        "unknown corpus export-sync-plan option {argument:?}; use --require-fresh or no option"
+                    ),
+                };
+                let input = read_bounded_utf8_input(
+                    std::io::stdin().lock(),
+                    MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES,
+                )
+                .context("reading source-bound corpus sync checkpoint from stdin")?;
+                let checkpoint = if input.trim().is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<corpus::ConversationSyncCheckpoint>(&input)
+                            .context("parsing source-bound corpus sync checkpoint JSON")?,
+                    )
+                };
+                let plan = corpus::export_sync_plan(
+                    &root,
+                    checkpoint.as_ref(),
+                    require_fresh,
+                )?;
+                write_stdout_json_line(
+                    serde_json::to_vec(&plan)
+                        .context("serializing corpus sync plan")?,
+                    "writing corpus sync plan",
                 )?;
             }
             Some("export-sync-checkpoint") => {
@@ -1718,6 +1756,8 @@ USAGE:
   mirrarium corpus export-sync-state-schema
   mirrarium corpus export-sync-checkpoint-schema
   mirrarium corpus export-sync-schema
+  mirrarium corpus export-sync-plan-schema
+  mirrarium corpus export-sync-plan [--require-fresh]
   mirrarium corpus export-sync-checkpoint
   mirrarium corpus export-sync [--require-fresh]
   mirrarium corpus export-sync-negotiated
