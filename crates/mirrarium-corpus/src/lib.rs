@@ -11,7 +11,7 @@ use mirrarium_store::{
     apply_private_database_key, open_raw_ledger_read_only, read_verified_object,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -26,6 +26,12 @@ pub const CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON: &str =
 pub const CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-export-manifest-v1.schema.json");
+pub const CORPUS_SYNC_STATE_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SYNC_STATE_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-sync-state-v1.schema.json");
+pub const CORPUS_SYNC_DELTA_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
@@ -287,6 +293,27 @@ pub struct ConversationExportManifest {
     pub record_type: String,
     pub conversation_count: u64,
     pub index_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationSyncState {
+    pub schema: String,
+    pub schema_version: u32,
+    pub records: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationSyncDelta {
+    pub schema: String,
+    pub schema_version: u32,
+    pub sync_state_schema_version: u32,
+    pub conversation_schema_version: u32,
+    pub producer_corpus_schema_version: i64,
+    pub record_type: String,
+    pub manifest: ConversationExportManifest,
+    pub upserts: Vec<ConversationExportRecord>,
+    pub deleted_conversation_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1190,15 +1217,15 @@ pub fn export_conversations(
     Ok(records)
 }
 
-fn conversation_export_index_line(record: ConversationExportRecord) -> Result<Vec<u8>> {
+fn conversation_export_index_line(record: &ConversationExportRecord) -> Result<Vec<u8>> {
     let index = ConversationExportIndexRecord {
         schema: "mirrarium.corpus.conversation-index".to_owned(),
         schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
         conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
         producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
         record_type: "conversation-index".to_owned(),
-        conversation_id: record.conversation_id,
-        record_sha256: record.record_sha256,
+        conversation_id: record.conversation_id.clone(),
+        record_sha256: record.record_sha256.clone(),
     };
     let mut bytes =
         serde_json::to_vec(&index).context("serializing corpus export index record")?;
@@ -1206,11 +1233,101 @@ fn conversation_export_index_line(record: ConversationExportRecord) -> Result<Ve
     Ok(bytes)
 }
 
+fn validate_sync_state(state: &ConversationSyncState) -> Result<()> {
+    anyhow::ensure!(
+        state.schema == "mirrarium.corpus.sync-state",
+        "unsupported sync-state schema {:?}",
+        state.schema
+    );
+    anyhow::ensure!(
+        state.schema_version == CORPUS_SYNC_STATE_SCHEMA_VERSION,
+        "unsupported sync-state schema version {}; expected {}",
+        state.schema_version,
+        CORPUS_SYNC_STATE_SCHEMA_VERSION
+    );
+    for (conversation_id, record_sha256) in &state.records {
+        anyhow::ensure!(
+            !conversation_id.trim().is_empty(),
+            "sync-state conversation id must not be empty"
+        );
+        anyhow::ensure!(
+            record_sha256.len() == 64
+                && record_sha256.bytes().all(|byte| {
+                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                }),
+            "sync-state record hash for conversation {conversation_id:?} must be 64 lowercase hexadecimal characters"
+        );
+    }
+    Ok(())
+}
+
+pub fn export_delta(
+    raw_root: impl AsRef<Path>,
+    state: &ConversationSyncState,
+) -> Result<ConversationSyncDelta> {
+    validate_sync_state(state)?;
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let connection = open_corpus_read_only(raw_root)?;
+    let conversation_ids = conversation_ids_for_connection(&connection, -1)?;
+    drop(connection);
+
+    let mut current_ids = BTreeSet::new();
+    let mut upserts = Vec::new();
+    let mut index_hasher = Sha256::new();
+    let mut conversation_count = 0_u64;
+
+    for conversation_id in conversation_ids {
+        current_ids.insert(conversation_id.clone());
+        let record = conversation_export_record(raw_root, conversation_id.clone())?;
+        let index_line = conversation_export_index_line(&record)?;
+        index_hasher.update(&index_line);
+        if state.records.get(&conversation_id).map(String::as_str)
+            != Some(record.record_sha256.as_str())
+        {
+            upserts.push(record);
+        }
+        conversation_count = conversation_count
+            .checked_add(1)
+            .context("sync delta conversation count overflow")?;
+    }
+
+    let deleted_conversation_ids = state
+        .records
+        .keys()
+        .filter(|conversation_id| !current_ids.contains(*conversation_id))
+        .cloned()
+        .collect();
+
+    let manifest = ConversationExportManifest {
+        schema: "mirrarium.corpus.export-manifest".to_owned(),
+        schema_version: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
+        conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+        index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: "export-manifest".to_owned(),
+        conversation_count,
+        index_sha256: format!("{:x}", index_hasher.finalize()),
+    };
+
+    Ok(ConversationSyncDelta {
+        schema: "mirrarium.corpus.sync-delta".to_owned(),
+        schema_version: CORPUS_SYNC_DELTA_SCHEMA_VERSION,
+        sync_state_schema_version: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+        conversation_schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: "sync-delta".to_owned(),
+        manifest,
+        upserts,
+        deleted_conversation_ids,
+    })
+}
+
 pub fn export_manifest(raw_root: impl AsRef<Path>) -> Result<ConversationExportManifest> {
     let mut hasher = Sha256::new();
     let conversation_count =
         for_each_export_conversation(raw_root.as_ref(), None, |record| {
-            let line = conversation_export_index_line(record)?;
+            let line = conversation_export_index_line(&record)?;
             hasher.update(&line);
             Ok(())
         })?;
@@ -1233,7 +1350,7 @@ pub fn write_conversation_export_index_jsonl<W: Write>(
     writer: &mut W,
 ) -> Result<u64> {
     for_each_export_conversation(raw_root.as_ref(), limit, |record| {
-        let line = conversation_export_index_line(record)?;
+        let line = conversation_export_index_line(&record)?;
         writer
             .write_all(&line)
             .context("writing corpus export index line")?;
