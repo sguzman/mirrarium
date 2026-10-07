@@ -93,6 +93,7 @@ pub struct StoreStats {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CaptureSummary {
+    pub capture_id: String,
     pub captured_at_ms: u64,
     pub method: String,
     pub url: String,
@@ -112,6 +113,39 @@ pub struct CaptureSummary {
     pub request_body_post_data_entry_count: Option<u32>,
     pub request_body_declared_content_length: Option<u64>,
     pub provenance: CaptureProvenance,
+}
+
+fn capture_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureSummary> {
+    Ok(CaptureSummary {
+        capture_id: row.get(0)?,
+        captured_at_ms: row.get::<_, i64>(1)? as u64,
+        method: row.get(2)?,
+        url: row.get(3)?,
+        status: row.get(4)?,
+        mime_type: row.get(5)?,
+        resource_type: row.get(6)?,
+        privacy_class: row.get(7)?,
+        body_hash: row.get(8)?,
+        body_bytes: row.get::<_, i64>(9)? as u64,
+        body_error: row.get(10)?,
+        request_body_hash: row.get(11)?,
+        request_body_bytes: row.get::<_, i64>(12)? as u64,
+        request_body_error: row.get(13)?,
+        request_body_kind: row.get(14)?,
+        request_body_content_type: row.get(15)?,
+        request_body_has_post_data: row
+            .get::<_, Option<i64>>(16)?
+            .map(|value| value != 0),
+        request_body_post_data_entry_count: row
+            .get::<_, Option<i64>>(17)?
+            .and_then(|value| u32::try_from(value).ok()),
+        request_body_declared_content_length: row
+            .get::<_, Option<i64>>(18)?
+            .and_then(|value| u64::try_from(value).ok()),
+        provenance: serde_json::from_str(&row.get::<_, String>(19)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(19, Type::Text, Box::new(error))
+        })?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1149,6 +1183,7 @@ impl CaptureStore {
         let mut statement = self.connection.prepare(
             r#"
             SELECT
+                captures.capture_id,
                 captured_at_ms,
                 method,
                 url,
@@ -1175,44 +1210,48 @@ impl CaptureStore {
             "#,
         )?;
 
-        let rows = statement.query_map([limit as i64], |row| {
-            Ok(CaptureSummary {
-                captured_at_ms: row.get::<_, i64>(0)? as u64,
-                method: row.get(1)?,
-                url: row.get(2)?,
-                status: row.get(3)?,
-                mime_type: row.get(4)?,
-                resource_type: row.get(5)?,
-                privacy_class: row.get(6)?,
-                body_hash: row.get(7)?,
-                body_bytes: row.get::<_, i64>(8)? as u64,
-                body_error: row.get(9)?,
-                request_body_hash: row.get(10)?,
-                request_body_bytes: row.get::<_, i64>(11)? as u64,
-                request_body_error: row.get(12)?,
-                request_body_kind: row.get(13)?,
-                request_body_content_type: row.get(14)?,
-                request_body_has_post_data: row
-                    .get::<_, Option<i64>>(15)?
-                    .map(|value| value != 0),
-                request_body_post_data_entry_count: row
-                    .get::<_, Option<i64>>(16)?
-                    .and_then(|value| u32::try_from(value).ok()),
-                request_body_declared_content_length: row
-                    .get::<_, Option<i64>>(17)?
-                    .and_then(|value| u64::try_from(value).ok()),
-                provenance: serde_json::from_str(&row.get::<_, String>(18)?).map_err(
-                    |error| rusqlite::Error::FromSqlConversionFailure(
-                        18,
-                        Type::Text,
-                        Box::new(error),
-                    ),
-                )?,
-            })
-        })?;
+        let rows = statement.query_map([limit as i64], capture_summary_from_row)?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("reading recent captures")
+    }
+
+    pub fn capture_by_id(&self, capture_id: &str) -> Result<Option<CaptureSummary>> {
+        anyhow::ensure!(!capture_id.trim().is_empty(), "capture id must not be empty");
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                captures.capture_id,
+                captured_at_ms,
+                method,
+                url,
+                status,
+                mime_type,
+                resource_type,
+                privacy_class,
+                captures.body_hash,
+                captures.body_bytes,
+                captures.body_error,
+                request_bodies.body_hash,
+                COALESCE(request_bodies.body_bytes, 0),
+                request_bodies.body_error,
+                request_bodies.body_kind,
+                request_bodies.content_type,
+                request_bodies.has_post_data,
+                request_bodies.post_data_entry_count,
+                request_bodies.declared_content_length,
+                captures.provenance_json
+            FROM captures
+            LEFT JOIN request_bodies USING (capture_id)
+            WHERE captures.capture_id = ?1
+            LIMIT 1
+            "#,
+        )?;
+        let mut rows = statement.query([capture_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(capture_summary_from_row(row)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn verify(&self) -> Result<VerifyReport> {
@@ -3730,6 +3769,41 @@ mod tests {
             "Script",
         );
         assert_eq!(classify(&public_item), PrivacyClass::Public);
+    }
+
+    #[test]
+    fn capture_id_round_trips_through_recent_and_exact_lookup() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let capture_id = "capture-lookup-fixture";
+        let body = br#"{"lookup":true}"#;
+
+        store
+            .begin(metadata(
+                capture_id,
+                "https://chatgpt.com/backend-api/lookup-fixture",
+                "Fetch",
+            ))
+            .unwrap();
+        store
+            .append_chunk(capture_id, 0, &BASE64.encode(body))
+            .unwrap();
+        store
+            .finish(capture_id, Some(body.len() as u64), None)
+            .unwrap();
+
+        let recent = store.recent_captures(1).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].capture_id, capture_id);
+
+        let exact = store.capture_by_id(capture_id).unwrap().unwrap();
+        assert_eq!(exact.capture_id, capture_id);
+        assert_eq!(
+            exact.url,
+            "https://chatgpt.com/backend-api/lookup-fixture"
+        );
+        assert_eq!(exact.body_hash, recent[0].body_hash);
+        assert!(store.capture_by_id("missing-capture").unwrap().is_none());
     }
 
     #[test]
