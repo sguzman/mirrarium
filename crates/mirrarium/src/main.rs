@@ -105,10 +105,12 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             anyhow::ensure!(
                 report.corrupt_objects == 0
+                    && report.unreferenced_indexed_objects == 0
                     && report.invalid_captures == 0
                     && report.unexpected_object_entries == 0,
-                "{} corrupt object(s), {} invalid capture(s), {} unexpected CAS entrie(s) found",
+                "{} corrupt object(s), {} unreferenced indexed object(s), {} invalid capture(s), {} unexpected CAS entrie(s) found",
                 report.corrupt_objects,
+                report.unreferenced_indexed_objects,
                 report.invalid_captures,
                 report.unexpected_object_entries
             );

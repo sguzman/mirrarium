@@ -115,7 +115,8 @@ Implemented:
 - protocol-aware no-body handling for HEAD and 1xx/204/205/304 responses, recorded as intentional suppression without calling `Network.getResponseBody`;
 - Unix permission hardening;
 - CLI-readable JSON store statistics;
-- non-destructive CAS orphan auditing: `verify` reports well-formed unindexed object files and stored bytes separately from corruption, while malformed CAS-tree entries fail verification; orphan files are never deleted automatically;
+- bidirectional raw object-reference verification: capture/request-body hashes must resolve to the correctly classified indexed CAS object with matching logical bytes, and every indexed object must be referenced by at least one capture/request body; indexed-but-unreferenced rows fail verification;
+- non-destructive filesystem CAS orphan auditing remains separate: `verify` reports well-formed unindexed object files and stored bytes without failing, while malformed CAS-tree entries are errors; orphan files are never deleted automatically;
 - local ChatGPT-shaped fixture traffic;
 - Playwright/Chromium end-to-end capture test;
 - rebuildable SSE event derivation into a separate corpus database;

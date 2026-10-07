@@ -1712,6 +1712,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const rawVerify = JSON.parse(rawVerifyStdout) as {
         checked_objects: number;
         corrupt_objects: number;
+        unreferenced_indexed_objects: number;
         orphan_objects: number;
         orphan_object_bytes: number;
         unexpected_object_entries: number;
@@ -1722,6 +1723,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(rawVerify).toEqual({
         checked_objects: liveStatsForVerify.objects,
         corrupt_objects: 0,
+        unreferenced_indexed_objects: 0,
         orphan_objects: 0,
         orphan_object_bytes: 0,
         unexpected_object_entries: 0,
