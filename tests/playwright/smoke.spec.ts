@@ -177,6 +177,24 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       join(userDataDir, "NativeMessagingHosts", `${nativeHostName}.json`),
     );
 
+    const { stdout: nativeStatusStdout } = await execFileAsync(
+      cliPath,
+      ["native-host", "status", "chrome-for-testing"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_CONFIG_HOME: join(browserHome, ".config"),
+          MIRRARIUM_BROWSER_USER_DATA_DIR: userDataDir,
+        },
+      },
+    );
+    expect(JSON.parse(nativeStatusStdout)).toEqual({
+      browser: "chrome-for-testing",
+      manifest_path: nativeInstall.manifest_path,
+      installed: true,
+    });
+
     const context = await chromium.launchPersistentContext(userDataDir, {
       channel: "chromium",
       headless: true,
@@ -2377,6 +2395,78 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
     } finally {
       await context.close();
     }
+
+    const { stdout: extensionUninstallStdout } = await execFileAsync(
+      cliPath,
+      ["extension", "uninstall"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_DATA_HOME: join(browserHome, ".local", "share"),
+        },
+      },
+    );
+    expect(JSON.parse(extensionUninstallStdout)).toEqual({
+      install_path: installedExtensionPath,
+      removed: true,
+    });
+
+    const { stdout: extensionStatusAfterUninstallStdout } = await execFileAsync(
+      cliPath,
+      ["extension", "status"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_DATA_HOME: join(browserHome, ".local", "share"),
+        },
+      },
+    );
+    expect(JSON.parse(extensionStatusAfterUninstallStdout)).toMatchObject({
+      install_path: installedExtensionPath,
+      installed: false,
+      valid: false,
+      running_build_id: null,
+      reload_required: false,
+      extension_id: expectedExtensionId,
+    });
+
+    const { stdout: nativeUninstallStdout } = await execFileAsync(
+      cliPath,
+      ["native-host", "uninstall", "chrome-for-testing"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_CONFIG_HOME: join(browserHome, ".config"),
+          MIRRARIUM_BROWSER_USER_DATA_DIR: userDataDir,
+        },
+      },
+    );
+    expect(JSON.parse(nativeUninstallStdout)).toEqual({
+      browser: "chrome-for-testing",
+      manifest_path: nativeInstall.manifest_path,
+      removed: true,
+    });
+
+    const { stdout: nativeStatusAfterUninstallStdout } = await execFileAsync(
+      cliPath,
+      ["native-host", "status", "chrome-for-testing"],
+      {
+        env: {
+          ...childEnv,
+          HOME: browserHome,
+          XDG_CONFIG_HOME: join(browserHome, ".config"),
+          MIRRARIUM_BROWSER_USER_DATA_DIR: userDataDir,
+        },
+      },
+    );
+    expect(JSON.parse(nativeStatusAfterUninstallStdout)).toEqual({
+      browser: "chrome-for-testing",
+      manifest_path: nativeInstall.manifest_path,
+      installed: false,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
