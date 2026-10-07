@@ -13,13 +13,16 @@ use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 
-const CORPUS_SCHEMA_VERSION: i64 = 3;
+const CORPUS_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {
     pub stream_captures: u64,
     pub stream_events: u64,
     pub json_stream_events: u64,
+    pub websocket_streams: u64,
+    pub websocket_frames: u64,
+    pub websocket_skipped_captures: u64,
     pub eventsource_streams: u64,
     pub eventsource_events: u64,
     pub eventsource_json_events: u64,
@@ -61,6 +64,24 @@ pub struct AttachmentDownloadView {
 pub struct AttachmentView {
     pub observation: AttachmentObservationView,
     pub downloads: Vec<AttachmentDownloadView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebSocketStreamView {
+    pub lifecycle_id: String,
+    pub source_url: String,
+    pub privacy_class: String,
+    pub frame_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebSocketFrameView {
+    pub lifecycle_id: String,
+    pub transport_sequence: u64,
+    pub direction: String,
+    pub source_capture_id: String,
+    pub source_body_hash: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -203,6 +224,33 @@ struct DownloadSource {
 }
 
 #[derive(Debug, Clone)]
+struct WebSocketSource {
+    capture_id: String,
+    source_url: String,
+    privacy_class: String,
+    body_hash: String,
+    method: String,
+    provenance_json: String,
+}
+
+#[derive(Debug, Clone)]
+struct WebSocketDerivedFrame {
+    transport_sequence: u64,
+    direction: String,
+    source_capture_id: String,
+    source_body_hash: String,
+    data: String,
+}
+
+#[derive(Debug)]
+struct WebSocketGroup {
+    source_url: String,
+    privacy_class: String,
+    frames: BTreeMap<u64, WebSocketDerivedFrame>,
+    ambiguous_sequences: BTreeSet<u64>,
+}
+
+#[derive(Debug, Clone)]
 struct EventSourceSource {
     capture_id: String,
     captured_at_ms: i64,
@@ -279,6 +327,9 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         PRAGMA synchronous = NORMAL;
         PRAGMA foreign_keys = ON;
 
+        DROP TABLE IF EXISTS websocket_frames;
+        DROP TABLE IF EXISTS websocket_streams;
+        DROP TABLE IF EXISTS websocket_skipped_captures;
         DROP TABLE IF EXISTS eventsource_events;
         DROP TABLE IF EXISTS eventsource_streams;
         DROP TABLE IF EXISTS eventsource_skipped_captures;
@@ -405,6 +456,33 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             PRIMARY KEY (capture_id, conversation_id)
         );
 
+        CREATE TABLE websocket_streams (
+            lifecycle_id TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            privacy_class TEXT NOT NULL,
+            frame_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE websocket_frames (
+            lifecycle_id TEXT NOT NULL
+                REFERENCES websocket_streams(lifecycle_id) ON DELETE CASCADE,
+            transport_sequence INTEGER NOT NULL,
+            direction TEXT NOT NULL,
+            source_capture_id TEXT NOT NULL UNIQUE,
+            source_body_hash TEXT NOT NULL,
+            data TEXT NOT NULL,
+            PRIMARY KEY (lifecycle_id, transport_sequence)
+        );
+
+        CREATE INDEX websocket_frames_capture_idx
+            ON websocket_frames(source_capture_id);
+
+        CREATE TABLE websocket_skipped_captures (
+            capture_id TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            reason TEXT NOT NULL
+        );
+
         CREATE TABLE eventsource_streams (
             lifecycle_id TEXT PRIMARY KEY,
             source_url TEXT NOT NULL,
@@ -465,6 +543,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         "#,
     )?;
 
+    let websocket_sources = collect_websocket_sources(&raw)?;
     let eventsource_sources = collect_eventsource_sources(&raw)?;
     let download_sources = collect_download_sources(&raw)?;
 
@@ -492,6 +571,7 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         )?;
     }
 
+    derive_websocket_frames(&transaction, raw_root, websocket_sources)?;
     derive_eventsource_messages(&transaction, raw_root, eventsource_sources)?;
     correlate_attachment_downloads(&transaction, &download_sources)?;
 
@@ -522,6 +602,9 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     for table in [
         "stream_captures",
         "stream_events",
+        "websocket_streams",
+        "websocket_frames",
+        "websocket_skipped_captures",
         "eventsource_streams",
         "eventsource_events",
         "eventsource_skipped_captures",
@@ -547,6 +630,18 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
         json_stream_events: scalar_u64(
             &connection,
             "SELECT COUNT(*) FROM stream_events WHERE json_valid = 1",
+        )?,
+        websocket_streams: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM websocket_streams",
+        )?,
+        websocket_frames: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM websocket_frames",
+        )?,
+        websocket_skipped_captures: scalar_u64(
+            &connection,
+            "SELECT COUNT(*) FROM websocket_skipped_captures",
         )?,
         eventsource_streams: scalar_u64(
             &connection,
@@ -589,6 +684,75 @@ pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
             "SELECT COUNT(*) FROM attachment_downloads",
         )?,
     })
+}
+
+pub fn websocket_streams(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<WebSocketStreamView>> {
+    anyhow::ensure!(limit > 0, "WebSocket stream limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT lifecycle_id, source_url, privacy_class, frame_count
+        FROM websocket_streams
+        ORDER BY lifecycle_id
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok(WebSocketStreamView {
+                lifecycle_id: row.get(0)?,
+                source_url: row.get(1)?,
+                privacy_class: row.get(2)?,
+                frame_count: row.get::<_, i64>(3)? as u64,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn websocket_frames(
+    raw_root: impl AsRef<Path>,
+    lifecycle_id: &str,
+    limit: u64,
+) -> Result<Vec<WebSocketFrameView>> {
+    anyhow::ensure!(
+        !lifecycle_id.trim().is_empty(),
+        "WebSocket lifecycle id must not be empty"
+    );
+    anyhow::ensure!(limit > 0, "WebSocket frame limit must be greater than zero");
+
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            lifecycle_id,
+            transport_sequence,
+            direction,
+            source_capture_id,
+            source_body_hash,
+            data
+        FROM websocket_frames
+        WHERE lifecycle_id = ?1
+        ORDER BY transport_sequence
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = statement
+        .query_map(params![lifecycle_id, limit as i64], |row| {
+            Ok(WebSocketFrameView {
+                lifecycle_id: row.get(0)?,
+                transport_sequence: row.get::<_, i64>(1)? as u64,
+                direction: row.get(2)?,
+                source_capture_id: row.get(3)?,
+                source_body_hash: row.get(4)?,
+                data: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn eventsource_streams(
@@ -1655,6 +1819,244 @@ fn correlate_attachment_downloads(
                 url_identity,
             ],
         )?;
+    }
+
+    Ok(())
+}
+
+fn collect_websocket_sources(connection: &Connection) -> Result<Vec<WebSocketSource>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT capture_id, url, privacy_class, body_hash, method, provenance_json
+        FROM captures
+        WHERE resource_type = 'WebSocketFrame'
+          AND body_hash IS NOT NULL
+        ORDER BY captured_at_ms, capture_id
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(WebSocketSource {
+            capture_id: row.get(0)?,
+            source_url: row.get(1)?,
+            privacy_class: row.get(2)?,
+            body_hash: row.get(3)?,
+            method: row.get(4)?,
+            provenance_json: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn insert_websocket_skip(
+    transaction: &Transaction<'_>,
+    capture_id: &str,
+    source_url: &str,
+    reason: &str,
+) -> Result<()> {
+    transaction.execute(
+        r#"
+        INSERT OR REPLACE INTO websocket_skipped_captures
+            (capture_id, source_url, reason)
+        VALUES
+            (?1, ?2, ?3)
+        "#,
+        params![capture_id, source_url, reason],
+    )?;
+    Ok(())
+}
+
+fn derive_websocket_frames(
+    transaction: &Transaction<'_>,
+    raw_root: &Path,
+    sources: Vec<WebSocketSource>,
+) -> Result<()> {
+    let mut groups: BTreeMap<String, WebSocketGroup> = BTreeMap::new();
+
+    for source in sources {
+        let provenance = match serde_json::from_str::<Value>(&source.provenance_json) {
+            Ok(value) => value,
+            Err(_) => {
+                insert_websocket_skip(
+                    transaction,
+                    &source.capture_id,
+                    &source.source_url,
+                    "invalid_provenance_json",
+                )?;
+                continue;
+            }
+        };
+        let lifecycle_id = provenance
+            .get("lifecycle_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let transport_sequence = provenance
+            .get("transport_sequence")
+            .and_then(Value::as_u64);
+        let (Some(lifecycle_id), Some(transport_sequence)) =
+            (lifecycle_id, transport_sequence)
+        else {
+            insert_websocket_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "missing_transport_identity",
+            )?;
+            continue;
+        };
+
+        let direction = match source.method.as_str() {
+            "WS_SEND" => "sent",
+            "WS_RECV" => "received",
+            _ => {
+                insert_websocket_skip(
+                    transaction,
+                    &source.capture_id,
+                    &source.source_url,
+                    "invalid_direction",
+                )?;
+                continue;
+            }
+        };
+
+        let bytes = read_verified_object(raw_root, &source.privacy_class, &source.body_hash)
+            .with_context(|| {
+                format!(
+                    "reading WebSocket frame body object {}",
+                    source.capture_id
+                )
+            })?;
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                insert_websocket_skip(
+                    transaction,
+                    &source.capture_id,
+                    &source.source_url,
+                    "non_utf8_websocket_frame",
+                )?;
+                continue;
+            }
+        };
+        if serde_json::from_str::<Value>(text).is_err() {
+            insert_websocket_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "invalid_json_websocket_frame",
+            )?;
+            continue;
+        }
+
+        let group = groups
+            .entry(lifecycle_id.clone())
+            .or_insert_with(|| WebSocketGroup {
+                source_url: source.source_url.clone(),
+                privacy_class: source.privacy_class.clone(),
+                frames: BTreeMap::new(),
+                ambiguous_sequences: BTreeSet::new(),
+            });
+
+        if group.source_url != source.source_url {
+            insert_websocket_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "lifecycle_source_url_mismatch",
+            )?;
+            continue;
+        }
+        if group.privacy_class != source.privacy_class {
+            insert_websocket_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "lifecycle_privacy_class_mismatch",
+            )?;
+            continue;
+        }
+        if group.ambiguous_sequences.contains(&transport_sequence) {
+            insert_websocket_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "duplicate_transport_sequence",
+            )?;
+            continue;
+        }
+        if let Some(existing) = group.frames.remove(&transport_sequence) {
+            insert_websocket_skip(
+                transaction,
+                &existing.source_capture_id,
+                &group.source_url,
+                "duplicate_transport_sequence",
+            )?;
+            insert_websocket_skip(
+                transaction,
+                &source.capture_id,
+                &source.source_url,
+                "duplicate_transport_sequence",
+            )?;
+            group.ambiguous_sequences.insert(transport_sequence);
+            continue;
+        }
+
+        group.frames.insert(
+            transport_sequence,
+            WebSocketDerivedFrame {
+                transport_sequence,
+                direction: direction.to_owned(),
+                source_capture_id: source.capture_id,
+                source_body_hash: source.body_hash,
+                data: text.to_owned(),
+            },
+        );
+    }
+
+    for (lifecycle_id, group) in groups {
+        if group.frames.is_empty() {
+            continue;
+        }
+
+        transaction.execute(
+            r#"
+            INSERT INTO websocket_streams
+                (lifecycle_id, source_url, privacy_class, frame_count)
+            VALUES
+                (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                lifecycle_id,
+                group.source_url,
+                group.privacy_class,
+                group.frames.len() as i64,
+            ],
+        )?;
+
+        for frame in group.frames.into_values() {
+            transaction.execute(
+                r#"
+                INSERT INTO websocket_frames (
+                    lifecycle_id,
+                    transport_sequence,
+                    direction,
+                    source_capture_id,
+                    source_body_hash,
+                    data
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6
+                )
+                "#,
+                params![
+                    lifecycle_id,
+                    frame.transport_sequence as i64,
+                    frame.direction,
+                    frame.source_capture_id,
+                    frame.source_body_hash,
+                    frame.data,
+                ],
+            )?;
+        }
     }
 
     Ok(())
