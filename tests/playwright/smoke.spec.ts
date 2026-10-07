@@ -1997,6 +1997,51 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(corpusStats.attachment_observations).toBeGreaterThanOrEqual(1);
       expect(corpusStats.attachment_downloads).toBeGreaterThanOrEqual(1);
 
+      const readExportStatus = async () => {
+        const { stdout } = await execFileAsync(
+          cliPath,
+          ["corpus", "export-status"],
+          {
+            env: {
+              ...childEnv,
+              MIRRARIUM_DATA_DIR: dataDir,
+            },
+          },
+        );
+        return JSON.parse(stdout) as {
+          schema: string;
+          schema_version: number;
+          producer_corpus_schema_version: number;
+          record_type: string;
+          manifest: {
+            conversation_count: number;
+            index_sha256: string;
+          };
+          published_raw_capture_count: number;
+          published_raw_max_rowid: number;
+          current_raw_capture_count: number;
+          current_raw_max_rowid: number;
+          pending_raw_captures: number;
+          fresh: boolean;
+        };
+      };
+
+      const freshExportStatus = await readExportStatus();
+      expect(freshExportStatus).toMatchObject({
+        schema: "mirrarium.corpus.export-status",
+        schema_version: 1,
+        record_type: "export-status",
+        pending_raw_captures: 0,
+        fresh: true,
+      });
+      expect(freshExportStatus.producer_corpus_schema_version).toBeGreaterThan(0);
+      expect(freshExportStatus.current_raw_capture_count).toBe(
+        freshExportStatus.published_raw_capture_count,
+      );
+      expect(freshExportStatus.current_raw_max_rowid).toBe(
+        freshExportStatus.published_raw_max_rowid,
+      );
+
       const { stdout: corpusVerifyStdout } = await execFileAsync(
         cliPath,
         ["corpus", "verify"],
@@ -2053,6 +2098,86 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         raw_source_links_checked: expectedRawSourceLinks,
         errors: [],
       });
+
+      await page.evaluate(async () => {
+        const response = await fetch("/backend-api/stress-write/freshness-probe", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "freshness probe" }),
+        });
+        if (!response.ok) throw new Error("freshness probe failed");
+        await response.json();
+      });
+
+      await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(
+              cliPath,
+              ["captures", "200"],
+              {
+                env: {
+                  ...childEnv,
+                  MIRRARIUM_DATA_DIR: dataDir,
+                },
+              },
+            );
+            return (JSON.parse(stdout) as Array<{ url: string }>).some((capture) =>
+              capture.url.includes("/backend-api/stress-write/freshness-probe"),
+            );
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+
+      const staleExportStatus = await readExportStatus();
+      expect(staleExportStatus.fresh).toBe(false);
+      expect(staleExportStatus.pending_raw_captures).toBeGreaterThanOrEqual(1);
+      expect(staleExportStatus.published_raw_capture_count).toBe(
+        freshExportStatus.published_raw_capture_count,
+      );
+      expect(staleExportStatus.current_raw_capture_count).toBeGreaterThan(
+        staleExportStatus.published_raw_capture_count,
+      );
+      expect(staleExportStatus.current_raw_max_rowid).toBeGreaterThan(
+        staleExportStatus.published_raw_max_rowid,
+      );
+      expect(staleExportStatus.manifest).toEqual(freshExportStatus.manifest);
+
+      const { stdout: staleCorpusVerifyStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "verify"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(staleCorpusVerifyStdout)).toEqual(corpusVerify);
+
+      const { stdout: freshnessRebuildStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "rebuild"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(JSON.parse(freshnessRebuildStdout)).toEqual(corpusStats);
+
+      const refreshedExportStatus = await readExportStatus();
+      expect(refreshedExportStatus.fresh).toBe(true);
+      expect(refreshedExportStatus.pending_raw_captures).toBe(0);
+      expect(refreshedExportStatus.published_raw_capture_count).toBe(
+        staleExportStatus.current_raw_capture_count,
+      );
+      expect(refreshedExportStatus.published_raw_max_rowid).toBe(
+        staleExportStatus.current_raw_max_rowid,
+      );
+      expect(refreshedExportStatus.manifest).toEqual(freshExportStatus.manifest);
 
       const rebuildFailureCapture = captures.find(
         (capture) =>
@@ -2370,6 +2495,29 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         allErrors: true,
         strict: true,
       }).compile(corpusExportManifestSchema);
+
+      const { stdout: corpusExportStatusSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-status-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusExportStatusSchema = JSON.parse(corpusExportStatusSchemaStdout);
+      const exportStatusAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      exportStatusAjv.addSchema(corpusExportManifestSchema);
+      const validateCorpusExportStatus =
+        exportStatusAjv.compile(corpusExportStatusSchema);
+      expect(
+        validateCorpusExportStatus(await readExportStatus()),
+        JSON.stringify(validateCorpusExportStatus.errors),
+      ).toBe(true);
 
       const { stdout: corpusSyncStateSchemaStdout } = await execFileAsync(
         cliPath,
