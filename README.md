@@ -88,6 +88,8 @@ mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>
 mirrarium corpus canonical <conversation-id>
 mirrarium corpus attachments [conversation-id] [limit]
+mirrarium corpus streams [limit]
+mirrarium corpus stream-events <capture-id> [limit]
 mirrarium corpus websocket-streams [limit]
 mirrarium corpus websocket-frames <lifecycle-id> [limit]
 mirrarium corpus eventsource-streams [limit]
@@ -133,6 +135,8 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 `cache revalidation-stats` reports aggregate private revalidation outcomes without duplicating private URLs into the telemetry table: total candidate responses, origin `304` reuse, fresh `200` updates, fulfillment errors, and private response-body bytes avoided by successful 304 substitution.
 
 `corpus conversations` lists observed conversation identities with snapshot/message/stream counts. `corpus conversation` returns the evidence for one identity: source-tagged message observations and stream reconstructions. `corpus canonical` computes a read-only transcript from the newest JSON snapshot, following ChatGPT's `current_node` parent chain when mapping data is present. Unselected branches remain available through the evidence command, and unlinked stream text is never silently spliced into the transcript.
+
+`corpus streams` lists completed whole-response SSE captures already present in the derived corpus with sanitized source URL, privacy class, source body hash, and event count. `corpus stream-events` returns the parsed SSE events for one capture in sequence order, preserving event name, raw data text, and JSON-validity status; terminal markers such as `[DONE]` remain explicit evidence rather than being normalized away.
 
 `corpus websocket-streams` lists derived socket lifecycles containing trusted archived JSON frames; `corpus websocket-frames` returns those frames in explicit transport-sequence order with sent/received direction, source capture/hash provenance, and sanitized JSON text. Suppressed raw socket frames are intentionally absent from this derived view.
 

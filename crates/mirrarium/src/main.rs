@@ -261,6 +261,37 @@ fn run() -> Result<()> {
                     )?
                 );
             }
+            Some("streams") => {
+                let limit = arguments
+                    .get(2)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("stream capture limit must be a positive integer")?
+                    .unwrap_or(100);
+                anyhow::ensure!(limit > 0, "stream capture limit must be greater than zero");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&corpus::streams(&root, limit)?)?
+                );
+            }
+            Some("stream-events") => {
+                let capture_id = arguments
+                    .get(2)
+                    .context("missing stream capture id")?;
+                let limit = arguments
+                    .get(3)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .context("stream event limit must be a positive integer")?
+                    .unwrap_or(500);
+                anyhow::ensure!(limit > 0, "stream event limit must be greater than zero");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &corpus::stream_events(&root, capture_id, limit)?
+                    )?
+                );
+            }
             Some("websocket-streams") => {
                 let limit = arguments
                     .get(2)
@@ -1212,6 +1243,8 @@ USAGE:
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
   mirrarium corpus canonical <ID>
   mirrarium corpus attachments [CONVERSATION_ID] [LIMIT]
+  mirrarium corpus streams [LIMIT]
+  mirrarium corpus stream-events <CAPTURE_ID> [LIMIT]
   mirrarium corpus websocket-streams [LIMIT]
   mirrarium corpus websocket-frames <LIFECYCLE_ID> [LIMIT]
   mirrarium corpus eventsource-streams [LIMIT]

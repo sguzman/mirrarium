@@ -100,6 +100,24 @@ pub struct AttachmentView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct StreamCaptureView {
+    pub capture_id: String,
+    pub source_url: String,
+    pub privacy_class: String,
+    pub source_body_hash: String,
+    pub event_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamEventView {
+    pub capture_id: String,
+    pub sequence: u64,
+    pub event_name: Option<String>,
+    pub data: String,
+    pub json_valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct WebSocketStreamView {
     pub lifecycle_id: String,
     pub source_url: String,
@@ -730,6 +748,74 @@ pub fn verify(raw_root: impl AsRef<Path>) -> Result<CorpusVerifyReport> {
     let corpus = open_corpus_read_only(raw_root.as_ref())?;
     let raw = open_raw_ledger_read_only(raw_root.as_ref())?;
     verify_corpus_connections(&corpus, &raw)
+}
+
+pub fn streams(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<StreamCaptureView>> {
+    anyhow::ensure!(limit > 0, "stream capture limit must be greater than zero");
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id,
+            source_url,
+            privacy_class,
+            source_body_hash,
+            event_count
+        FROM stream_captures
+        ORDER BY capture_id
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement
+        .query_map([limit as i64], |row| {
+            Ok(StreamCaptureView {
+                capture_id: row.get(0)?,
+                source_url: row.get(1)?,
+                privacy_class: row.get(2)?,
+                source_body_hash: row.get(3)?,
+                event_count: row.get::<_, i64>(4)? as u64,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn stream_events(
+    raw_root: impl AsRef<Path>,
+    capture_id: &str,
+    limit: u64,
+) -> Result<Vec<StreamEventView>> {
+    anyhow::ensure!(
+        !capture_id.trim().is_empty(),
+        "stream capture id must not be empty"
+    );
+    anyhow::ensure!(limit > 0, "stream event limit must be greater than zero");
+
+    let connection = open_corpus_read_only(raw_root)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT capture_id, sequence, event_name, data, json_valid
+        FROM stream_events
+        WHERE capture_id = ?1
+        ORDER BY sequence
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = statement
+        .query_map(params![capture_id, limit as i64], |row| {
+            Ok(StreamEventView {
+                capture_id: row.get(0)?,
+                sequence: row.get::<_, i64>(1)? as u64,
+                event_name: row.get(2)?,
+                data: row.get(3)?,
+                json_valid: row.get::<_, i64>(4)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn websocket_streams(

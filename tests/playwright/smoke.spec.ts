@@ -1987,6 +1987,78 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(JSON.parse(recoveredCorpusVerifyStdout)).toEqual(corpusVerify);
 
+      const { stdout: streamsStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "streams", "20"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const streams = JSON.parse(streamsStdout) as Array<{
+        capture_id: string;
+        source_url: string;
+        privacy_class: string;
+        source_body_hash: string;
+        event_count: number;
+      }>;
+      const completedStream = streams.find(
+        (stream) =>
+          stream.source_url.endsWith("/backend-api/conversation/stream"),
+      );
+      expect(completedStream).toMatchObject({
+        privacy_class: "private",
+        event_count: 3,
+      });
+      expect(completedStream?.source_body_hash).toMatch(/^[0-9a-f]{64}$/);
+
+      const { stdout: streamEventsStdout } = await execFileAsync(
+        cliPath,
+        [
+          "corpus",
+          "stream-events",
+          completedStream?.capture_id as string,
+          "20",
+        ],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const streamEvents = JSON.parse(streamEventsStdout) as Array<{
+        capture_id: string;
+        sequence: number;
+        event_name?: string;
+        data: string;
+        json_valid: boolean;
+      }>;
+      expect(streamEvents).toHaveLength(3);
+      expect(streamEvents.map((event) => event.sequence)).toEqual([0, 1, 2]);
+      expect(streamEvents.map((event) => event.json_valid)).toEqual([
+        true,
+        true,
+        false,
+      ]);
+      expect(streamEvents[0]).toMatchObject({
+        capture_id: completedStream?.capture_id,
+        event_name: "message",
+        data: '{"conversation_id":"fixture-stream","delta":"hello"}',
+      });
+      expect(streamEvents[1]).toMatchObject({
+        capture_id: completedStream?.capture_id,
+        event_name: "message",
+        data: '{"conversation_id":"fixture-stream","delta":" world"}',
+      });
+      expect(streamEvents[2]).toMatchObject({
+        capture_id: completedStream?.capture_id,
+        data: "[DONE]",
+        json_valid: false,
+      });
+
       const { stdout: webSocketStreamsStdout } = await execFileAsync(
         cliPath,
         ["corpus", "websocket-streams", "20"],
