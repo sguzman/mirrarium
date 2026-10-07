@@ -250,7 +250,13 @@ impl CaptureStore {
 
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
+        let root_existed = root.is_dir();
         fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+        if !root_existed {
+            if let Some(parent) = root.parent() {
+                sync_directory(parent)?;
+            }
+        }
         fs::create_dir_all(root.join(".incoming"))?;
         fs::create_dir_all(root.join("public/objects"))?;
         fs::create_dir_all(root.join("private/objects"))?;
@@ -376,6 +382,18 @@ impl CaptureStore {
             "declared_content_length",
             "INTEGER",
         )?;
+
+        for directory in [
+            root.join(".incoming"),
+            root.join("public"),
+            root.join("private"),
+            root.join("unknown"),
+            root.clone(),
+        ] {
+            if directory.is_dir() {
+                sync_directory(&directory)?;
+            }
+        }
 
         Ok(Self {
             root,
