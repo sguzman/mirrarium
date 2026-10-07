@@ -346,8 +346,32 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     harden_directory(&derived_root)?;
 
     let corpus_database = derived_root.join("corpus.sqlite3");
-    remove_corpus_database_files(&corpus_database)?;
-    let mut corpus = Connection::open(&corpus_database)
+    let staging_database = derived_root.join(".corpus.sqlite3.rebuild");
+    remove_corpus_database_files(&staging_database)?;
+
+    let stats = match rebuild_into(raw_root, &staging_database) {
+        Ok(stats) => stats,
+        Err(error) => {
+            let _ = remove_corpus_database_files(&staging_database);
+            return Err(error);
+        }
+    };
+
+    sync_file(&staging_database)?;
+    ensure_corpus_publish_target_quiescent(&corpus_database)?;
+    fs::rename(&staging_database, &corpus_database).with_context(|| {
+        format!(
+            "atomically publishing staged corpus {} to {}",
+            staging_database.display(),
+            corpus_database.display()
+        )
+    })?;
+    sync_directory(&derived_root)?;
+    Ok(stats)
+}
+
+fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> {
+    let mut corpus = Connection::open(corpus_database)
         .with_context(|| format!("opening {}", corpus_database.display()))?;
     apply_private_database_key(&corpus, raw_root, "corpus-sqlcipher-v1", true)
         .context("creating encrypted derived corpus")?;
@@ -355,8 +379,8 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
 
     corpus.execute_batch(
         r#"
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
+        PRAGMA journal_mode = DELETE;
+        PRAGMA synchronous = FULL;
         PRAGMA foreign_keys = ON;
 
         DROP TABLE IF EXISTS websocket_frames;
@@ -607,112 +631,88 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     derive_eventsource_messages(&transaction, raw_root, eventsource_sources)?;
     correlate_attachment_downloads(&transaction, &download_sources)?;
 
+
     transaction.commit()?;
-    stats(raw_root)
+
+    let report = verify_corpus_connections(&corpus, &raw)?;
+    anyhow::ensure!(
+        report.sqlite_integrity_ok
+            && report.foreign_key_violations == 0
+            && report.errors.is_empty(),
+        "staged derived corpus verification failed: {} foreign-key violation(s), {} semantic error(s)",
+        report.foreign_key_violations,
+        report.errors.len()
+    );
+    let stats = corpus_stats_from_connection(&corpus)?;
+    Ok(stats)
 }
 
 pub fn stats(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
-    let database = raw_root.as_ref().join("derived/corpus.sqlite3");
-    anyhow::ensure!(
-        database.is_file(),
-        "derived corpus does not exist; run 'mirrarium corpus rebuild'"
-    );
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening {}", database.display()))?;
-    apply_private_database_key(
-        &connection,
-        raw_root.as_ref(),
-        "corpus-sqlcipher-v1",
-        false,
-    )
-    .context("opening encrypted derived corpus; restore the Mirrarium private key or run 'mirrarium corpus rebuild'")?;
-    validate_corpus_schema(&connection)?;
+    let connection = open_corpus_read_only(raw_root)?;
+    corpus_stats_from_connection(&connection)
+}
 
-    for table in [
-        "stream_captures",
-        "stream_events",
-        "websocket_streams",
-        "websocket_frames",
-        "websocket_skipped_captures",
-        "eventsource_streams",
-        "eventsource_events",
-        "eventsource_skipped_captures",
-        "stream_message_revisions",
-        "conversation_snapshots",
-        "message_observations",
-        "stream_reconstructions",
-        "attachment_observations",
-        "attachment_downloads",
-    ] {
-        anyhow::ensure!(
-            table_exists(&connection, table)?,
-            "derived corpus schema is out of date; run 'mirrarium corpus rebuild'"
-        );
-    }
-
+fn corpus_stats_from_connection(connection: &Connection) -> Result<CorpusStats> {
     Ok(CorpusStats {
         stream_captures: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM stream_captures",
         )?,
-        stream_events: scalar_u64(&connection, "SELECT COUNT(*) FROM stream_events")?,
+        stream_events: scalar_u64(connection, "SELECT COUNT(*) FROM stream_events")?,
         json_stream_events: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM stream_events WHERE json_valid = 1",
         )?,
         websocket_streams: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM websocket_streams",
         )?,
         websocket_frames: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM websocket_frames",
         )?,
         websocket_skipped_captures: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM websocket_skipped_captures",
         )?,
         eventsource_streams: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM eventsource_streams",
         )?,
         eventsource_events: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM eventsource_events",
         )?,
         eventsource_json_events: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM eventsource_events WHERE json_valid = 1",
         )?,
         eventsource_skipped_captures: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM eventsource_skipped_captures",
         )?,
         stream_message_revisions: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM stream_message_revisions",
         )?,
         conversation_snapshots: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM conversation_snapshots",
         )?,
         message_observations: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM message_observations",
         )?,
         stream_reconstructions: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM stream_reconstructions",
         )?,
         attachment_observations: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM attachment_observations",
         )?,
         attachment_downloads: scalar_u64(
-            &connection,
+            connection,
             "SELECT COUNT(*) FROM attachment_downloads",
         )?,
     })
@@ -2701,6 +2701,12 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
         "stream_reconstructions",
         "attachment_observations",
         "attachment_downloads",
+        "websocket_streams",
+        "websocket_frames",
+        "websocket_skipped_captures",
+        "eventsource_streams",
+        "eventsource_events",
+        "eventsource_skipped_captures",
     ] {
         anyhow::ensure!(
             table_exists(&connection, table)?,
@@ -4183,6 +4189,44 @@ fn parse_sse(input: &str) -> Vec<SseEvent> {
         &mut data_lines,
     );
     events
+}
+
+fn corpus_sidecar_paths(database: &Path) -> [PathBuf; 2] {
+    [
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ]
+}
+
+fn ensure_corpus_publish_target_quiescent(database: &Path) -> Result<()> {
+    for sidecar in corpus_sidecar_paths(database) {
+        anyhow::ensure!(
+            !sidecar.exists(),
+            "cannot atomically replace derived corpus while SQLite sidecar exists: {}; retry after concurrent corpus readers/writers close",
+            sidecar.display()
+        );
+    }
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("opening {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing {}", path.display()))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("opening directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn remove_corpus_database_files(database: &Path) -> Result<()> {
