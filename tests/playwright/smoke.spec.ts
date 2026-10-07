@@ -1070,6 +1070,33 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       });
       expect(eventSourceRoundTrip.done).toBe("[DONE]");
 
+      const eventSourceReconnect = await page.evaluate(
+        () =>
+          new Promise<{ messages: string[] }>((resolve, reject) => {
+            const source = new EventSource(
+              "https://chatgpt.com:43117/backend-api/eventsource-reconnect?token=fixture-eventsource-reconnect-secret&keep=yes",
+            );
+            const messages: string[] = [];
+            const timeout = setTimeout(() => {
+              source.close();
+              reject(new Error("eventsource reconnect fixture timed out"));
+            }, 5_000);
+
+            source.addEventListener("reconnect", (event) => {
+              messages.push((event as MessageEvent<string>).data);
+              if (messages.length === 2) {
+                clearTimeout(timeout);
+                source.close();
+                resolve({ messages });
+              }
+            });
+          }),
+      );
+      expect(eventSourceReconnect.messages.map((message) => JSON.parse(message))).toEqual([
+        { leg: 1, access_token: "fixture-reconnect-secret-1" },
+        { leg: 2, access_token: "fixture-reconnect-secret-2" },
+      ]);
+
       await expect
         .poll(
           async () => {
@@ -1100,7 +1127,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           },
           { timeout: 10_000 },
         )
-        .toBeGreaterThanOrEqual(2);
+        .toBeGreaterThanOrEqual(4);
 
       const { stdout: capturesStdout } = await execFileAsync(
         cliPath,
@@ -1402,6 +1429,39 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           .map((capture) => capture.provenance.transport_sequence)
           .sort((left, right) => (left ?? 0) - (right ?? 0)),
       ).toEqual([0, 1]);
+
+      const reconnectMessages = captures.filter(
+        (capture) =>
+          capture.method === "SSE_RECV" &&
+          capture.resource_type === "EventSourceMessage" &&
+          capture.url.includes("/backend-api/eventsource-reconnect"),
+      );
+      expect(reconnectMessages).toHaveLength(2);
+      expect(
+        reconnectMessages.every(
+          (capture) => capture.provenance.transport_sequence === 0,
+        ),
+      ).toBe(true);
+      expect(
+        new Set(
+          reconnectMessages.map((capture) => capture.provenance.lifecycle_id),
+        ).size,
+      ).toBe(2);
+      expect(
+        reconnectMessages.every(
+          (capture) => !capture.url.includes("fixture-eventsource-reconnect-secret"),
+        ),
+      ).toBe(true);
+
+      const reconnectSecondLeg = reconnectMessages.find((capture) => {
+        const headers = Object.fromEntries(
+          Object.entries(capture.provenance.request_headers ?? {}).map(
+            ([key, value]) => [key.toLowerCase(), value],
+          ),
+        );
+        return headers["last-event-id"] === "fixture-reconnect-1";
+      });
+      expect(reconnectSecondLeg).toBeTruthy();
 
       const unfinishedEventSourceResponse = captures.find(
         (capture) =>

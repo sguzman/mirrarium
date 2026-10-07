@@ -24,6 +24,7 @@ let privateQueryHits = 0;
 let privateQueryConditional304s = 0;
 let privateDocumentHits = 0;
 let privateDocumentConditional304s = 0;
+let eventSourceReconnectHits = 0;
 
 execFileSync("openssl", [
   "req",
@@ -582,6 +583,30 @@ const fixtureServer = https.createServer(
     ) {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true, method: request.method }));
+      return;
+    }
+
+    if (request.url?.startsWith("/backend-api/eventsource-reconnect")) {
+      eventSourceReconnectHits += 1;
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+        "x-mirrarium-eventsource": "reconnect-fixture",
+      });
+      response.flushHeaders();
+
+      if (eventSourceReconnectHits === 1) {
+        response.write("retry: 10\n");
+        response.write("event: reconnect\n");
+        response.write("id: fixture-reconnect-1\n");
+        response.write('data: {"leg":1,"access_token":"fixture-reconnect-secret-1"}\n\n');
+        response.end();
+      } else {
+        response.write("event: reconnect\n");
+        response.write("id: fixture-reconnect-2\n");
+        response.write('data: {"leg":2,"access_token":"fixture-reconnect-secret-2"}\n\n');
+      }
       return;
     }
 
