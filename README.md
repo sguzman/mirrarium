@@ -86,6 +86,7 @@ mirrarium corpus rebuild
 mirrarium corpus stats
 mirrarium corpus verify
 mirrarium corpus export-schema
+mirrarium corpus export-one <conversation-id>
 mirrarium corpus export [limit]
 mirrarium corpus conversations 50
 mirrarium corpus conversation <conversation-id>

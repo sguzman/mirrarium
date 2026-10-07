@@ -2220,10 +2220,11 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(corpusExportRepeatStdout).toBe(corpusExportStdout);
 
-      const exportRecords = corpusExportStdout
+      const exportLines = corpusExportStdout
         .trim()
         .split("\n")
-        .filter((line) => line.length > 0)
+        .filter((line) => line.length > 0);
+      const exportRecords = exportLines
         .map((line) => JSON.parse(line)) as Array<{
         schema: string;
         schema_version: number;
@@ -2274,6 +2275,28 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       const exportedConversation = exportRecords.find(
         (record) => record.conversation_id === "fixture-conversation",
       );
+      const exportedConversationLine = exportLines.find(
+        (line) => JSON.parse(line).conversation_id === "fixture-conversation",
+      );
+      expect(exportedConversationLine).toBeTruthy();
+
+      const { stdout: singleConversationExportStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-one", "fixture-conversation"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      expect(singleConversationExportStdout.trimEnd()).toBe(
+        exportedConversationLine,
+      );
+      expect(
+        validateCorpusExport(JSON.parse(singleConversationExportStdout)),
+        JSON.stringify(validateCorpusExport.errors),
+      ).toBe(true);
       expect(exportedConversation?.canonical_error ?? null).toBeNull();
       expect(exportedConversation?.canonical?.basis_capture_id.length).toBeGreaterThan(0);
       expect(exportedConversation?.canonical?.basis_source_body_hash).toMatch(

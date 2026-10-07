@@ -1131,6 +1131,24 @@ fn conversation_ids_for_connection(
     Ok(ids)
 }
 
+pub fn export_conversation(
+    raw_root: impl AsRef<Path>,
+    conversation_id: &str,
+) -> Result<Option<ConversationExportRecord>> {
+    anyhow::ensure!(
+        !conversation_id.trim().is_empty(),
+        "conversation id must not be empty"
+    );
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let connection = open_corpus_read_only(raw_root)?;
+    if conversation_summary(&connection, conversation_id)?.is_none() {
+        return Ok(None);
+    }
+    drop(connection);
+    conversation_export_record(raw_root, conversation_id.to_owned()).map(Some)
+}
+
 pub fn export_conversations(
     raw_root: impl AsRef<Path>,
     limit: Option<u64>,

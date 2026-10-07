@@ -242,6 +242,14 @@ fn run() -> Result<()> {
             Some("export-schema") => {
                 print!("{}", corpus::CORPUS_EXPORT_SCHEMA_V1_JSON);
             }
+            Some("export-one") => {
+                let conversation_id = arguments
+                    .get(2)
+                    .context("missing conversation id")?;
+                let record = corpus::export_conversation(&root, conversation_id)?
+                    .with_context(|| format!("conversation {conversation_id:?} not found"))?;
+                println!("{}", serde_json::to_string(&record)?);
+            }
             Some("export") => {
                 let limit = arguments
                     .get(2)
@@ -1331,6 +1339,7 @@ USAGE:
   mirrarium corpus stats
   mirrarium corpus verify
   mirrarium corpus export-schema
+  mirrarium corpus export-one <CONVERSATION_ID>
   mirrarium corpus export [LIMIT]
   mirrarium corpus conversations [LIMIT]
   mirrarium corpus conversation <ID> [MESSAGE_LIMIT]
