@@ -246,9 +246,10 @@ fn run() -> Result<()> {
                 if let Some(limit) = limit {
                     anyhow::ensure!(limit > 0, "export limit must be greater than zero");
                 }
-                for record in corpus::export_conversations(&root, limit)? {
-                    println!("{}", serde_json::to_string(&record)?);
-                }
+                let stdout = std::io::stdout();
+                let mut stdout = std::io::BufWriter::new(stdout.lock());
+                corpus::write_conversation_export_jsonl(&root, limit, &mut stdout)?;
+                stdout.flush().context("flushing corpus JSONL export")?;
             }
             Some("conversations") => {
                 let limit = arguments

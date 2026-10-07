@@ -124,6 +124,7 @@ Implemented:
 - conversation snapshots and message observations from ChatGPT-shaped JSON;
 - reconstructed stream text from conversation-tagged SSE deltas;
 - read-only conversation discovery and evidence inspection through the CLI;
+- versioned conversation JSONL interoperability export with a pinned corpus generation and record-at-a-time CLI streaming, preserving deterministic conversation-ID ordering without archive-sized export buffering;
 - exact raw-capture inspection by durable `capture_id`, with recent listings exposing the same ID so every derived provenance key can be resolved without raw SQL; explicit response/request body modes re-read only verified CAS objects, transparently decrypt private storage, preserve hash/byte checks, and encode non-text payloads as base64;
 - branch-aware canonical conversation views computed from immutable snapshot evidence;
 - per-event stream message revision history with explicit message/parent identity;

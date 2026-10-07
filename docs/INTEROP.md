@@ -4,7 +4,7 @@
 
 ## v1 framing
 
-The command writes JSON Lines to stdout: one complete JSON object per conversation, ordered by `conversation_id`. With no limit it exports every derived conversation. A positive limit restricts the number of conversation records. There is no header line; every record is self-describing.
+The command writes JSON Lines to stdout: one complete JSON object per conversation, ordered by `conversation_id`. With no limit it exports every derived conversation. A positive limit restricts the number of conversation records. There is no header line; every record is self-describing. The CLI streams records as they are composed while holding the generation lock; it does not materialize the full archive export in memory before writing. Peak export memory therefore scales with the largest single conversation record rather than the total number of conversations.
 
 An export pins one published derived-corpus generation with a shared rebuild lock for the lifetime of the command. Multiple exports may run together, but `corpus rebuild` cannot replace the published generation until active exports finish. Normal browser capture remains independent and continues through the raw-store writer.
 
