@@ -2042,11 +2042,12 @@ fn verify_transport_corpus(
                             WHERE lifecycle_id = ?1 AND event_id = ?2
                             "#,
                         )?;
-                        statement
-                            .query_map(params![parent_lifecycle_id, last_event_id], |row| {
-                                row.get::<_, String>(0)
-                            })?
-                            .collect::<rusqlite::Result<Vec<_>>>()?
+                        let rows = statement.query_map(
+                            params![parent_lifecycle_id, last_event_id],
+                            |row| row.get::<_, String>(0),
+                        )?;
+                        let captures = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                        captures
                     };
                     if matching_parent_captures.is_empty() {
                         errors.push(format!(
@@ -3904,7 +3905,7 @@ mod tests {
             [],
         ).unwrap();
         corpus.execute(
-            "INSERT INTO websocket_frames (lifecycle_id, transport_sequence, direction, source_capture_id, source_body_hash, data) VALUES ('ws-life', 0, 'received', 'ws-capture', ?1, '{"ok":true}')",
+            r#"INSERT INTO websocket_frames (lifecycle_id, transport_sequence, direction, source_capture_id, source_body_hash, data) VALUES ('ws-life', 0, 'received', 'ws-capture', ?1, '{"ok":true}')"#,
             [ws_hash],
         ).unwrap();
 
@@ -3913,7 +3914,7 @@ mod tests {
             [],
         ).unwrap();
         corpus.execute(
-            "INSERT INTO eventsource_events (lifecycle_id, transport_sequence, source_capture_id, source_body_hash, event_name, event_id, data, json_valid) VALUES ('event-life-1', 0, 'event-capture-1', ?1, 'message', 'cursor-1', '{"leg":1}', 1)",
+            r#"INSERT INTO eventsource_events (lifecycle_id, transport_sequence, source_capture_id, source_body_hash, event_name, event_id, data, json_valid) VALUES ('event-life-1', 0, 'event-capture-1', ?1, 'message', 'cursor-1', '{"leg":1}', 1)"#,
             [event_hash_1],
         ).unwrap();
         corpus.execute(
