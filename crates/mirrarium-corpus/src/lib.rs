@@ -1351,6 +1351,14 @@ fn export_source_capture_ids(
     ids.into_iter().collect()
 }
 
+fn conversation_export_record_sha256(
+    payload: &ConversationExportHashPayload<'_>,
+) -> Result<String> {
+    let bytes = serde_json::to_vec(payload)
+        .context("serializing corpus export hash payload")?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
 fn conversation_export_record(
     raw_root: &Path,
     conversation_id: String,
@@ -1380,24 +1388,20 @@ fn conversation_export_record(
 
     let schema = "mirrarium.corpus.conversation".to_owned();
     let record_type = "conversation".to_owned();
-    let record_sha256 = {
-        let payload = ConversationExportHashPayload {
-            schema: &schema,
-            schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
-            producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
-            record_type: &record_type,
-            conversation_id: &conversation_id,
-            source_capture_ids: &source_capture_ids,
-            evidence: &evidence,
-            canonical: &canonical,
-            canonical_error: &canonical_error,
-            stream_revisions: &stream_revisions,
-            attachments: &attachments,
-        };
-        let bytes =
-            serde_json::to_vec(&payload).context("serializing corpus export hash payload")?;
-        format!("{:x}", Sha256::digest(&bytes))
+    let payload = ConversationExportHashPayload {
+        schema: &schema,
+        schema_version: CORPUS_EXPORT_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: &record_type,
+        conversation_id: &conversation_id,
+        source_capture_ids: &source_capture_ids,
+        evidence: &evidence,
+        canonical: &canonical,
+        canonical_error: &canonical_error,
+        stream_revisions: &stream_revisions,
+        attachments: &attachments,
     };
+    let record_sha256 = conversation_export_record_sha256(&payload)?;
 
     Ok(ConversationExportRecord {
         schema,
@@ -5377,6 +5381,78 @@ mod tests {
         assert_eq!(collect_sources(&snapshot, query).unwrap().len(), 1);
         snapshot.commit().unwrap();
         assert_eq!(collect_sources(&reader, query).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn corpus_export_v1_hash_golden_vector_matches_line_member_removal() {
+        const EXPECTED_SHA256: &str =
+            "c9e53b8d97befcbbfa5cb053a17ef433d5126ebe772c77dbeaa9a8d5a3bbd58a";
+        const EXPECTED_PREIMAGE: &str = r#"{"schema":"mirrarium.corpus.conversation","schema_version":1,"producer_corpus_schema_version":4,"record_type":"conversation","conversation_id":"golden-conversation","source_capture_ids":[],"evidence":{"summary":{"conversation_id":"golden-conversation","title":"Golden","snapshot_count":1,"message_observation_count":0,"stream_reconstruction_count":0,"stream_revision_count":0,"attachment_observation_count":0},"messages":[],"streams":[]},"canonical":null,"canonical_error":null,"stream_revisions":[],"attachments":[]}"#;
+
+        let schema = "mirrarium.corpus.conversation".to_owned();
+        let record_type = "conversation".to_owned();
+        let conversation_id = "golden-conversation".to_owned();
+        let source_capture_ids = Vec::<String>::new();
+        let evidence = ConversationView {
+            summary: ConversationSummary {
+                conversation_id: conversation_id.clone(),
+                title: Some("Golden".to_owned()),
+                snapshot_count: 1,
+                message_observation_count: 0,
+                stream_reconstruction_count: 0,
+                stream_revision_count: 0,
+                attachment_observation_count: 0,
+            },
+            messages: Vec::new(),
+            streams: Vec::new(),
+        };
+        let canonical: Option<CanonicalConversationView> = None;
+        let canonical_error: Option<String> = None;
+        let stream_revisions = Vec::<StreamMessageRevisionView>::new();
+        let attachments = Vec::<AttachmentView>::new();
+        let payload = ConversationExportHashPayload {
+            schema: &schema,
+            schema_version: 1,
+            producer_corpus_schema_version: 4,
+            record_type: &record_type,
+            conversation_id: &conversation_id,
+            source_capture_ids: &source_capture_ids,
+            evidence: &evidence,
+            canonical: &canonical,
+            canonical_error: &canonical_error,
+            stream_revisions: &stream_revisions,
+            attachments: &attachments,
+        };
+        let preimage = serde_json::to_string(&payload).unwrap();
+        assert_eq!(preimage, EXPECTED_PREIMAGE);
+        assert_eq!(
+            conversation_export_record_sha256(&payload).unwrap(),
+            EXPECTED_SHA256
+        );
+
+        let record = ConversationExportRecord {
+            schema,
+            schema_version: 1,
+            producer_corpus_schema_version: 4,
+            record_type,
+            conversation_id,
+            source_capture_ids,
+            record_sha256: EXPECTED_SHA256.to_owned(),
+            evidence,
+            canonical,
+            canonical_error,
+            stream_revisions,
+            attachments,
+        };
+        let record_line = serde_json::to_string(&record).unwrap();
+        let hash_member = format!(
+            "\"record_sha256\":\"{}\",",
+            EXPECTED_SHA256
+        );
+        assert_eq!(
+            record_line.replacen(&hash_member, "", 1),
+            EXPECTED_PREIMAGE
+        );
     }
 
     #[test]
