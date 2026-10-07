@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:export-status:v1",
+  "title": "Mirrarium corpus export status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "producer_corpus_schema_version",
+    "record_type",
+    "manifest",
+    "published_raw_capture_count",
+    "published_raw_max_rowid",
+    "current_raw_capture_count",
+    "current_raw_max_rowid",
+    "pending_raw_captures",
+    "fresh"
+  ],
+  "properties": {
+    "schema": { "const": "mirrarium.corpus.export-status" },
+    "schema_version": { "const": 1 },
+    "producer_corpus_schema_version": { "type": "integer", "minimum": 1 },
+    "record_type": { "const": "export-status" },
+    "manifest": { "$ref": "urn:mirrarium:corpus:export-manifest:v1" },
+    "published_raw_capture_count": { "type": "integer", "minimum": 0 },
+    "published_raw_max_rowid": { "type": "integer", "minimum": 0 },
+    "current_raw_capture_count": { "type": "integer", "minimum": 0 },
+    "current_raw_max_rowid": { "type": "integer", "minimum": 0 },
+    "pending_raw_captures": { "type": "integer", "minimum": 0 },
+    "fresh": { "type": "boolean" }
+  }
+}

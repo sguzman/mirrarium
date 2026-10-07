@@ -20,7 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-const CORPUS_SCHEMA_VERSION: i64 = 6;
+const CORPUS_SCHEMA_VERSION: i64 = 7;
 pub const CORPUS_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-conversation-v1.schema.json");
@@ -30,6 +30,9 @@ pub const CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON: &str =
 pub const CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-export-manifest-v1.schema.json");
+pub const CORPUS_EXPORT_STATUS_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-export-status-v1.schema.json");
 pub const CORPUS_SYNC_STATE_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_STATE_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-state-v1.schema.json");
@@ -297,6 +300,21 @@ pub struct ConversationExportManifest {
     pub record_type: String,
     pub conversation_count: u64,
     pub index_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationExportStatus {
+    pub schema: String,
+    pub schema_version: u32,
+    pub producer_corpus_schema_version: i64,
+    pub record_type: String,
+    pub manifest: ConversationExportManifest,
+    pub published_raw_capture_count: u64,
+    pub published_raw_max_rowid: u64,
+    pub current_raw_capture_count: u64,
+    pub current_raw_max_rowid: u64,
+    pub pending_raw_captures: u64,
+    pub fresh: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -686,7 +704,11 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
             conversation_count INTEGER NOT NULL
                 CHECK(conversation_count >= 0),
             index_sha256 TEXT NOT NULL
-                CHECK(length(index_sha256) = 64)
+                CHECK(length(index_sha256) = 64),
+            raw_capture_count INTEGER NOT NULL
+                CHECK(raw_capture_count >= 0),
+            raw_max_rowid INTEGER NOT NULL
+                CHECK(raw_max_rowid >= 0)
         );
 
         CREATE TABLE stream_reconstructions (
@@ -840,7 +862,7 @@ fn rebuild_into(raw_root: &Path, corpus_database: &Path) -> Result<CorpusStats> 
         report.errors.len()
     );
     let export_index_errors =
-        verify_materialized_conversation_export_index(raw_root, &corpus, &raw_snapshot)?;
+        verify_materialized_conversation_export_index(raw_root, &corpus, &raw_snapshot, true)?;
     anyhow::ensure!(
         export_index_errors.is_empty(),
         "staged derived corpus export index verification failed: {}",
@@ -930,7 +952,7 @@ pub fn verify(raw_root: impl AsRef<Path>) -> Result<CorpusVerifyReport> {
     let raw = open_raw_ledger_read_only(raw_root)?;
     let mut report = verify_corpus_connections(&corpus, &raw)?;
     report.errors.extend(
-        verify_materialized_conversation_export_index(raw_root, &corpus, &raw)?,
+        verify_materialized_conversation_export_index(raw_root, &corpus, &raw, false)?,
     );
     Ok(report)
 }
@@ -1667,6 +1689,46 @@ pub fn export_manifest(raw_root: impl AsRef<Path>) -> Result<ConversationExportM
     materialized_export_manifest_for_connection(&corpus)
 }
 
+pub fn export_status(raw_root: impl AsRef<Path>) -> Result<ConversationExportStatus> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let manifest = materialized_export_manifest_for_connection(&corpus)?;
+    let (published_raw_capture_count, published_raw_max_rowid) =
+        materialized_export_watermark_for_connection(&corpus)?;
+
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    let (current_raw_capture_count, current_raw_max_rowid) =
+        raw_capture_watermark(&raw)?;
+
+    anyhow::ensure!(
+        current_raw_capture_count >= published_raw_capture_count
+            && current_raw_max_rowid >= published_raw_max_rowid,
+        "raw ledger is behind the published corpus watermark; restore the matching raw archive or rebuild the corpus from the current archive"
+    );
+    if current_raw_capture_count == published_raw_capture_count {
+        anyhow::ensure!(
+            current_raw_max_rowid == published_raw_max_rowid,
+            "raw ledger watermark disagrees with the published corpus despite equal capture counts"
+        );
+    }
+
+    Ok(ConversationExportStatus {
+        schema: "mirrarium.corpus.export-status".to_owned(),
+        schema_version: CORPUS_EXPORT_STATUS_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: "export-status".to_owned(),
+        manifest,
+        published_raw_capture_count,
+        published_raw_max_rowid,
+        current_raw_capture_count,
+        current_raw_max_rowid,
+        pending_raw_captures: current_raw_capture_count - published_raw_capture_count,
+        fresh: current_raw_capture_count == published_raw_capture_count
+            && current_raw_max_rowid == published_raw_max_rowid,
+    })
+}
+
 pub fn write_conversation_export_index_jsonl<W: Write>(
     raw_root: impl AsRef<Path>,
     limit: Option<u64>,
@@ -1889,6 +1951,47 @@ fn conversation_export_record_sha256(
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
+fn raw_capture_watermark(connection: &Connection) -> Result<(u64, u64)> {
+    let (capture_count, max_rowid) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM captures",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    anyhow::ensure!(
+        capture_count >= 0 && max_rowid >= 0,
+        "raw capture watermark contains negative values"
+    );
+    Ok((
+        u64::try_from(capture_count).context("raw capture count overflow")?,
+        u64::try_from(max_rowid).context("raw capture rowid overflow")?,
+    ))
+}
+
+fn materialized_export_watermark_for_connection(
+    corpus: &Connection,
+) -> Result<(u64, u64)> {
+    let (capture_count, max_rowid) = corpus
+        .query_row(
+            r#"
+            SELECT raw_capture_count, raw_max_rowid
+            FROM conversation_export_meta
+            WHERE singleton = 1
+            "#,
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .context("materialized corpus export watermark is missing; run 'mirrarium corpus rebuild'")?;
+    anyhow::ensure!(
+        capture_count >= 0 && max_rowid >= 0,
+        "materialized corpus export watermark contains negative values"
+    );
+    Ok((
+        u64::try_from(capture_count).context("published raw capture count overflow")?,
+        u64::try_from(max_rowid).context("published raw capture rowid overflow")?,
+    ))
+}
+
 fn materialize_conversation_export_index(
     raw_root: &Path,
     corpus: &mut Connection,
@@ -1925,18 +2028,25 @@ fn materialize_conversation_export_index(
             .context("materialized export conversation count overflow")?;
     }
 
+    let (raw_capture_count, raw_max_rowid) = raw_capture_watermark(raw)?;
     transaction.execute(
         r#"
         INSERT INTO conversation_export_meta (
             singleton,
             conversation_count,
-            index_sha256
-        ) VALUES (1, ?1, ?2)
+            index_sha256,
+            raw_capture_count,
+            raw_max_rowid
+        ) VALUES (1, ?1, ?2, ?3, ?4)
         "#,
         params![
             i64::try_from(conversation_count)
                 .context("materialized export conversation count is too large")?,
             format!("{:x}", index_hasher.finalize()),
+            i64::try_from(raw_capture_count)
+                .context("materialized raw capture count is too large")?,
+            i64::try_from(raw_max_rowid)
+                .context("materialized raw capture rowid is too large")?,
         ],
     )?;
 
@@ -1989,6 +2099,7 @@ fn verify_materialized_conversation_export_index(
     raw_root: &Path,
     corpus: &Connection,
     raw: &Connection,
+    require_exact_raw_watermark: bool,
 ) -> Result<Vec<String>> {
     let expected_ids = conversation_ids_for_connection(corpus, -1)?;
     let mut statement = corpus.prepare(
@@ -2044,6 +2155,35 @@ fn verify_materialized_conversation_export_index(
         }
         Err(error) => errors.push(format!(
             "materialized export manifest is invalid: {error:#}"
+        )),
+    }
+
+    match (
+        materialized_export_watermark_for_connection(corpus),
+        raw_capture_watermark(raw),
+    ) {
+        (Ok((published_count, published_max_rowid)), Ok((current_count, current_max_rowid))) => {
+            if require_exact_raw_watermark {
+                if published_count != current_count || published_max_rowid != current_max_rowid {
+                    errors.push(format!(
+                        "materialized export raw watermark ({published_count}, {published_max_rowid}) disagrees with rebuild snapshot ({current_count}, {current_max_rowid})"
+                    ));
+                }
+            } else if current_count < published_count || current_max_rowid < published_max_rowid {
+                errors.push(format!(
+                    "raw ledger watermark ({current_count}, {current_max_rowid}) is behind published corpus watermark ({published_count}, {published_max_rowid})"
+                ));
+            } else if current_count == published_count && current_max_rowid != published_max_rowid {
+                errors.push(format!(
+                    "raw ledger max rowid {current_max_rowid} disagrees with published watermark {published_max_rowid} despite equal capture counts"
+                ));
+            }
+        }
+        (Err(error), _) => errors.push(format!(
+            "materialized export raw watermark is invalid: {error:#}"
+        )),
+        (_, Err(error)) => errors.push(format!(
+            "raw ledger watermark is invalid: {error:#}"
         )),
     }
 

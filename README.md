@@ -91,11 +91,13 @@ mirrarium corpus verify
 mirrarium corpus export-schema
 mirrarium corpus export-index-schema
 mirrarium corpus export-manifest-schema
+mirrarium corpus export-status-schema
 mirrarium corpus export-sync-state-schema
 mirrarium corpus export-sync-state
 mirrarium corpus export-delta-schema
 mirrarium corpus export-delta
 mirrarium corpus export-manifest
+mirrarium corpus export-status
 mirrarium corpus export-index [limit]
 mirrarium corpus export-one <conversation-id> [expected-record-sha256]
 mirrarium corpus export [limit]

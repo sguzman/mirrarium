@@ -339,6 +339,12 @@ fn run() -> Result<()> {
                     "writing corpus export-manifest schema",
                 )?;
             }
+            Some("export-status-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus export-status schema",
+                )?;
+            }
             Some("export-sync-state-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON.as_bytes(),
@@ -385,6 +391,13 @@ fn run() -> Result<()> {
                 write_stdout_json_line(
                     serde_json::to_vec(&manifest).context("serializing corpus export manifest")?,
                     "writing corpus export manifest",
+                )?;
+            }
+            Some("export-status") => {
+                let status = corpus::export_status(&root)?;
+                write_stdout_json_line(
+                    serde_json::to_vec(&status).context("serializing corpus export status")?,
+                    "writing corpus export status",
                 )?;
             }
             Some("export-index") => {
@@ -1519,11 +1532,13 @@ USAGE:
   mirrarium corpus export-schema
   mirrarium corpus export-index-schema
   mirrarium corpus export-manifest-schema
+  mirrarium corpus export-status-schema
   mirrarium corpus export-sync-state-schema
   mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta
   mirrarium corpus export-manifest
+  mirrarium corpus export-status
   mirrarium corpus export-index [LIMIT]
   mirrarium corpus export-one <CONVERSATION_ID> [EXPECTED_RECORD_SHA256]
   mirrarium corpus export [LIMIT]
