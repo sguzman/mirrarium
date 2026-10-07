@@ -21,6 +21,44 @@ const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 
+struct BoundedBuffer {
+    bytes: Vec<u8>,
+    max_bytes: u64,
+}
+
+impl BoundedBuffer {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedBuffer {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next_len = (self.bytes.len() as u64)
+            .checked_add(buffer.len() as u64)
+            .ok_or_else(|| std::io::Error::other("bounded output byte count overflow"))?;
+        if next_len > self.max_bytes {
+            return Err(std::io::Error::other(format!(
+                "corpus sync checkpoint exceeds the {}-byte export-delta input ceiling; use export-manifest/export-index/export-one for incremental synchronization",
+                self.max_bytes
+            )));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn read_bounded_utf8_input<R: Read>(reader: R, max_bytes: u64) -> Result<String> {
     let mut bytes = Vec::new();
     reader
@@ -276,22 +314,14 @@ fn run() -> Result<()> {
                 print!("{}", corpus::CORPUS_SYNC_DELTA_SCHEMA_V1_JSON);
             }
             Some("export-sync-state") => {
-                let state = corpus::export_sync_state(&root)?;
-                let bytes =
-                    serde_json::to_vec(&state).context("serializing corpus sync state")?;
-                anyhow::ensure!(
-                    bytes.len() as u64 <= MAX_CORPUS_SYNC_STATE_INPUT_BYTES,
-                    "current corpus sync checkpoint is {} bytes, exceeding the {}-byte export-delta input ceiling; use export-manifest/export-index/export-one for incremental synchronization",
-                    bytes.len(),
-                    MAX_CORPUS_SYNC_STATE_INPUT_BYTES
-                );
+                let mut output = BoundedBuffer::new(MAX_CORPUS_SYNC_STATE_INPUT_BYTES);
+                corpus::write_conversation_sync_state_json(&root, &mut output)
+                    .context("serializing corpus sync state")?;
+                let bytes = output.into_inner();
                 let mut stdout = std::io::stdout().lock();
                 stdout
                     .write_all(&bytes)
                     .context("writing corpus sync state")?;
-                stdout
-                    .write_all(b"\n")
-                    .context("terminating corpus sync state")?;
             }
             Some("export-delta") => {
                 let input = read_bounded_utf8_input(
@@ -1509,6 +1539,17 @@ PRIVATE KEY:
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn bounded_buffer_rejects_overflow_without_extending_past_limit() {
+        let mut output = BoundedBuffer::new(5);
+        output.write_all(b"abc").unwrap();
+        let error = output.write_all(b"def").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("export-delta input ceiling"));
+        assert_eq!(output.into_inner(), b"abc");
+    }
 
     #[test]
     fn bounded_utf8_input_rejects_oversize_and_invalid_utf8() {
