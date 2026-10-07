@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +11,43 @@ import { chromium, expect, test } from "@playwright/test";
 const execFileAsync = promisify(execFile);
 const nativeHostName = "com.sguzman.mirrarium";
 const expectedExtensionId = "oodcefibmdmabgepkcpanjpjolnbignk";
+
+async function execFileWithInput(
+  file: string,
+  args: string[],
+  input: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string }> {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(file, args, {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", rejectPromise);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise({ stdout, stderr });
+      } else {
+        rejectPromise(
+          new Error(
+            `${file} ${args.join(" ")} exited with code ${code}: ${stderr}`,
+          ),
+        );
+      }
+    });
+    child.stdin.end(input);
+  });
+}
 
 type StoreStats = {
   captures: number;
@@ -2233,6 +2270,42 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         strict: true,
       }).compile(corpusExportManifestSchema);
 
+      const { stdout: corpusSyncStateSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-sync-state-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSyncStateSchema = JSON.parse(corpusSyncStateSchemaStdout);
+      const validateCorpusSyncState = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(corpusSyncStateSchema);
+
+      const { stdout: corpusSyncDeltaSchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-delta-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSyncDeltaSchema = JSON.parse(corpusSyncDeltaSchemaStdout);
+      const syncDeltaAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      syncDeltaAjv.addSchema(corpusExportSchema);
+      syncDeltaAjv.addSchema(corpusExportManifestSchema);
+      const validateCorpusSyncDelta =
+        syncDeltaAjv.compile(corpusSyncDeltaSchema);
+
       const exportHashVector = JSON.parse(
         await readFile(
           resolve(
@@ -2425,6 +2498,109 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(exportManifest.index_sha256).toBe(
         createHash("sha256").update(corpusExportIndexStdout).digest("hex"),
       );
+
+      const emptySyncState = {
+        schema: "mirrarium.corpus.sync-state",
+        schema_version: 1,
+        records: {},
+      };
+      expect(
+        validateCorpusSyncState(emptySyncState),
+        JSON.stringify(validateCorpusSyncState.errors),
+      ).toBe(true);
+      const { stdout: emptySyncDeltaStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-delta"],
+        JSON.stringify(emptySyncState),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const emptySyncDelta = JSON.parse(emptySyncDeltaStdout) as {
+        manifest: typeof exportManifest;
+        upserts: typeof exportRecords;
+        deleted_conversation_ids: string[];
+      };
+      expect(
+        validateCorpusSyncDelta(emptySyncDelta),
+        JSON.stringify(validateCorpusSyncDelta.errors),
+      ).toBe(true);
+      expect(emptySyncDelta.manifest).toEqual(exportManifest);
+      expect(
+        emptySyncDelta.upserts.map((record) => record.conversation_id),
+      ).toEqual(exportRecords.map((record) => record.conversation_id));
+      expect(emptySyncDelta.deleted_conversation_ids).toEqual([]);
+
+      const currentSyncState = {
+        schema: "mirrarium.corpus.sync-state",
+        schema_version: 1,
+        records: Object.fromEntries(
+          exportIndexRecords.map((record) => [
+            record.conversation_id,
+            record.record_sha256,
+          ]),
+        ),
+      };
+      expect(
+        validateCorpusSyncState(currentSyncState),
+        JSON.stringify(validateCorpusSyncState.errors),
+      ).toBe(true);
+      const { stdout: currentSyncDeltaStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-delta"],
+        JSON.stringify(currentSyncState),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const currentSyncDelta = JSON.parse(currentSyncDeltaStdout) as {
+        manifest: typeof exportManifest;
+        upserts: typeof exportRecords;
+        deleted_conversation_ids: string[];
+      };
+      expect(
+        validateCorpusSyncDelta(currentSyncDelta),
+        JSON.stringify(validateCorpusSyncDelta.errors),
+      ).toBe(true);
+      expect(currentSyncDelta.manifest).toEqual(exportManifest);
+      expect(currentSyncDelta.upserts).toEqual([]);
+      expect(currentSyncDelta.deleted_conversation_ids).toEqual([]);
+
+      const staleSyncRecords = { ...currentSyncState.records };
+      delete staleSyncRecords["fixture-conversation"];
+      staleSyncRecords["fixture-deleted-conversation"] = "0".repeat(64);
+      const staleSyncState = {
+        schema: "mirrarium.corpus.sync-state",
+        schema_version: 1,
+        records: staleSyncRecords,
+      };
+      const { stdout: staleSyncDeltaStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-delta"],
+        JSON.stringify(staleSyncState),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const staleSyncDelta = JSON.parse(staleSyncDeltaStdout) as {
+        manifest: typeof exportManifest;
+        upserts: typeof exportRecords;
+        deleted_conversation_ids: string[];
+      };
+      expect(
+        validateCorpusSyncDelta(staleSyncDelta),
+        JSON.stringify(validateCorpusSyncDelta.errors),
+      ).toBe(true);
+      expect(staleSyncDelta.manifest).toEqual(exportManifest);
+      expect(
+        staleSyncDelta.upserts.map((record) => record.conversation_id),
+      ).toEqual(["fixture-conversation"]);
+      expect(staleSyncDelta.deleted_conversation_ids).toEqual([
+        "fixture-deleted-conversation",
+      ]);
 
       const { stdout: limitedExportIndexStdout } = await execFileAsync(
         cliPath,
