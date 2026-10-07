@@ -628,7 +628,11 @@ impl CaptureStore {
         if let Some(reason) = capture.suppressed_reason.as_deref() {
             let marker = format!("suppressed:{reason}");
             let _ = fs::remove_file(&capture.temp_path);
-            self.insert_capture(
+            let request_body = capture.request_body.take();
+            let root = self.root.clone();
+            let transaction = self.connection.transaction()?;
+            Self::insert_capture(
+                &transaction,
                 &capture.metadata,
                 privacy,
                 None,
@@ -637,17 +641,24 @@ impl CaptureStore {
                 Some(&marker),
                 captured_at_ms,
             )?;
-            self.persist_request_body(
+            Self::persist_request_body(
+                &root,
+                &transaction,
                 &capture.metadata.capture_id,
-                capture.request_body.take(),
+                request_body,
                 captured_at_ms,
             )?;
+            transaction.commit()?;
             return Ok(());
         }
 
         if let Some(error) = body_error {
             let _ = fs::remove_file(&capture.temp_path);
-            self.insert_capture(
+            let request_body = capture.request_body.take();
+            let root = self.root.clone();
+            let transaction = self.connection.transaction()?;
+            Self::insert_capture(
+                &transaction,
                 &capture.metadata,
                 privacy,
                 None,
@@ -656,11 +667,14 @@ impl CaptureStore {
                 Some(error),
                 captured_at_ms,
             )?;
-            self.persist_request_body(
+            Self::persist_request_body(
+                &root,
+                &transaction,
                 &capture.metadata.capture_id,
-                capture.request_body.take(),
+                request_body,
                 captured_at_ms,
             )?;
+            transaction.commit()?;
             return Ok(());
         }
 
@@ -686,7 +700,11 @@ impl CaptureStore {
             ResponseBodyDisposition::Suppress(reason) => {
                 let marker = format!("suppressed:{reason}");
                 let _ = fs::remove_file(&capture.temp_path);
-                self.insert_capture(
+                let request_body = capture.request_body.take();
+                let root = self.root.clone();
+                let transaction = self.connection.transaction()?;
+                Self::insert_capture(
+                    &transaction,
                     &capture.metadata,
                     privacy,
                     None,
@@ -695,11 +713,14 @@ impl CaptureStore {
                     Some(&marker),
                     captured_at_ms,
                 )?;
-                self.persist_request_body(
+                Self::persist_request_body(
+                    &root,
+                    &transaction,
                     &capture.metadata.capture_id,
-                    capture.request_body.take(),
+                    request_body,
                     captured_at_ms,
                 )?;
+                transaction.commit()?;
                 return Ok(());
             }
         };
@@ -736,7 +757,10 @@ impl CaptureStore {
             }
         }
 
-        self.connection.execute(
+        let request_body = capture.request_body.take();
+        let root = self.root.clone();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
             r#"
             INSERT OR IGNORE INTO objects
                 (storage_class, hash, bytes, relative_path, created_at_ms)
@@ -752,7 +776,8 @@ impl CaptureStore {
             ],
         )?;
 
-        self.insert_capture(
+        Self::insert_capture(
+            &transaction,
             &capture.metadata,
             privacy,
             Some(&body_hash),
@@ -761,11 +786,14 @@ impl CaptureStore {
             None,
             captured_at_ms,
         )?;
-        self.persist_request_body(
+        Self::persist_request_body(
+            &root,
+            &transaction,
             &capture.metadata.capture_id,
-            capture.request_body.take(),
+            request_body,
             captured_at_ms,
         )?;
+        transaction.commit()?;
 
         Ok(())
     }
@@ -1369,7 +1397,8 @@ impl CaptureStore {
     }
 
     fn persist_request_body(
-        &self,
+        root: &Path,
+        connection: &Connection,
         capture_id: &str,
         request_body: Option<RequestBodyCapture>,
         captured_at_ms: u64,
@@ -1390,7 +1419,7 @@ impl CaptureStore {
             body_bytes = request_body.bytes.len() as u64;
             let hash = sha256_hex(&request_body.bytes);
             let relative_path = object_relative_path(PrivacyClass::Private, &hash);
-            let final_path = self.root.join(&relative_path);
+            let final_path = root.join(&relative_path);
 
             if let Some(parent) = final_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -1402,7 +1431,7 @@ impl CaptureStore {
                     "{}.request.part",
                     sha256_hex(format!("{capture_id}:request-body").as_bytes())
                 );
-                let temp_path = self.root.join(".incoming").join(temp_name);
+                let temp_path = root.join(".incoming").join(temp_name);
                 let mut file = OpenOptions::new()
                     .create(true)
                     .truncate(true)
@@ -1410,7 +1439,7 @@ impl CaptureStore {
                     .open(&temp_path)
                     .with_context(|| format!("creating {}", temp_path.display()))?;
                 harden_file(&temp_path)?;
-                let key = load_or_create_private_key(&self.root)?;
+                let key = load_or_create_private_key(&root)?;
                 let envelope = encrypt_private_object_bytes(&key, &hash, &request_body.bytes)?;
                 file.write_all(&envelope)?;
                 file.flush()?;
@@ -1430,7 +1459,7 @@ impl CaptureStore {
                 }
             }
 
-            self.connection.execute(
+            connection.execute(
                 r#"
                 INSERT OR IGNORE INTO objects
                     (storage_class, hash, bytes, relative_path, created_at_ms)
@@ -1449,7 +1478,7 @@ impl CaptureStore {
         }
 
         let body_kind = request_body_kind(request_body.metadata.content_type.as_deref());
-        self.connection.execute(
+        connection.execute(
             r#"
             INSERT INTO request_bodies (
                 capture_id,
@@ -1485,7 +1514,7 @@ impl CaptureStore {
     }
 
     fn insert_capture(
-        &self,
+        connection: &Connection,
         metadata: &CaptureMetadata,
         privacy: PrivacyClass,
         body_hash: Option<&str>,
@@ -1494,7 +1523,7 @@ impl CaptureStore {
         body_error: Option<&str>,
         captured_at_ms: u64,
     ) -> Result<()> {
-        self.connection.execute(
+        connection.execute(
             r#"
             INSERT INTO captures (
                 capture_id,
@@ -4421,6 +4450,140 @@ mod tests {
         assert!(!persisted.contains("fixture-secret-token"));
         assert!(!persisted.contains("first-secret"));
         assert!(!persisted.contains("second-secret"));
+    }
+
+    #[test]
+    fn request_body_publish_failure_rolls_back_capture_ledger_atomically() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+
+        store
+            .connection
+            .execute_batch(
+                r#"
+                CREATE TRIGGER fail_request_body_publish
+                BEFORE INSERT ON request_bodies
+                BEGIN
+                    SELECT RAISE(ABORT, 'fixture request body publish failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        let mut failed = metadata(
+            "request-body-atomic-failure",
+            "https://chatgpt.com/backend-api/conversation",
+            "Fetch",
+        );
+        failed.method = "POST".to_owned();
+        store.begin(failed).unwrap();
+        store
+            .begin_request_body(
+                "request-body-atomic-failure",
+                RequestBodyMetadata {
+                    content_type: Some("application/json".to_owned()),
+                    has_post_data: true,
+                    post_data_entry_count: Some(1),
+                    declared_content_length: Some(33),
+                },
+            )
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                "request-body-atomic-failure",
+                0,
+                &BASE64.encode(br#"{"message":"atomic request body"}"#),
+            )
+            .unwrap();
+        store
+            .finish_request_body("request-body-atomic-failure", None)
+            .unwrap();
+        store
+            .append_chunk(
+                "request-body-atomic-failure",
+                0,
+                &BASE64.encode(br#"{"ok":true}"#),
+            )
+            .unwrap();
+
+        let error = store
+            .finish(
+                "request-body-atomic-failure",
+                Some(11),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fixture request body publish failure"),
+            "unexpected finish error: {error:#}"
+        );
+
+        let (captures, request_bodies, objects): (i64, i64, i64) = store
+            .connection
+            .query_row(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM captures),
+                    (SELECT COUNT(*) FROM request_bodies),
+                    (SELECT COUNT(*) FROM objects)
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((captures, request_bodies, objects), (0, 0, 0));
+
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_request_body_publish;")
+            .unwrap();
+
+        let mut recovered = metadata(
+            "request-body-atomic-recovered",
+            "https://chatgpt.com/backend-api/conversation",
+            "Fetch",
+        );
+        recovered.method = "POST".to_owned();
+        store.begin(recovered).unwrap();
+        store
+            .begin_request_body(
+                "request-body-atomic-recovered",
+                RequestBodyMetadata {
+                    content_type: Some("application/json".to_owned()),
+                    has_post_data: true,
+                    post_data_entry_count: Some(1),
+                    declared_content_length: Some(33),
+                },
+            )
+            .unwrap();
+        store
+            .append_request_body_chunk(
+                "request-body-atomic-recovered",
+                0,
+                &BASE64.encode(br#"{"message":"atomic request body"}"#),
+            )
+            .unwrap();
+        store
+            .finish_request_body("request-body-atomic-recovered", None)
+            .unwrap();
+        store
+            .append_chunk(
+                "request-body-atomic-recovered",
+                0,
+                &BASE64.encode(br#"{"ok":true}"#),
+            )
+            .unwrap();
+        store
+            .finish("request-body-atomic-recovered", Some(11), None)
+            .unwrap();
+
+        let recovered = store.recent_captures(1).unwrap().pop().unwrap();
+        assert_eq!(recovered.method, "POST");
+        assert!(recovered.body_hash.is_some());
+        assert!(recovered.request_body_hash.is_some());
+        assert_eq!(store.verify().unwrap().invalid_captures, 0);
     }
 
     #[test]
