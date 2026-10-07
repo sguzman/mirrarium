@@ -26,8 +26,8 @@ Each v1 record has:
 - `source_capture_ids`: sorted/deduplicated raw capture IDs referenced anywhere in the record
 - `record_sha256`: SHA-256 of the full v1 record payload except the `record_sha256` field itself
 - `evidence`: the normal derived conversation evidence view, retaining source capture IDs
-- `canonical`: the conservative canonical conversation view when safely derivable, otherwise `null`
-- `canonical_error`: `null` on normal derivation, otherwise the canonicalization failure for this conversation
+- `canonical`: the conservative canonical conversation view when safely derivable, otherwise `null` when no canonical snapshot exists
+- `canonical_error`: reserved by v1 for a future explicitly recoverable canonicalization error class; current exporters emit `null`
 - `stream_revisions`: ordered stream-message revision evidence with source capture IDs
 - `attachments`: attachment observations plus correlated captured downloads and their raw capture IDs
 
@@ -43,7 +43,7 @@ The exporter does not crawl ChatGPT, mutate the archive, or read new network dat
 
 The encrypted-at-rest guarantee ends at this explicit interoperability boundary: JSONL records written to stdout contain the private conversation/evidence text represented by the derived corpus in plaintext. Pipes pass that plaintext to the receiving process, and shell redirection creates an ordinary plaintext file with permissions determined by the shell/filesystem environment. Consumers such as Chatarium should treat the stream as sensitive local data and establish their own at-rest protections if they persist it.
 
-Canonicalization is not authoritative over evidence. If canonicalization of one conversation fails, the exporter keeps that conversation's evidence and provenance and emits `canonical: null` plus `canonical_error` instead of aborting the entire JSONL stream. Structural corpus/read failures still fail the command.
+Canonicalization is not authoritative over evidence. Ambiguous or unsupported snapshot shapes remain explicit through the canonical view's `basis_kind` and warnings, and a conversation with no canonical snapshot simply exports `canonical: null`. Actual canonical read/decryption/JSON/database errors are structural failures and abort the export. They are never downgraded into `canonical_error` on an otherwise valid v1 record.
 
 ## Incremental synchronization
 
