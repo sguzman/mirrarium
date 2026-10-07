@@ -2504,6 +2504,44 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       );
       expect(JSON.parse(eventSourceSkippedStdout)).toEqual([]);
 
+      const { stdout: corpusSchemaBundleStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-schema-bundle"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSchemaBundle = JSON.parse(corpusSchemaBundleStdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        schemas: Array<Record<string, unknown>>;
+      };
+      expect(corpusSchemaBundle).toMatchObject({
+        schema: "mirrarium.corpus.schema-bundle",
+        schema_version: 1,
+        record_type: "schema-bundle",
+      });
+      expect(corpusSchemaBundle.schemas).toHaveLength(9);
+      const bundledSchemaIds = corpusSchemaBundle.schemas.map(
+        (schema) => schema.$id as string,
+      );
+      expect(new Set(bundledSchemaIds).size).toBe(bundledSchemaIds.length);
+      const bundledAjv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      for (const schema of corpusSchemaBundle.schemas) {
+        bundledAjv.addSchema(schema);
+      }
+      const validateBundledSyncTransaction = bundledAjv.getSchema(
+        "urn:mirrarium:corpus:sync-transaction:v1",
+      );
+      expect(validateBundledSyncTransaction).toBeTruthy();
+
       const { stdout: corpusExportSchemaStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-schema"],
@@ -3077,6 +3115,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(
         validateCorpusSyncTransaction(bootstrapSync),
         JSON.stringify(validateCorpusSyncTransaction.errors),
+      ).toBe(true);
+      expect(
+        validateBundledSyncTransaction?.(bootstrapSync),
+        JSON.stringify(validateBundledSyncTransaction?.errors),
       ).toBe(true);
       expect(bootstrapSync.archive_id).toBe(exportSource.archive_id);
       expect(bootstrapSync.delta).toEqual(emptySyncDelta);

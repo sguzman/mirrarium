@@ -50,6 +50,51 @@ pub const CORPUS_SYNC_STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const CORPUS_SYNC_DELTA_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
+pub const CORPUS_SCHEMA_BUNDLE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropSchemaBundle {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub schemas: Vec<Value>,
+}
+
+pub fn interop_schema_bundle() -> Result<CorpusInteropSchemaBundle> {
+    let schema_sources = [
+        CORPUS_EXPORT_SCHEMA_V1_JSON,
+        CORPUS_EXPORT_INDEX_SCHEMA_V1_JSON,
+        CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON,
+        CORPUS_EXPORT_SOURCE_SCHEMA_V1_JSON,
+        CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON,
+        CORPUS_SYNC_STATE_SCHEMA_V1_JSON,
+        CORPUS_SYNC_CHECKPOINT_SCHEMA_V1_JSON,
+        CORPUS_SYNC_DELTA_SCHEMA_V1_JSON,
+        CORPUS_SYNC_TRANSACTION_SCHEMA_V1_JSON,
+    ];
+    let mut schemas = Vec::with_capacity(schema_sources.len());
+    let mut ids = BTreeSet::new();
+    for source in schema_sources {
+        let value: Value =
+            serde_json::from_str(source).context("parsing embedded corpus interop schema")?;
+        let id = value
+            .get("$id")
+            .and_then(Value::as_str)
+            .context("embedded corpus interop schema is missing $id")?;
+        anyhow::ensure!(
+            ids.insert(id.to_owned()),
+            "duplicate embedded corpus interop schema id {id:?}"
+        );
+        schemas.push(value);
+    }
+
+    Ok(CorpusInteropSchemaBundle {
+        schema: "mirrarium.corpus.schema-bundle".to_owned(),
+        schema_version: CORPUS_SCHEMA_BUNDLE_VERSION,
+        record_type: "schema-bundle".to_owned(),
+        schemas,
+    })
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusStats {

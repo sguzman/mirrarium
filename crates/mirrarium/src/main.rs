@@ -323,6 +323,13 @@ fn run() -> Result<()> {
                     report.errors.len() + report.foreign_key_violations as usize
                 );
             }
+            Some("export-schema-bundle") => {
+                write_stdout_json_line(
+                    serde_json::to_vec(&corpus::interop_schema_bundle()?)
+                        .context("serializing corpus interop schema bundle")?,
+                    "writing corpus interop schema bundle",
+                )?;
+            }
             Some("export-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_EXPORT_SCHEMA_V1_JSON.as_bytes(),
@@ -1604,6 +1611,7 @@ USAGE:
   mirrarium corpus rebuild
   mirrarium corpus stats
   mirrarium corpus verify
+  mirrarium corpus export-schema-bundle
   mirrarium corpus export-schema
   mirrarium corpus export-source-schema
   mirrarium corpus export-index-schema

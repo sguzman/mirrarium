@@ -88,6 +88,7 @@ mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
 mirrarium corpus verify
+mirrarium corpus export-schema-bundle
 mirrarium corpus export-schema
 mirrarium corpus export-source-schema
 mirrarium corpus export-index-schema
