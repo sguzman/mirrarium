@@ -373,6 +373,13 @@ impl CaptureStore {
             PRAGMA synchronous = FULL;
             PRAGMA foreign_keys = ON;
 
+            CREATE TABLE IF NOT EXISTS archive_identity (
+                singleton INTEGER PRIMARY KEY
+                    CHECK(singleton = 1),
+                archive_id TEXT NOT NULL
+                    CHECK(length(archive_id) = 64)
+            );
+
             CREATE TABLE IF NOT EXISTS objects (
                 storage_class TEXT NOT NULL,
                 hash TEXT NOT NULL,
@@ -477,6 +484,7 @@ impl CaptureStore {
             "declared_content_length",
             "INTEGER",
         )?;
+        ensure_archive_identity(&connection)?;
 
         for directory in [
             root.join(".incoming"),
@@ -1951,6 +1959,10 @@ impl CaptureStore {
 fn raw_ledger_schema_errors(connection: &Connection) -> Result<Vec<String>> {
     let requirements: &[(&str, &[&str])] = &[
         (
+            "archive_identity",
+            &["singleton", "archive_id"],
+        ),
+        (
             "objects",
             &[
                 "storage_class",
@@ -2038,7 +2050,103 @@ fn raw_ledger_schema_errors(connection: &Connection) -> Result<Vec<String>> {
         }
     }
 
+    let identity_table_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'archive_identity'",
+        [],
+        |row| row.get(0),
+    )?;
+    if identity_table_count == 1 {
+        let row_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM archive_identity",
+            [],
+            |row| row.get(0),
+        )?;
+        if row_count != 1 {
+            errors.push(format!(
+                "raw ledger archive identity must contain exactly one row, found {row_count}"
+            ));
+        } else {
+            match connection.query_row(
+                "SELECT singleton, archive_id FROM archive_identity LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            ) {
+                Ok((singleton, archive_id)) => {
+                    if singleton != 1 {
+                        errors.push(format!(
+                            "raw ledger archive identity has invalid singleton {singleton}"
+                        ));
+                    }
+                    if !valid_archive_id(&archive_id) {
+                        errors.push(format!(
+                            "raw ledger archive identity has invalid archive_id {archive_id:?}"
+                        ));
+                    }
+                }
+                Err(error) => errors.push(format!(
+                    "raw ledger archive identity row is unreadable: {error}"
+                )),
+            }
+        }
+    }
+
     Ok(errors)
+}
+
+fn valid_archive_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn generate_archive_id() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut random = [0_u8; 32];
+    OsRng.fill_bytes(&mut random);
+    let mut output = String::with_capacity(64);
+    for byte in random {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn read_archive_identity(connection: &Connection) -> Result<String> {
+    let archive_id = connection
+        .query_row(
+            "SELECT archive_id FROM archive_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .context(
+            "raw ledger archive identity is missing; open the writable Mirrarium store once to initialize it",
+        )?;
+    anyhow::ensure!(
+        valid_archive_id(&archive_id),
+        "raw ledger archive identity is invalid"
+    );
+    Ok(archive_id)
+}
+
+fn ensure_archive_identity(connection: &Connection) -> Result<String> {
+    let row_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM archive_identity",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        row_count <= 1,
+        "raw ledger archive identity contains multiple rows"
+    );
+    if row_count == 0 {
+        let archive_id = generate_archive_id();
+        connection.execute(
+            "INSERT INTO archive_identity (singleton, archive_id) VALUES (1, ?1)",
+            [archive_id.as_str()],
+        )?;
+    }
+    read_archive_identity(connection)
 }
 
 fn ensure_table_column(
@@ -2932,6 +3040,11 @@ fn purge_abandoned_capture_parts(root: &Path) -> Result<(u64, u64)> {
 
 pub fn open_raw_ledger_read_only(root: impl AsRef<Path>) -> Result<Connection> {
     open_raw_ledger_connection(root.as_ref(), true)
+}
+
+pub fn archive_identity(root: impl AsRef<Path>) -> Result<String> {
+    let connection = open_raw_ledger_read_only(root)?;
+    read_archive_identity(&connection)
 }
 
 pub fn default_data_root() -> Result<PathBuf> {
@@ -4712,6 +4825,47 @@ mod tests {
             error.contains("request body byte count")
                 && error.contains("indexed object bytes")
         }));
+    }
+
+    #[test]
+    fn archive_identity_is_stable_per_raw_archive() {
+        let first_directory = tempdir().unwrap();
+        let second_directory = tempdir().unwrap();
+
+        let first_writer = CaptureStore::open(first_directory.path()).unwrap();
+        let first_id = archive_identity(first_directory.path()).unwrap();
+        assert!(valid_archive_id(&first_id));
+        drop(first_writer);
+
+        let reopened = CaptureStore::open(first_directory.path()).unwrap();
+        assert_eq!(archive_identity(first_directory.path()).unwrap(), first_id);
+        drop(reopened);
+
+        let second_writer = CaptureStore::open(second_directory.path()).unwrap();
+        let second_id = archive_identity(second_directory.path()).unwrap();
+        drop(second_writer);
+        assert!(valid_archive_id(&second_id));
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn verify_reports_invalid_archive_identity_structurally() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE archive_identity SET archive_id = ?1 WHERE singleton = 1",
+                ["A".repeat(64)],
+            )
+            .unwrap();
+
+        let report = store.verify().unwrap();
+        assert!(!report.schema_ok);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid archive_id")));
     }
 
     #[test]
