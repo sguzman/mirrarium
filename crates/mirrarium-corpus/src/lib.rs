@@ -1908,6 +1908,20 @@ pub fn write_conversation_sync_transaction_json<W: Write>(
     previous_checkpoint: Option<&ConversationSyncCheckpoint>,
     writer: &mut W,
 ) -> Result<()> {
+    write_conversation_sync_transaction_json_with_options(
+        raw_root,
+        previous_checkpoint,
+        false,
+        writer,
+    )
+}
+
+pub fn write_conversation_sync_transaction_json_with_options<W: Write>(
+    raw_root: impl AsRef<Path>,
+    previous_checkpoint: Option<&ConversationSyncCheckpoint>,
+    require_fresh: bool,
+    writer: &mut W,
+) -> Result<()> {
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let archive_id = raw_archive_identity(raw_root)?;
@@ -1929,6 +1943,15 @@ pub fn write_conversation_sync_transaction_json<W: Write>(
     };
 
     let corpus = open_corpus_read_only(raw_root)?;
+    if require_fresh {
+        let raw = open_raw_ledger_read_only(raw_root)?;
+        let freshness = export_freshness_for_connections(&corpus, &raw)?;
+        anyhow::ensure!(
+            freshness.fresh,
+            "published corpus is stale by {} raw capture(s); run 'mirrarium corpus rebuild' before source-bound sync",
+            freshness.pending_raw_captures
+        );
+    }
     let plan = conversation_sync_delta_plan(&corpus, previous_state)?;
     let next_sync_state = sync_state_from_cached_index(plan.current_index.clone())?;
     let next_sync_state_bytes =
@@ -1988,17 +2011,24 @@ pub fn export_source(raw_root: impl AsRef<Path>) -> Result<ConversationExportSou
     })
 }
 
-pub fn export_status(raw_root: impl AsRef<Path>) -> Result<ConversationExportStatus> {
-    let raw_root = raw_root.as_ref();
-    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
-    let corpus = open_corpus_read_only(raw_root)?;
-    let manifest = materialized_export_manifest_for_connection(&corpus)?;
-    let (published_raw_capture_count, published_raw_max_rowid) =
-        materialized_export_watermark_for_connection(&corpus)?;
+#[derive(Debug, Clone, Copy)]
+struct ExportFreshness {
+    published_raw_capture_count: u64,
+    published_raw_max_rowid: u64,
+    current_raw_capture_count: u64,
+    current_raw_max_rowid: u64,
+    pending_raw_captures: u64,
+    fresh: bool,
+}
 
-    let raw = open_raw_ledger_read_only(raw_root)?;
+fn export_freshness_for_connections(
+    corpus: &Connection,
+    raw: &Connection,
+) -> Result<ExportFreshness> {
+    let (published_raw_capture_count, published_raw_max_rowid) =
+        materialized_export_watermark_for_connection(corpus)?;
     let (current_raw_capture_count, current_raw_max_rowid) =
-        raw_capture_watermark(&raw)?;
+        raw_capture_watermark(raw)?;
 
     anyhow::ensure!(
         current_raw_capture_count >= published_raw_capture_count
@@ -2012,12 +2042,7 @@ pub fn export_status(raw_root: impl AsRef<Path>) -> Result<ConversationExportSta
         );
     }
 
-    Ok(ConversationExportStatus {
-        schema: "mirrarium.corpus.export-status".to_owned(),
-        schema_version: CORPUS_EXPORT_STATUS_SCHEMA_VERSION,
-        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
-        record_type: "export-status".to_owned(),
-        manifest,
+    Ok(ExportFreshness {
         published_raw_capture_count,
         published_raw_max_rowid,
         current_raw_capture_count,
@@ -2025,6 +2050,29 @@ pub fn export_status(raw_root: impl AsRef<Path>) -> Result<ConversationExportSta
         pending_raw_captures: current_raw_capture_count - published_raw_capture_count,
         fresh: current_raw_capture_count == published_raw_capture_count
             && current_raw_max_rowid == published_raw_max_rowid,
+    })
+}
+
+pub fn export_status(raw_root: impl AsRef<Path>) -> Result<ConversationExportStatus> {
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let corpus = open_corpus_read_only(raw_root)?;
+    let manifest = materialized_export_manifest_for_connection(&corpus)?;
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    let freshness = export_freshness_for_connections(&corpus, &raw)?;
+
+    Ok(ConversationExportStatus {
+        schema: "mirrarium.corpus.export-status".to_owned(),
+        schema_version: CORPUS_EXPORT_STATUS_SCHEMA_VERSION,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        record_type: "export-status".to_owned(),
+        manifest,
+        published_raw_capture_count: freshness.published_raw_capture_count,
+        published_raw_max_rowid: freshness.published_raw_max_rowid,
+        current_raw_capture_count: freshness.current_raw_capture_count,
+        current_raw_max_rowid: freshness.current_raw_max_rowid,
+        pending_raw_captures: freshness.pending_raw_captures,
+        fresh: freshness.fresh,
     })
 }
 
