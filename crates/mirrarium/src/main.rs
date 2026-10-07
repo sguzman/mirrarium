@@ -21,7 +21,7 @@ const NATIVE_HOST_NAME: &str = "com.sguzman.mirrarium";
 const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = corpus::CORPUS_SYNC_STATE_MAX_BYTES;
 const MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES: u64 =
-    corpus::CORPUS_SYNC_STATE_MAX_BYTES + 1024 * 1024;
+    corpus::CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES;
 
 struct BoundedBuffer {
     bytes: Vec<u8>,
@@ -360,6 +360,12 @@ fn run() -> Result<()> {
                     "writing corpus export-status schema",
                 )?;
             }
+            Some("export-capabilities-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_CAPABILITIES_SCHEMA_V1_JSON.as_bytes(),
+                    "writing corpus capabilities schema",
+                )?;
+            }
             Some("export-sync-state-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_SYNC_STATE_SCHEMA_V1_JSON.as_bytes(),
@@ -460,6 +466,14 @@ fn run() -> Result<()> {
                 stdout
                     .flush()
                     .context("flushing corpus sync-delta JSON")?;
+            }
+            Some("export-capabilities") => {
+                let capabilities = corpus::interop_capabilities(&root)?;
+                write_stdout_json_line(
+                    serde_json::to_vec(&capabilities)
+                        .context("serializing corpus interop capabilities")?,
+                    "writing corpus interop capabilities",
+                )?;
             }
             Some("export-source") => {
                 let source = corpus::export_source(&root)?;
@@ -1617,6 +1631,7 @@ USAGE:
   mirrarium corpus export-index-schema
   mirrarium corpus export-manifest-schema
   mirrarium corpus export-status-schema
+  mirrarium corpus export-capabilities-schema
   mirrarium corpus export-sync-state-schema
   mirrarium corpus export-sync-checkpoint-schema
   mirrarium corpus export-sync-schema
@@ -1625,6 +1640,7 @@ USAGE:
   mirrarium corpus export-sync-state
   mirrarium corpus export-delta-schema
   mirrarium corpus export-delta
+  mirrarium corpus export-capabilities
   mirrarium corpus export-source
   mirrarium corpus export-manifest
   mirrarium corpus export-status

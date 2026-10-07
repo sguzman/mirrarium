@@ -2,6 +2,8 @@
 
 `mirrarium corpus export-schema-bundle` emits one deterministic convenience envelope containing every currently published interop JSON Schema in dependency order. Each embedded schema retains its normative URN `$id`; consumers can register the array with a JSON Schema implementation and then resolve the same cross-schema `$ref` graph used by Mirrarium's own Chromium QA. The bundle envelope itself is not a replacement wire contract — the embedded schemas remain authoritative.
 
+`mirrarium corpus export-capabilities` is the discovery handshake for an installed producer. Its v1 schema is `schemas/mirrarium-corpus-capabilities-v1.schema.json` / `mirrarium corpus export-capabilities-schema`. It reports the stable raw `archive_id`, current internal producer schema version, every supported interop wire version, synchronization byte ceilings, SHA-256 hash algorithms, and support for source-bound plus `--require-fresh` sync. Capability values describe protocol support, not current corpus freshness or manifest state; use `export-status` and `export-manifest` for those.
+
 `mirrarium corpus export [limit]` is a read-only interoperability surface for local consumers such as Chatarium. The normative machine-readable v1 contract is checked in at `schemas/mirrarium-corpus-conversation-v1.schema.json` and is also emitted by `mirrarium corpus export-schema` for installed-binary consumers.
 
 ## v1 framing
