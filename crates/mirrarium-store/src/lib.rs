@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, ErrorKind, Read, Write},
@@ -118,6 +118,9 @@ pub struct CaptureSummary {
 pub struct VerifyReport {
     pub checked_objects: u64,
     pub corrupt_objects: u64,
+    pub orphan_objects: u64,
+    pub orphan_object_bytes: u64,
+    pub unexpected_object_entries: u64,
     pub checked_capture_invariants: u64,
     pub invalid_captures: u64,
     pub errors: Vec<String>,
@@ -1221,10 +1224,14 @@ impl CaptureStore {
         let mut report = VerifyReport {
             checked_objects: 0,
             corrupt_objects: 0,
+            orphan_objects: 0,
+            orphan_object_bytes: 0,
+            unexpected_object_entries: 0,
             checked_capture_invariants: 0,
             invalid_captures: 0,
             errors: Vec::new(),
         };
+        let mut indexed_object_paths = BTreeSet::new();
 
         for row in rows {
             let (storage_class, hash, expected_bytes, indexed_relative_path) = row?;
@@ -1255,6 +1262,7 @@ impl CaptureStore {
             }
 
             let expected_relative_path = object_relative_path(class, &hash);
+            indexed_object_paths.insert(expected_relative_path.clone());
             if Path::new(&indexed_relative_path) != expected_relative_path {
                 report.corrupt_objects += 1;
                 report.errors.push(format!(
@@ -1280,6 +1288,12 @@ impl CaptureStore {
                 }
             }
         }
+
+        audit_unindexed_object_files(
+            &self.root,
+            &indexed_object_paths,
+            &mut report,
+        )?;
 
         let mut websocket_statement = self.connection.prepare(
             "SELECT capture_id, method, url, privacy_class FROM captures WHERE resource_type = 'WebSocketFrame' ORDER BY capture_id",
@@ -3175,6 +3189,104 @@ pub fn read_verified_object(
     Ok(bytes)
 }
 
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn audit_unindexed_object_files(
+    root: &Path,
+    indexed_paths: &BTreeSet<PathBuf>,
+    report: &mut VerifyReport,
+) -> Result<()> {
+    for class in [
+        PrivacyClass::Public,
+        PrivacyClass::Private,
+        PrivacyClass::Unknown,
+    ] {
+        let objects_root = root.join(class.as_str()).join("objects");
+        if !objects_root.exists() {
+            continue;
+        }
+        if !objects_root.is_dir() {
+            report.unexpected_object_entries = report
+                .unexpected_object_entries
+                .checked_add(1)
+                .context("unexpected object entry count overflow")?;
+            report.errors.push(format!(
+                "{} object root is not a directory: {}",
+                class.as_str(),
+                objects_root.display()
+            ));
+            continue;
+        }
+
+        for prefix_entry in fs::read_dir(&objects_root)
+            .with_context(|| format!("reading {}", objects_root.display()))?
+        {
+            let prefix_entry = prefix_entry?;
+            let prefix_path = prefix_entry.path();
+            let prefix_name = prefix_entry.file_name().to_string_lossy().into_owned();
+            let prefix_type = prefix_entry.file_type()?;
+            if !prefix_type.is_dir()
+                || prefix_name.len() != 2
+                || !is_lower_hex(&prefix_name)
+            {
+                report.unexpected_object_entries = report
+                    .unexpected_object_entries
+                    .checked_add(1)
+                    .context("unexpected object entry count overflow")?;
+                report.errors.push(format!(
+                    "unexpected CAS entry: {}",
+                    prefix_path.display()
+                ));
+                continue;
+            }
+
+            for object_entry in fs::read_dir(&prefix_path)
+                .with_context(|| format!("reading {}", prefix_path.display()))?
+            {
+                let object_entry = object_entry?;
+                let object_path = object_entry.path();
+                let object_name = object_entry.file_name().to_string_lossy().into_owned();
+                let object_type = object_entry.file_type()?;
+                let valid_name = object_name.len() == 64
+                    && is_lower_hex(&object_name)
+                    && object_name.starts_with(&prefix_name);
+                if !object_type.is_file() || !valid_name {
+                    report.unexpected_object_entries = report
+                        .unexpected_object_entries
+                        .checked_add(1)
+                        .context("unexpected object entry count overflow")?;
+                    report.errors.push(format!(
+                        "unexpected CAS entry: {}",
+                        object_path.display()
+                    ));
+                    continue;
+                }
+
+                let relative_path = object_relative_path(class, &object_name);
+                if indexed_paths.contains(&relative_path) {
+                    continue;
+                }
+
+                let stored_bytes = object_entry.metadata()?.len();
+                report.orphan_objects = report
+                    .orphan_objects
+                    .checked_add(1)
+                    .context("orphan object count overflow")?;
+                report.orphan_object_bytes = report
+                    .orphan_object_bytes
+                    .checked_add(stored_bytes)
+                    .context("orphan object byte count overflow")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn object_relative_path(class: PrivacyClass, hash: &str) -> PathBuf {
     PathBuf::from(class.as_str())
         .join("objects")
@@ -3548,6 +3660,43 @@ mod tests {
         assert_eq!(stats.private_captures, 2);
         assert_eq!(stats.private_objects, 1);
     }
+    #[test]
+    fn verify_reports_orphan_cas_without_treating_it_as_corruption() {
+        let directory = tempdir().unwrap();
+        let store = CaptureStore::open(directory.path()).unwrap();
+
+        let orphan_hash = "f".repeat(64);
+        let orphan_path = directory
+            .path()
+            .join(object_relative_path(PrivacyClass::Private, &orphan_hash));
+        fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        fs::write(&orphan_path, b"orphan crash residue").unwrap();
+
+        let clean_orphan = store.verify().unwrap();
+        assert_eq!(clean_orphan.checked_objects, 0);
+        assert_eq!(clean_orphan.corrupt_objects, 0);
+        assert_eq!(clean_orphan.orphan_objects, 1);
+        assert_eq!(
+            clean_orphan.orphan_object_bytes,
+            b"orphan crash residue".len() as u64
+        );
+        assert_eq!(clean_orphan.unexpected_object_entries, 0);
+        assert!(clean_orphan.errors.is_empty());
+
+        let malformed = directory
+            .path()
+            .join("private/objects/not-a-prefix");
+        fs::write(&malformed, b"unexpected").unwrap();
+
+        let broken = store.verify().unwrap();
+        assert_eq!(broken.orphan_objects, 1);
+        assert_eq!(broken.unexpected_object_entries, 1);
+        assert!(broken
+            .errors
+            .iter()
+            .any(|error| error.contains("unexpected CAS entry")));
+    }
+
     #[test]
     fn verify_rejects_websocket_privacy_direction_and_url_invariant_breaks() {
         let directory = tempdir().unwrap();
