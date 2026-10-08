@@ -2664,15 +2664,59 @@ pub fn migrate_private_storage(root: impl AsRef<Path>) -> Result<PrivateMigratio
     })
 }
 
+fn writer_lock_path_is_regular_or_absent(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "Mirrarium writer lock is not a regular non-symlink file: {}",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting Mirrarium writer lock {}", path.display())),
+    }
+}
+
+fn verify_open_writer_lock_file(path: &Path, file: &File) -> Result<()> {
+    anyhow::ensure!(
+        writer_lock_path_is_regular_or_absent(path)?,
+        "Mirrarium writer lock disappeared while opening: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path_metadata = fs::symlink_metadata(path)?;
+        let file_metadata = file.metadata()?;
+        anyhow::ensure!(
+            path_metadata.dev() == file_metadata.dev()
+                && path_metadata.ino() == file_metadata.ino(),
+            "Mirrarium writer lock changed during open: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn acquire_writer_lock(root: &Path) -> Result<File> {
     let path = root.join(".writer.lock");
+    writer_lock_path_is_regular_or_absent(&path)?;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .open(&path)
         .with_context(|| format!("opening Mirrarium writer lock {}", path.display()))?;
-    harden_file(&path)?;
+    verify_open_writer_lock_file(&path, &file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("hardening Mirrarium writer lock {}", path.display()))?;
+    }
     file.try_lock_exclusive().with_context(|| {
         format!(
             "another Mirrarium writer is already using data root {}",
@@ -2708,6 +2752,9 @@ fn is_ledger_recovery_file_name(name: &str) -> bool {
 
 fn writer_lock_is_active(root: &Path) -> Result<bool> {
     let path = root.join(".writer.lock");
+    if !writer_lock_path_is_regular_or_absent(&path)? {
+        return Ok(false);
+    }
     let file = match File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
@@ -2716,6 +2763,7 @@ fn writer_lock_is_active(root: &Path) -> Result<bool> {
                 .with_context(|| format!("opening Mirrarium writer lock {}", path.display()));
         }
     };
+    verify_open_writer_lock_file(&path, &file)?;
 
     match FileExt::try_lock_shared(&file) {
         Ok(()) => {
@@ -5435,6 +5483,32 @@ mod tests {
         assert!(!object_migration.exists());
         assert!(ledger_target.exists());
         assert!(ledger_backup.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_lock_symlink_is_never_hardened_or_used() {
+        use std::os::unix::fs::symlink;
+
+        for dangling in [false, true] {
+            let archive = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let root = archive.path();
+            let foreign = outside.path().join("foreign-lock-data");
+            fs::write(&foreign, b"do not mutate this").unwrap();
+            let target = if dangling {
+                outside.path().join("missing-lock")
+            } else {
+                foreign.clone()
+            };
+            symlink(target, root.join(".writer.lock")).unwrap();
+
+            let error = CaptureStore::open(root).err().expect("symlinked lock must fail");
+            assert!(error.to_string().contains("not a regular non-symlink file"));
+            assert!(incoming_maintenance_status(root).is_err());
+            assert_eq!(fs::read(&foreign).unwrap(), b"do not mutate this");
+            assert!(!root.join("ledger.sqlite3").exists());
+        }
     }
 
     #[cfg(unix)]
