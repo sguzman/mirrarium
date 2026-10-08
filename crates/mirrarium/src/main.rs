@@ -22,6 +22,7 @@ const EXTENSION_ID: &str = "oodcefibmdmabgepkcpanjpjolnbignk";
 const MAX_CORPUS_SYNC_STATE_INPUT_BYTES: u64 = corpus::CORPUS_SYNC_STATE_MAX_BYTES;
 const MAX_CORPUS_SYNC_CHECKPOINT_INPUT_BYTES: u64 =
     corpus::CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES;
+const MAX_CORPUS_SYNC_PLAN_INPUT_BYTES: u64 = corpus::CORPUS_SYNC_PLAN_INPUT_MAX_BYTES;
 const MAX_CORPUS_CONSUMER_REQUIREMENTS_INPUT_BYTES: u64 =
     corpus::CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES;
 const MAX_CORPUS_NEGOTIATED_SYNC_REQUEST_INPUT_BYTES: u64 =
@@ -458,11 +459,37 @@ fn run() -> Result<()> {
                     checkpoint.as_ref(),
                     require_fresh,
                 )?;
-                write_stdout_json_line(
-                    serde_json::to_vec(&plan)
-                        .context("serializing corpus sync plan")?,
-                    "writing corpus sync plan",
+                let bytes =
+                    serde_json::to_vec(&plan).context("serializing corpus sync plan")?;
+                anyhow::ensure!(
+                    bytes.len() as u64 <= MAX_CORPUS_SYNC_PLAN_INPUT_BYTES,
+                    "corpus sync plan exceeds the {}-byte export-sync-fetch input ceiling; use export-manifest/export-index/export-one instead",
+                    MAX_CORPUS_SYNC_PLAN_INPUT_BYTES
+                );
+                write_stdout_json_line(bytes, "writing corpus sync plan")?;
+            }
+            Some("export-sync-fetch") => {
+                let input = read_bounded_utf8_input(
+                    std::io::stdin().lock(),
+                    MAX_CORPUS_SYNC_PLAN_INPUT_BYTES,
+                )
+                .context("reading source-bound corpus sync plan from stdin")?;
+                anyhow::ensure!(
+                    !input.trim().is_empty(),
+                    "missing source-bound corpus sync plan on stdin"
+                );
+                let plan = serde_json::from_str::<corpus::ConversationSyncPlan>(&input)
+                    .context("parsing source-bound corpus sync plan JSON")?;
+                let stdout = std::io::stdout();
+                let mut stdout = std::io::BufWriter::new(stdout.lock());
+                corpus::write_conversation_sync_plan_fetch_jsonl(
+                    &root,
+                    &plan,
+                    &mut stdout,
                 )?;
+                stdout
+                    .flush()
+                    .context("flushing source-bound corpus sync fetch JSONL")?;
             }
             Some("export-sync-checkpoint") => {
                 let checkpoint = corpus::export_sync_checkpoint(&root)?;
@@ -1766,6 +1793,7 @@ USAGE:
   mirrarium corpus export-sync-schema
   mirrarium corpus export-sync-plan-schema
   mirrarium corpus export-sync-plan [--require-fresh]
+  mirrarium corpus export-sync-fetch
   mirrarium corpus export-sync-checkpoint
   mirrarium corpus export-sync [--require-fresh]
   mirrarium corpus export-sync-negotiated
