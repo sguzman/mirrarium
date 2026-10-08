@@ -58,7 +58,7 @@ Classification is intentionally conservative:
 - non-static ChatGPT-origin traffic becomes private;
 - traffic outside understood ChatGPT/static origins remains unknown.
 
-On Unix the data root, private store, incoming area, database, and private objects are permission-hardened. Private CAS payloads and in-flight private response staging use authenticated XChaCha20-Poly1305 envelopes, while the authoritative raw ledger and rebuildable derived corpus use SQLCipher with domain-separated keys derived from Mirrarium's master key.
+On Unix the data root, private store, incoming area, database, and private objects are permission-hardened. The derived corpus directory is rejected if symlinked (including dangling symlinks) before rebuild or export uses it. The rebuild's directory permission hardening uses a verified open directory handle; the shared `.rebuild.lock` used by rebuild/export must be a real regular file, checked against the opened handle before permissions are applied through that handle. Private CAS payloads and in-flight private response staging use authenticated XChaCha20-Poly1305 envelopes, while the authoritative raw ledger and rebuildable derived corpus use SQLCipher with domain-separated keys derived from Mirrarium's master key.
 
 ## Replay boundary
 
