@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
@@ -247,6 +247,51 @@ test("native transport acknowledges only a durably finished capture", async () =
     });
     expect(captures[0]?.body_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(captures[0]?.request_body_hash).toMatch(/^[a-f0-9]{64}$/);
+    // Aborted fragments must be discarded on the same live host rather than
+    // stranded until its next startup cleanup.
+    const staging = await readdir(join(root, "data", ".incoming"));
+    expect(staging.filter((name) => name.endsWith(".part"))).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("aborting on an untouched native host does not initialize a writable ledger", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mirrarium-cold-abort-"));
+  const daemonPath = resolve("target/debug/mirrariumd");
+  const dataDir = join(root, "data");
+  const child = spawn(daemonPath, [], {
+    env: {
+      ...process.env,
+      MIRRARIUM_DATA_DIR: dataDir,
+      MIRRARIUM_PRIVATE_KEY_FILE: join(root, "private.key"),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const output: Buffer[] = [];
+  const errors: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+  const exited = new Promise<number | null>((resolveExit, rejectExit) => {
+    child.on("error", rejectExit);
+    child.on("close", resolveExit);
+  });
+  try {
+    child.stdin.end(Buffer.concat([
+      nativeFrame({ type: "capture_abort", capture_id: "never-started" }),
+      nativeFrame({ type: "ping" }),
+    ]));
+    expect(
+      await exited,
+      Buffer.concat(errors).toString("utf8"),
+    ).toBe(0);
+    expect(readFrames(Buffer.concat(output))).toEqual([
+      { type: "capture_aborted", capture_id: "never-started", discarded: false },
+      { type: "pong" },
+    ]);
+    await expect(stat(join(dataDir, "ledger.sqlite3"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
