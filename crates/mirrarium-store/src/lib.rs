@@ -352,10 +352,13 @@ impl CaptureStore {
                 sync_directory(parent)?;
             }
         }
+        // Reject storage-path redirection before create_dir_all or permission hardening.
+        ensure_real_cas_directory_roots(&root)?;
         fs::create_dir_all(root.join(".incoming"))?;
         fs::create_dir_all(root.join("public/objects"))?;
         fs::create_dir_all(root.join("private/objects"))?;
         fs::create_dir_all(root.join("unknown/objects"))?;
+        ensure_real_cas_directory_roots(&root)?;
         harden_directory(&root)?;
         harden_directory(&root.join(".incoming"))?;
         harden_directory(&root.join("private"))?;
@@ -3979,6 +3982,23 @@ fn cas_object_root_status(root: &Path, class: PrivacyClass) -> Result<Option<Pat
     Ok(Some(objects_root))
 }
 
+fn ensure_real_cas_directory_roots(root: &Path) -> Result<()> {
+    for class in [
+        PrivacyClass::Public,
+        PrivacyClass::Private,
+        PrivacyClass::Unknown,
+    ] {
+        if let Some(component) = cas_object_root_status(root, class)? {
+            anyhow::ensure!(
+                fs::symlink_metadata(&component)?.file_type().is_dir(),
+                "refusing writable archive: CAS directory is not a real directory: {}",
+                component.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn audit_unindexed_object_files(
     root: &Path,
     indexed_paths: &BTreeSet<PathBuf>,
@@ -5127,6 +5147,33 @@ mod tests {
             .contains("refusing orphan prune because raw verification is not clean"));
         assert!(orphan_path.is_file());
         assert!(malformed.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_writable_archive_rejects_redirected_cas_roots_before_side_effects() {
+        use std::os::unix::fs::symlink;
+
+        for relative in ["public/objects", "unknown"] {
+            let archive = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let root = archive.path();
+
+            if relative == "public/objects" {
+                fs::create_dir_all(root.join("public")).unwrap();
+            }
+            let redirected = root.join(relative);
+            symlink(outside.path(), &redirected).unwrap();
+
+            let error = CaptureStore::open(root).err().expect("symlinked root must fail");
+            assert!(
+                error.to_string().contains("refusing writable archive"),
+                "unexpected open error: {error:#}"
+            );
+            assert!(fs::symlink_metadata(&redirected).unwrap().file_type().is_symlink());
+            assert!(!outside.path().join("objects").exists());
+            assert!(!root.join("ledger.sqlite3").exists());
+        }
     }
 
     #[cfg(unix)]
