@@ -7052,8 +7052,68 @@ impl Drop for CorpusExportLock {
     }
 }
 
+fn corpus_lock_path_is_regular_or_absent(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "corpus generation lock is not a regular non-symlink file: {}",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting corpus generation lock {}", path.display())),
+    }
+}
+
+fn verify_open_corpus_lock_file(path: &Path, file: &fs::File) -> Result<()> {
+    anyhow::ensure!(
+        corpus_lock_path_is_regular_or_absent(path)?,
+        "corpus generation lock disappeared while opening: {}",
+        path.display()
+    );
+    let file_metadata = file.metadata()?;
+    anyhow::ensure!(
+        file_metadata.is_file(),
+        "corpus generation lock opened a non-regular file: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path_metadata = fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            path_metadata.dev() == file_metadata.dev()
+                && path_metadata.ino() == file_metadata.ino(),
+            "corpus generation lock changed during open: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn harden_open_corpus_lock_file(file: &fs::File, path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("hardening corpus generation lock {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+    }
+    Ok(())
+}
+
 fn acquire_corpus_export_lock(derived_root: &Path) -> Result<CorpusExportLock> {
     let lock_path = derived_root.join(".rebuild.lock");
+    anyhow::ensure!(
+        corpus_lock_path_is_regular_or_absent(&lock_path)?,
+        "corpus generation lock is absent; run 'mirrarium corpus rebuild'"
+    );
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -7064,7 +7124,8 @@ fn acquire_corpus_export_lock(derived_root: &Path) -> Result<CorpusExportLock> {
                 lock_path.display()
             )
         })?;
-    harden_file(&lock_path)?;
+    verify_open_corpus_lock_file(&lock_path, &file)?;
+    harden_open_corpus_lock_file(&file, &lock_path)?;
 
     match FileExt::try_lock_shared(&file) {
         Ok(()) => Ok(CorpusExportLock { file }),
@@ -7081,13 +7142,15 @@ fn acquire_corpus_export_lock(derived_root: &Path) -> Result<CorpusExportLock> {
 
 fn acquire_corpus_rebuild_lock(derived_root: &Path) -> Result<CorpusRebuildLock> {
     let lock_path = derived_root.join(".rebuild.lock");
+    corpus_lock_path_is_regular_or_absent(&lock_path)?;
     let file = fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("opening corpus rebuild lock {}", lock_path.display()))?;
-    harden_file(&lock_path)?;
+    verify_open_corpus_lock_file(&lock_path, &file)?;
+    harden_open_corpus_lock_file(&file, &lock_path)?;
 
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(CorpusRebuildLock { file }),
@@ -8163,6 +8226,41 @@ mod tests {
         drop(first);
         let third = acquire_corpus_rebuild_lock(&derived_root).unwrap();
         drop(third);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corpus_locks_reject_redirected_and_dangling_symlinks_without_touching_targets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let derived_root = directory.path().join("derived");
+        fs::create_dir_all(&derived_root).unwrap();
+        let outside = directory.path().join("outside.lock");
+        fs::write(&outside, b"do not change").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+        let lock_path = derived_root.join(".rebuild.lock");
+        symlink(&outside, &lock_path).unwrap();
+
+        for error in [
+            acquire_corpus_rebuild_lock(&derived_root).unwrap_err(),
+            acquire_corpus_export_lock(&derived_root).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("not a regular non-symlink"));
+        }
+        assert_eq!(fs::read(&outside).unwrap(), b"do not change");
+        assert_eq!(fs::metadata(&outside).unwrap().permissions().mode() & 0o777, 0o644);
+
+        fs::remove_file(&lock_path).unwrap();
+        let absent = directory.path().join("missing.lock");
+        symlink(&absent, &lock_path).unwrap();
+        for error in [
+            acquire_corpus_rebuild_lock(&derived_root).unwrap_err(),
+            acquire_corpus_export_lock(&derived_root).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("not a regular non-symlink"));
+        }
+        assert!(!absent.exists());
     }
 
     #[test]
