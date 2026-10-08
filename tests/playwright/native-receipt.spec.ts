@@ -41,6 +41,7 @@ test("native transport acknowledges only a durably finished capture", async () =
   };
   const captureId = "wire-receipt-fixture";
   const body = Buffer.from('{"id":"wire-receipt-fixture","title":"Committed"}', "utf8");
+  const requestBody = Buffer.from('{"prompt":"synthetic receipt check"}', "utf8");
   const requests = [
     {
       type: "capture_start",
@@ -48,13 +49,40 @@ test("native transport acknowledges only a durably finished capture", async () =
         capture_id: captureId,
         tab_id: 1,
         request_id: "wire-receipt-request",
-        method: "GET",
+        method: "POST",
         url: "https://chatgpt.com/backend-api/conversation/wire-receipt-fixture",
         status: 200,
         mime_type: "application/json",
         resource_type: "Fetch",
         provenance: {},
       },
+    },
+    {
+      type: "request_body_start",
+      capture_id: captureId,
+      metadata: {
+        content_type: "application/json",
+        has_post_data: true,
+        declared_content_length: requestBody.length,
+      },
+    },
+    {
+      type: "request_body_chunk",
+      capture_id: captureId,
+      sequence: 0,
+      data_base64: requestBody.toString("base64"),
+    },
+    {
+      type: "request_body_finish",
+      capture_id: captureId,
+      body_error: null,
+    },
+    {
+      // Must return an error, never a progress acknowledgment.
+      type: "capture_chunk",
+      capture_id: captureId,
+      sequence: 1,
+      data_base64: body.toString("base64"),
     },
     {
       type: "capture_chunk",
@@ -97,28 +125,32 @@ test("native transport acknowledges only a durably finished capture", async () =
       Buffer.concat(errorChunks).toString("utf8"),
     ).toBe(0);
     const responses = readFrames(Buffer.concat(outputChunks));
-    expect(responses).toHaveLength(5);
-    expect(responses[0]).toEqual({
-      type: "capture_message_ack",
-      capture_id: captureId,
-      stage: "capture_start",
-      sequence: null,
-    });
-    expect(responses[1]).toEqual({
-      type: "capture_message_ack",
-      capture_id: captureId,
-      stage: "capture_chunk",
-      sequence: 0,
-    });
-    expect(responses[2]).toEqual({
-      type: "capture_committed",
-      capture_id: captureId,
-    });
-    expect(responses[3]).toMatchObject({
+    expect(responses).toHaveLength(9);
+    const expectProgress = (index: number, stage: string, sequence: number | null) =>
+      expect(responses[index]).toEqual({
+        type: "capture_message_ack",
+        capture_id: captureId,
+        stage,
+        sequence,
+      });
+    expectProgress(0, "capture_start", null);
+    expectProgress(1, "request_body_start", null);
+    expectProgress(2, "request_body_chunk", 0);
+    expectProgress(3, "request_body_finish", null);
+    expect(responses[4]).toMatchObject({
       type: "error",
       capture_id: captureId,
     });
-    expect(responses[4]).toEqual({ type: "pong" });
+    expectProgress(5, "capture_chunk", 0);
+    expect(responses[6]).toEqual({
+      type: "capture_committed",
+      capture_id: captureId,
+    });
+    expect(responses[7]).toMatchObject({
+      type: "error",
+      capture_id: captureId,
+    });
+    expect(responses[8]).toEqual({ type: "pong" });
 
     const archive = spawn(cliPath, ["captures", "20"], {
       env,
@@ -142,13 +174,17 @@ test("native transport acknowledges only a durably finished capture", async () =
       capture_id: string;
       body_hash: string | null;
       body_bytes: number;
+      request_body_hash: string | null;
+      request_body_bytes: number;
     }>;
     expect(captures).toHaveLength(1);
     expect(captures[0]).toMatchObject({
       capture_id: captureId,
       body_bytes: body.length,
+      request_body_bytes: requestBody.length,
     });
     expect(captures[0]?.body_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(captures[0]?.request_body_hash).toMatch(/^[a-f0-9]{64}$/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
