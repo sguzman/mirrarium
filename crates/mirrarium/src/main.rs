@@ -1044,7 +1044,7 @@ fn handle_extension(arguments: &[String]) -> Result<()> {
         }
         Some("uninstall") => {
             let install_path = extension_install_path()?;
-            let removed = if install_path.exists() {
+            let removed = if extension_install_directory_is_real_or_absent(&install_path)? {
                 fs::remove_dir_all(&install_path)
                     .with_context(|| format!("removing {}", install_path.display()))?;
                 if let Some(parent) = install_path.parent() {
@@ -1367,12 +1367,33 @@ fn validate_extension_directory(path: &Path) -> Result<serde_json::Value> {
     Ok(manifest)
 }
 
+/// Do not treat a symlink (including a dangling symlink) as an installed
+/// extension directory: activation mutates its contents in place.
+fn extension_install_directory_is_real_or_absent(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_dir(),
+                "extension install destination is not a real directory: {}",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting extension install directory {}", path.display())),
+    }
+}
+
 fn install_extension(source: &Path, destination: &Path) -> Result<serde_json::Value> {
     let source = fs::canonicalize(source)
         .with_context(|| format!("resolving extension source {}", source.display()))?;
     let source_manifest = validate_extension_directory(&source)?;
 
-    if destination.exists() {
+    let destination_exists = extension_install_directory_is_real_or_absent(destination)?;
+    if destination_exists {
+        // Reject pre-existing nested redirects before staging or replacing any files.
+        collect_extension_tree_files(destination, destination, &mut Vec::new())?;
         if let Ok(installed) = fs::canonicalize(destination) {
             if installed == source {
                 return Ok(source_manifest);
@@ -1395,14 +1416,19 @@ fn install_extension(source: &Path, destination: &Path) -> Result<serde_json::Va
     copy_extension_tree(&source, &temp)?;
     let installed_manifest = validate_extension_directory(&temp)?;
 
-    if destination.exists() {
+    if destination_exists {
         anyhow::ensure!(
-            destination.is_dir(),
-            "extension install destination is not a directory: {}",
+            extension_install_directory_is_real_or_absent(destination)?,
+            "extension install destination disappeared before activation: {}",
             destination.display()
         );
         activate_staged_extension_directory(&temp, destination, true)?;
     } else {
+        anyhow::ensure!(
+            !extension_install_directory_is_real_or_absent(destination)?,
+            "extension install destination appeared before publication: {}",
+            destination.display()
+        );
         fs::rename(&temp, destination).with_context(|| {
             format!(
                 "installing extension {} to {}",
@@ -1421,9 +1447,14 @@ fn activate_staged_extension_directory(
     destination: &Path,
     manifest_last: bool,
 ) -> Result<()> {
-    let destination_existed = destination.is_dir();
+    let destination_existed = extension_install_directory_is_real_or_absent(destination)?;
     fs::create_dir_all(destination)
         .with_context(|| format!("creating extension destination {}", destination.display()))?;
+    anyhow::ensure!(
+        extension_install_directory_is_real_or_absent(destination)?,
+        "extension destination disappeared during activation: {}",
+        destination.display()
+    );
     if !destination_existed {
         if let Some(parent) = destination.parent() {
             sync_directory(parent)?;
@@ -1510,6 +1541,13 @@ fn activate_staged_extension_entry(source: &Path, destination: &Path) -> Result<
         "extension staging contains unsupported entry: {}",
         source.display()
     );
+    if let Ok(existing) = fs::symlink_metadata(destination) {
+        anyhow::ensure!(
+            !existing.file_type().is_symlink(),
+            "extension install destination contains unsupported symlink: {}",
+            destination.display()
+        );
+    }
     if destination.is_dir() {
         fs::remove_dir_all(destination).with_context(|| {
             format!(
@@ -2027,6 +2065,55 @@ mod tests {
             .expect("symlinked extension source should be rejected");
         assert!(error.to_string().contains("unsupported symlink"));
         assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_update_rejects_redirected_install_roots_and_nested_entries() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join("assets")).unwrap();
+        fs::write(
+            source.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "manifest_version": 3,
+                "name": "Mirrarium",
+                "version": "0.1.0",
+                "version_name": "0.1.0+fixture",
+                "key": "fixture-key"
+            }))
+            .unwrap(),
+        ).unwrap();
+        fs::write(source.join("background.js"), b"// fixture").unwrap();
+        fs::write(source.join("assets/icon.txt"), b"icon").unwrap();
+
+        let outside = directory.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"untouched").unwrap();
+
+        let destination = directory.path().join("installed");
+        symlink(&outside, &destination).unwrap();
+        let error = install_extension(&source, &destination).unwrap_err();
+        assert!(error.to_string().contains("not a real directory"));
+        assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"untouched");
+        assert!(!outside.join("manifest.json").exists());
+
+        fs::remove_file(&destination).unwrap();
+        symlink(directory.path().join("missing"), &destination).unwrap();
+        assert!(install_extension(&source, &destination)
+            .unwrap_err()
+            .to_string()
+            .contains("not a real directory"));
+
+        fs::remove_file(&destination).unwrap();
+        fs::create_dir(&destination).unwrap();
+        symlink(&outside, destination.join("assets")).unwrap();
+        let error = install_extension(&source, &destination).unwrap_err();
+        assert!(error.to_string().contains("unsupported symlink"));
+        assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"untouched");
+        assert!(!outside.join("icon.txt").exists());
     }
 
     #[test]
