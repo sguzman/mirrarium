@@ -1247,8 +1247,14 @@ pub fn rebuild(raw_root: impl AsRef<Path>) -> Result<CorpusStats> {
     );
 
     let derived_root = raw_root.join("derived");
+    ensure_derived_root_is_real_directory(&derived_root)?;
     fs::create_dir_all(&derived_root)
         .with_context(|| format!("creating {}", derived_root.display()))?;
+    anyhow::ensure!(
+        ensure_derived_root_is_real_directory(&derived_root)?,
+        "derived corpus root disappeared after creation: {}",
+        derived_root.display()
+    );
     harden_directory(&derived_root)?;
     let _rebuild_lock = acquire_corpus_rebuild_lock(&derived_root)?;
 
@@ -5492,6 +5498,7 @@ fn verify_corpus_connections(
 }
 
 fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
+    ensure_derived_root_is_real_directory(&raw_root.as_ref().join("derived"))?;
     let database = raw_root.as_ref().join("derived/corpus.sqlite3");
     anyhow::ensure!(
         database.is_file(),
@@ -7052,6 +7059,24 @@ impl Drop for CorpusExportLock {
     }
 }
 
+/// The published corpus and rebuild staging must never be redirected outside
+/// Mirrarium's data root. Inspect the directory entry, not its symlink target.
+fn ensure_derived_root_is_real_directory(derived_root: &Path) -> Result<bool> {
+    match fs::symlink_metadata(derived_root) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_dir(),
+                "derived corpus root is not a real directory: {}",
+                derived_root.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting derived corpus root {}", derived_root.display())),
+    }
+}
+
 fn corpus_lock_path_is_regular_or_absent(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -7109,6 +7134,10 @@ fn harden_open_corpus_lock_file(file: &fs::File, path: &Path) -> Result<()> {
 }
 
 fn acquire_corpus_export_lock(derived_root: &Path) -> Result<CorpusExportLock> {
+    anyhow::ensure!(
+        ensure_derived_root_is_real_directory(derived_root)?,
+        "derived corpus directory is absent; run 'mirrarium corpus rebuild'"
+    );
     let lock_path = derived_root.join(".rebuild.lock");
     anyhow::ensure!(
         corpus_lock_path_is_regular_or_absent(&lock_path)?,
@@ -7141,6 +7170,11 @@ fn acquire_corpus_export_lock(derived_root: &Path) -> Result<CorpusExportLock> {
 }
 
 fn acquire_corpus_rebuild_lock(derived_root: &Path) -> Result<CorpusRebuildLock> {
+    anyhow::ensure!(
+        ensure_derived_root_is_real_directory(derived_root)?,
+        "derived corpus directory is absent: {}",
+        derived_root.display()
+    );
     let lock_path = derived_root.join(".rebuild.lock");
     corpus_lock_path_is_regular_or_absent(&lock_path)?;
     let file = fs::OpenOptions::new()
@@ -7247,8 +7281,21 @@ fn scalar_u64(connection: &Connection, sql: &str) -> Result<u64> {
 
 #[cfg(unix)]
 fn harden_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let directory = fs::File::open(path)
+        .with_context(|| format!("opening directory {} for hardening", path.display()))?;
+    let entry = fs::symlink_metadata(path)?;
+    let opened = directory.metadata()?;
+    anyhow::ensure!(
+        entry.file_type().is_dir()
+            && opened.is_dir()
+            && entry.dev() == opened.dev()
+            && entry.ino() == opened.ino(),
+        "derived corpus directory changed or was redirected during open: {}",
+        path.display()
+    );
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
         .with_context(|| format!("hardening directory {}", path.display()))
 }
 
@@ -8226,6 +8273,44 @@ mod tests {
         drop(first);
         let third = acquire_corpus_rebuild_lock(&derived_root).unwrap();
         drop(third);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_corpus_root_rejects_symlinks_without_modifying_external_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"keep").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+        let derived_root = directory.path().join("derived");
+        symlink(&outside, &derived_root).unwrap();
+
+        for error in [
+            ensure_derived_root_is_real_directory(&derived_root).unwrap_err(),
+            acquire_corpus_rebuild_lock(&derived_root).unwrap_err(),
+            acquire_corpus_export_lock(&derived_root).unwrap_err(),
+            harden_directory(&derived_root).unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("not a real directory")
+                    || error.to_string().contains("redirected during open")
+            );
+        }
+        assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+        assert_eq!(fs::metadata(&outside).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!outside.join(".rebuild.lock").exists());
+
+        fs::remove_file(&derived_root).unwrap();
+        symlink(directory.path().join("absent"), &derived_root).unwrap();
+        assert!(ensure_derived_root_is_real_directory(&derived_root)
+            .unwrap_err()
+            .to_string()
+            .contains("not a real directory"));
+        assert!(acquire_corpus_rebuild_lock(&derived_root).is_err());
+        assert!(acquire_corpus_export_lock(&derived_root).is_err());
     }
 
     #[cfg(unix)]
