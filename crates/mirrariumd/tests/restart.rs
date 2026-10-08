@@ -99,7 +99,13 @@ fn expect_ack(
             capture_id: actual,
             stage: actual_stage,
             sequence: actual_sequence,
+            archive_id,
         } => {
+            if stage == CaptureMessageStage::CaptureStart {
+                assert!(archive_id.as_deref().is_some_and(|id| id.len() == 64));
+            } else {
+                assert!(archive_id.is_none());
+            }
             assert_eq!(actual, capture_id);
             assert_eq!(actual_stage, stage);
             assert_eq!(actual_sequence, sequence);
@@ -210,11 +216,17 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
     ] {
         match second.send(&HostRequest::CaptureCommitProbe {
             capture_id: capture_id.to_owned(),
+            expected_archive_id: Some(mirrarium_store::archive_identity(root).unwrap()),
         }) {
             HostResponse::CaptureCommitStatus {
                 capture_id: actual,
                 committed: observed,
+                archive_id,
             } => {
+                assert_eq!(
+                    archive_id.as_deref(),
+                    Some(mirrarium_store::archive_identity(root).unwrap().as_str())
+                );
                 assert_eq!(actual, capture_id);
                 assert_eq!(observed, committed);
             }

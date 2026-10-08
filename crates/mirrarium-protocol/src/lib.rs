@@ -68,7 +68,12 @@ pub enum HostRequest {
     },
     /// Ask the raw ledger whether this capture ID already committed.
     /// Does not request, disclose, or retransmit any private body.
-    CaptureCommitProbe { capture_id: String },
+    CaptureCommitProbe {
+        capture_id: String,
+        /// The archive ID from this capture's start acknowledgment.
+        #[serde(default)]
+        expected_archive_id: Option<String>,
+    },
     /// Abandon a partially received transaction without writing a ledger row.
     /// This command never reconnects or transfers private body bytes.
     CaptureAbort { capture_id: String },
@@ -183,11 +188,19 @@ pub enum HostResponse {
         capture_id: String,
         stage: CaptureMessageStage,
         sequence: Option<u32>,
+        /// Present only on a start acknowledgment; not a commit receipt.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        archive_id: Option<String>,
     },
     /// Returned only after a successful synchronous raw-ledger commit.
     CaptureCommitted { capture_id: String },
     /// A read-only point-in-time observation, not a future-delivery guarantee.
-    CaptureCommitStatus { capture_id: String, committed: bool },
+    CaptureCommitStatus {
+        capture_id: String,
+        committed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        archive_id: Option<String>,
+    },
     /// Whether an in-flight staging capture was discarded. Never a commit.
     CaptureAborted { capture_id: String, discarded: bool },
     Error {

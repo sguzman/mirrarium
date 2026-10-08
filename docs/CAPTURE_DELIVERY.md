@@ -20,8 +20,10 @@ tracks that separate protocol milestone.
   encrypted; outbound private request bodies live in the writer's bounded
   in-memory state until sanitized and persisted.
 - Every accepted nonterminal message yields
-  `capture_message_ack {capture_id, stage, sequence}`. These acknowledgments
-  mean only that the current native process accepted the message. They are
+  `capture_message_ack {capture_id, stage, sequence}`. The successful
+  `capture_start` acknowledgment also carries the permanent 64-character
+  `archive_id` from the encrypted raw ledger. These acknowledgments
+  mean only that the current native process accepted the message; they are
   **not** commit records.
 - Only a successful `CaptureFinish` creates
   `capture_committed {capture_id}`, after the raw-ledger transaction completes.
@@ -46,16 +48,23 @@ tracks that separate protocol milestone.
 | Aborted or poisoned | The host discarded a failed/incomplete transaction | Never finish or replay the same staged transaction |
 | Port lost / receipt timed out | Outcome unknown to the extension | Query the ledger; do **not** claim success or automatically replay content |
 
-The local `capture_commit_probe {capture_id}` asks whether a record with that
-ID is committed, returning only
-`capture_commit_status {capture_id, committed}`. A positive result
-reconciles a lost receipt. A negative result describes a **point-in-time
+The local `capture_commit_probe {capture_id, expected_archive_id}` asks whether
+a record with that ID committed, returning
+`capture_commit_status {capture_id, committed, archive_id}`. The native host
+rejects probes when the expected archive ID differs, even if a foreign archive
+happens to contain the same capture ID. The extension only certifies a positive
+result if it retained the original archive identity from the start ACK and
+the probe response agrees. A positive **same-archive** result reconciles
+a lost receipt. A negative result describes a **point-in-time
 absence**; it is not an assurance that the original payload can be recovered,
 that another host is not still writing, or that an incomplete body was committed.
 Probes do not initialize an otherwise absent ledger.
 
-The extension retains at most 256 UUIDs for uncertain deliveries in
-**volatile service-worker memory**. It performs a bounded, best-effort
+The extension retains at most 256 UUIDs and their original archive IDs (when
+acknowledged) for uncertain deliveries in **volatile service-worker memory**.
+If the original writer dies before acknowledging the start, no archive binding
+exists and the extension leaves the capture unconfirmed rather than treating
+a same-ID entry in a different archive as successful delivery. It performs a bounded, best-effort
 reconnection sequence (up to four delayed attempts at 0.5, 1, 2, and 4 seconds)
 to query the next live native port. Worker suspension or restart can erase this
 state; no plaintext browser/local-storage spool is used.
@@ -68,7 +77,7 @@ state; no plaintext browser/local-storage spool is used.
 | Existing staging entry or symlink | Exclusive open fails; no redirected file is overwritten |
 | Out-of-order, malformed or rejected fragment | Error, immediate abort, and no later successful finish for that staging transaction |
 | Native host killed mid-capture | Old staging is abandoned/purged on writer restart; new traffic can use a new process |
-| Native host killed after commit but before receipt | Next live host can probe the committed ID without retrieving the body |
+| Native host killed after commit but before receipt | Next live host can probe the committed ID only when it knows the original archive identity; a foreign archive is rejected without disclosing the private body |
 | Intentional abort | Drop writer and staged response/request data, no ledger row |
 | Abort on missing or committed ID | Report `discarded: false`; never erase a committed record |
 | Excessive concurrent captures | Reject admission before staging; active captures stay intact |
@@ -86,9 +95,11 @@ body bytes. Querying an ID cannot regenerate missing content.
 
 An actual durable resume protocol must first specify and test:
 
-1. **Archive binding and immutable transaction identity.** A new host session
-   must prove it is writing to the expected raw archive. Reused IDs with
-   conflicting metadata, lengths or hashes must be rejected.
+1. **Archive binding and immutable transaction identity.** The original
+   start ACK now supplies the ledger archive ID and subsequent reconciliation
+   is bound to that ID. This does **not** solve lost start ACKs or define a
+   durable transaction fingerprint; resumed transfers must also reject reused
+   IDs with conflicting metadata, lengths or hashes.
 2. **Durable sequence/commit journal.** Persist the exact accepted prefix and
    terminal state in the protected Rust storage boundary so restart can
    distinguish accepted, missing, poisoned and fully committed messages.

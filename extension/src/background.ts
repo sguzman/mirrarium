@@ -154,6 +154,8 @@ type CaptureDelivery = {
   awaitingCommit: boolean;
   // Only compact fragment identities; never buffer capture payload bytes.
   pendingMessageAcks: Set<string>;
+  // Learned only from the original native writer's capture_start ACK.
+  archiveId?: string;
   receiptTimeoutId?: number;
 };
 
@@ -183,7 +185,7 @@ function captureProgressKey(
 const capturePorts = new Map<string, CaptureDelivery>();
 // Volatile UUID-only evidence of interrupted/uncertain delivery. No private
 // payload, URL or body can enter this set; MV3 worker restart clears it.
-const unconfirmedCaptureIds = new Set<string>();
+const unconfirmedCaptureIds = new Map<string, string | undefined>();
 const pendingCommitProbes = new Map<string, chrome.runtime.Port>();
 let commitReconnectTimer: number | undefined;
 let commitReconnectAttempts = 0;
@@ -207,8 +209,13 @@ function scheduleCommitReconciliation(): void {
   }, delay);
 }
 
-function rememberUnconfirmedCapture(captureId: string): void {
-  if (unconfirmedCaptureIds.has(captureId)) return;
+function rememberUnconfirmedCapture(captureId: string, archiveId?: string): void {
+  if (unconfirmedCaptureIds.has(captureId)) {
+    if (!unconfirmedCaptureIds.get(captureId) && archiveId) {
+      unconfirmedCaptureIds.set(captureId, archiveId);
+    }
+    return;
+  }
   if (unconfirmedCaptureIds.size >= MAX_UNCONFIRMED_CAPTURE_IDS) {
     const oldest = unconfirmedCaptureIds.values().next().value;
     if (oldest !== undefined) {
@@ -217,16 +224,27 @@ function rememberUnconfirmedCapture(captureId: string): void {
     }
     console.warn("Mirrarium commit reconciliation ID capacity reached; oldest probe abandoned");
   }
-  unconfirmedCaptureIds.add(captureId);
+  unconfirmedCaptureIds.set(captureId, archiveId);
 }
 
 function sendCommitProbes(port: chrome.runtime.Port): void {
   if (port !== nativePort) return;
-  for (const captureId of unconfirmedCaptureIds) {
+  for (const [captureId, expectedArchiveId] of unconfirmedCaptureIds) {
     if (pendingCommitProbes.has(captureId)) continue;
+    if (!expectedArchiveId) {
+      // No original archive identity: a matching UUID on a replacement host
+      // must not be mistaken for proof of this capture's commit.
+      unconfirmedCaptureIds.delete(captureId);
+      console.warn("Mirrarium cannot reconcile capture without original archive identity");
+      continue;
+    }
     pendingCommitProbes.set(captureId, port);
     try {
-      port.postMessage({ type: "capture_commit_probe", capture_id: captureId });
+      port.postMessage({
+        type: "capture_commit_probe",
+        capture_id: captureId,
+        expected_archive_id: expectedArchiveId,
+      });
     } catch {
       pendingCommitProbes.delete(captureId);
       retireNativePort(port);
@@ -361,7 +379,7 @@ function retireNativePort(port: chrome.runtime.Port): void {
   let unconfirmedCaptures = 0;
   for (const [captureId, delivery] of capturePorts) {
     if (delivery.port === port) {
-      rememberUnconfirmedCapture(captureId);
+      rememberUnconfirmedCapture(captureId, delivery.archiveId);
       clearCaptureDelivery(captureId);
       unconfirmedCaptures += 1;
     }
@@ -397,13 +415,16 @@ function handleNativeMessage(message: unknown): void {
       typeof record.committed === "boolean"
     ) {
       pendingCommitProbes.delete(captureId);
+      const expectedArchiveId = unconfirmedCaptureIds.get(captureId);
       unconfirmedCaptureIds.delete(captureId);
       commitReconnectAttempts = 0;
       if (commitReconnectTimer !== undefined) {
         clearTimeout(commitReconnectTimer);
         commitReconnectTimer = undefined;
       }
-      if (record.committed) {
+      if (!expectedArchiveId || record.archive_id !== expectedArchiveId) {
+        console.warn("Mirrarium refused reconciliation from a different or unverified archive");
+      } else if (record.committed) {
         console.info("Mirrarium recovered a committed capture after missing its receipt");
       } else {
         // A negative result means absence *at query time*; never conflate
@@ -445,6 +466,15 @@ function handleNativeMessage(message: unknown): void {
       record.sequence,
     );
     if (delivery && delivery.port === nativePort && key) {
+      if (key === "capture_start") {
+        const archiveId = record.archive_id;
+        if (typeof archiveId !== "string" || !/^[0-9a-f]{64}$/.test(archiveId)) {
+          abortCaptureDelivery(captureId!);
+          console.warn("Mirrarium refused capture start lacking a valid archive identity");
+          return;
+        }
+        delivery.archiveId = archiveId;
+      }
       if (!delivery.pendingMessageAcks.delete(key)) {
         // A duplicate/unexpected receipt is not evidence of data loss, but
         // must not be counted as progress or proof of committed bytes.
@@ -796,7 +826,7 @@ function postNative(message: unknown): void {
         delivery.awaitingCommit = true;
         delivery.receiptTimeoutId = setTimeout(() => {
           if (capturePorts.get(captureId) === delivery) {
-            rememberUnconfirmedCapture(captureId);
+            rememberUnconfirmedCapture(captureId, delivery.archiveId);
             clearCaptureDelivery(captureId);
             // Do not expose private capture identifiers in diagnostics.
             console.warn("Mirrarium capture commit receipt timed out; delivery unconfirmed");

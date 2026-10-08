@@ -516,6 +516,11 @@ impl CaptureStore {
         })
     }
 
+    /// Stable identity of the encrypted raw ledger, across native-host restarts.
+    pub fn archive_id(&self) -> Result<String> {
+        read_archive_identity(&self.connection)
+    }
+
     pub fn begin(&mut self, mut metadata: CaptureMetadata) -> Result<()> {
         anyhow::ensure!(
             !self.in_flight.contains_key(&metadata.capture_id),

@@ -27,22 +27,40 @@ fn capture_commit_status(
     root: &Path,
     writable: Option<&CaptureStore>,
     capture_id: &str,
-) -> Result<bool> {
+    expected_archive_id: Option<&str>,
+) -> Result<(bool, Option<String>)> {
     anyhow::ensure!(
         !capture_id.trim().is_empty() && capture_id.len() <= 256,
         "capture commit probe requires a bounded nonempty capture id"
     );
-    if let Some(store) = writable {
-        return Ok(store.capture_by_id(capture_id)?.is_some());
+    let (committed, archive_id) = if let Some(store) = writable {
+        (store.capture_by_id(capture_id)?.is_some(), Some(store.archive_id()?))
+    } else {
+        let ledger = root.join("ledger.sqlite3");
+        match fs::symlink_metadata(&ledger) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                anyhow::ensure!(
+                    expected_archive_id.is_none(),
+                    "capture commit probe archive identity unavailable"
+                );
+                return Ok((false, None));
+            }
+            Err(error) => return Err(error).with_context(|| format!("inspecting {}", ledger.display())),
+            Ok(_) => {}
+        }
+        let read_only = CaptureStore::open_read_only(root)?;
+        (
+            read_only.capture_by_id(capture_id)?.is_some(),
+            Some(read_only.archive_id()?),
+        )
+    };
+    if let Some(expected) = expected_archive_id {
+        anyhow::ensure!(
+            archive_id.as_deref() == Some(expected),
+            "capture commit probe archive identity mismatch"
+        );
     }
-    let ledger = root.join("ledger.sqlite3");
-    match fs::symlink_metadata(&ledger) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).with_context(|| format!("inspecting {}", ledger.display())),
-        Ok(_) => {}
-    }
-    let read_only = CaptureStore::open_read_only(root)?;
-    Ok(read_only.capture_by_id(capture_id)?.is_some())
+    Ok((committed, archive_id))
 }
 
 fn main() -> Result<()> {
@@ -110,11 +128,14 @@ fn run_native_host() -> Result<()> {
                 };
                 write_native_response(&mut output, &response)?;
             }
-            Ok(HostRequest::CaptureCommitProbe { capture_id }) => {
-                let response = match capture_commit_status(&root, store.as_ref(), &capture_id) {
-                    Ok(committed) => HostResponse::CaptureCommitStatus {
+            Ok(HostRequest::CaptureCommitProbe { capture_id, expected_archive_id }) => {
+                let response = match capture_commit_status(
+                    &root, store.as_ref(), &capture_id, expected_archive_id.as_deref(),
+                ) {
+                    Ok((committed, archive_id)) => HostResponse::CaptureCommitStatus {
                         capture_id,
                         committed,
+                        archive_id,
                     },
                     Err(error) => HostResponse::Error {
                         capture_id: Some(capture_id),
@@ -418,7 +439,7 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
                     .to_owned(),
             };
         }
-        HostRequest::CaptureCommitProbe { capture_id } => {
+        HostRequest::CaptureCommitProbe { capture_id, .. } => {
             return HostResponse::Error {
                 capture_id: Some(capture_id),
                 message: "capture commit probe must use the read-only path".to_owned(),
@@ -481,10 +502,27 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         },
         Ok(()) if progress.is_some() => {
             let (stage, sequence) = progress.expect("checked above");
+            let archive_id = if stage == CaptureMessageStage::CaptureStart {
+                match store.archive_id() {
+                    Ok(id) => Some(id),
+                    Err(error) => {
+                        if let Some(id) = capture_id.as_deref() {
+                            let _ = store.abort(id);
+                        }
+                        return HostResponse::Error {
+                            capture_id,
+                            message: format!("capture archive identity unavailable: {error:#}"),
+                        };
+                    }
+                }
+            } else {
+                None
+            };
             HostResponse::CaptureMessageAck {
                 capture_id: capture_id.expect("capture progress always has a capture ID"),
                 stage,
                 sequence,
+                archive_id,
             }
         }
         Ok(()) => HostResponse::Ack { capture_id },
@@ -739,10 +777,10 @@ mod tests {
     #[test]
     fn read_only_commit_probe_distinguishes_absent_and_committed_capture() {
         let directory = tempdir().unwrap();
-        assert!(!capture_commit_status(directory.path(), None, "not-present").unwrap());
+        assert!(!capture_commit_status(directory.path(), None, "not-present", None).unwrap().0);
         assert!(!directory.path().join("ledger.sqlite3").exists());
         let mut store = CaptureStore::open(directory.path()).unwrap();
-        assert!(!capture_commit_status(directory.path(), Some(&store), "pending").unwrap());
+        assert!(!capture_commit_status(directory.path(), Some(&store), "pending", None).unwrap().0);
         let metadata = CaptureMetadata {
             capture_id: "pending".to_owned(),
             tab_id: 1,
@@ -758,12 +796,63 @@ mod tests {
             provenance: CaptureProvenance::default(),
         };
         store.begin(metadata).unwrap();
-        assert!(!capture_commit_status(directory.path(), Some(&store), "pending").unwrap());
+        assert!(!capture_commit_status(directory.path(), Some(&store), "pending", None).unwrap().0);
         store.finish("pending", None, Some("suppressed:no_response_body_expected")).unwrap();
-        assert!(capture_commit_status(directory.path(), Some(&store), "pending").unwrap());
-        assert!(capture_commit_status(directory.path(), None, "pending").unwrap());
-        assert!(!capture_commit_status(directory.path(), None, "other").unwrap());
-        assert!(capture_commit_status(directory.path(), None, "").is_err());
+        assert!(capture_commit_status(directory.path(), Some(&store), "pending", None).unwrap().0);
+        assert!(capture_commit_status(directory.path(), None, "pending", None).unwrap().0);
+        assert!(!capture_commit_status(directory.path(), None, "other", None).unwrap().0);
+        assert!(capture_commit_status(directory.path(), None, "", None).is_err());
+    }
+
+    #[test]
+    fn archive_bound_probe_rejects_same_capture_id_in_a_different_ledger() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        let empty = tempdir().unwrap();
+        let make_capture = |store: &mut CaptureStore| {
+            store.begin(CaptureMetadata {
+                capture_id: "same-capture-id".to_owned(),
+                tab_id: 1,
+                request_id: "request".to_owned(),
+                method: "GET".to_owned(),
+                url: "https://chatgpt.com/backend-api/collision".to_owned(),
+                status: 204,
+                mime_type: "application/json".to_owned(),
+                resource_type: "Fetch".to_owned(),
+                etag: None,
+                last_modified: None,
+                cache_control: None,
+                provenance: CaptureProvenance::default(),
+            }).unwrap();
+            store.finish(
+                "same-capture-id", None, Some("suppressed:no_response_body_expected"),
+            ).unwrap();
+        };
+        let mut first_writer = CaptureStore::open(first.path()).unwrap();
+        let first_identity = first_writer.archive_id().unwrap();
+        make_capture(&mut first_writer);
+        let mut second_writer = CaptureStore::open(second.path()).unwrap();
+        let second_identity = second_writer.archive_id().unwrap();
+        make_capture(&mut second_writer);
+        assert_ne!(first_identity, second_identity);
+        assert!(
+            capture_commit_status(
+                first.path(), Some(&first_writer), "same-capture-id", Some(&first_identity)
+            ).unwrap().0
+        );
+        assert!(
+            capture_commit_status(
+                second.path(), Some(&second_writer), "same-capture-id", Some(&first_identity)
+            ).is_err(),
+            "a same-ID foreign capture must not certify the original delivery"
+        );
+        assert!(
+            capture_commit_status(
+                empty.path(), None, "same-capture-id", Some(&first_identity)
+            ).is_err(),
+            "missing ledger must not certify a negative bound lookup"
+        );
+        assert!(!empty.path().join("ledger.sqlite3").exists());
     }
 
     #[test]
@@ -791,6 +880,7 @@ mod tests {
                 capture_id: ref id,
                 stage: CaptureMessageStage::CaptureStart,
                 sequence: None,
+                ..
             } if id == &capture_id
         ));
         assert!(matches!(
@@ -806,6 +896,7 @@ mod tests {
                 capture_id: ref id,
                 stage: CaptureMessageStage::CaptureChunk,
                 sequence: Some(0),
+                ..
             } if id == &capture_id
         ));
         let committed = handle_request(
@@ -825,6 +916,7 @@ mod tests {
                 capture_id: capture_id.clone(),
                 stage: CaptureMessageStage::CaptureChunk,
                 sequence: Some(7),
+                archive_id: None,
             }).unwrap(),
             serde_json::json!({
                 "type": "capture_message_ack",

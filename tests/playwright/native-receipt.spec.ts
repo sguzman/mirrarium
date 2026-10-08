@@ -172,13 +172,14 @@ test("native transport acknowledges only a durably finished capture", async () =
     const responses = readFrames(Buffer.concat(outputChunks));
     expect(responses).toHaveLength(19);
     const expectProgress = (index: number, stage: string, sequence: number | null) =>
-      expect(responses[index]).toEqual({
+      expect(responses[index]).toMatchObject({
         type: "capture_message_ack",
         capture_id: captureId,
         stage,
         sequence,
       });
     expectProgress(0, "capture_start", null);
+    expect(responses[0]?.archive_id).toMatch(/^[0-9a-f]{64}$/);
     expectProgress(1, "request_body_start", null);
     expectProgress(2, "request_body_chunk", 0);
     expectProgress(3, "request_body_finish", null);
@@ -191,17 +192,19 @@ test("native transport acknowledges only a durably finished capture", async () =
       type: "capture_commit_status",
       capture_id: captureId,
       committed: true,
+      archive_id: responses[0]?.archive_id,
     });
     expect(responses[7]).toEqual({
       type: "capture_commit_status",
       capture_id: "absent-capture",
       committed: false,
+      archive_id: responses[0]?.archive_id,
     });
     expect(responses[8]).toMatchObject({
       type: "error",
       capture_id: captureId,
     });
-    expect(responses[9]).toEqual({
+    expect(responses[9]).toMatchObject({
       type: "capture_message_ack",
       capture_id: "poisoned-sequence-fixture",
       stage: "capture_start",
@@ -219,14 +222,15 @@ test("native transport acknowledges only a durably finished capture", async () =
       type: "capture_commit_status",
       capture_id: "poisoned-sequence-fixture",
       committed: false,
+      archive_id: responses[0]?.archive_id,
     });
-    expect(responses[13]).toEqual({
+    expect(responses[13]).toMatchObject({
       type: "capture_message_ack",
       capture_id: "abort-wire-fixture",
       stage: "capture_start",
       sequence: null,
     });
-    expect(responses[14]).toEqual({
+    expect(responses[14]).toMatchObject({
       type: "capture_message_ack",
       capture_id: "abort-wire-fixture",
       stage: "capture_chunk",
@@ -241,6 +245,7 @@ test("native transport acknowledges only a durably finished capture", async () =
       type: "capture_commit_status",
       capture_id: "abort-wire-fixture",
       committed: false,
+      archive_id: responses[0]?.archive_id,
     });
     expect(responses[17]).toEqual({
       type: "capture_aborted",
