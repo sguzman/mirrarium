@@ -482,6 +482,25 @@ fn run() -> Result<()> {
                 write_stdout_json_line(bytes, "writing corpus sync plan")?;
             }
             Some("export-sync-fetch") => {
+                let range = match &arguments[2..] {
+                    [] => None,
+                    [start, count] => {
+                        let start = start.parse::<usize>().context(
+                            "sync-plan fetch start-index must be a non-negative integer",
+                        )?;
+                        let count = count.parse::<usize>().context(
+                            "sync-plan fetch count must be a positive integer",
+                        )?;
+                        anyhow::ensure!(
+                            count > 0,
+                            "sync-plan fetch count must be a positive integer"
+                        );
+                        Some((start, count))
+                    }
+                    _ => anyhow::bail!(
+                        "usage: mirrarium corpus export-sync-fetch [start-index count]"
+                    ),
+                };
                 let input = read_bounded_utf8_input(
                     std::io::stdin().lock(),
                     MAX_CORPUS_SYNC_PLAN_INPUT_BYTES,
@@ -495,9 +514,10 @@ fn run() -> Result<()> {
                     .context("parsing source-bound corpus sync plan JSON")?;
                 let stdout = std::io::stdout();
                 let mut stdout = std::io::BufWriter::new(stdout.lock());
-                corpus::write_conversation_sync_plan_fetch_jsonl(
+                corpus::write_conversation_sync_plan_fetch_range_jsonl(
                     &root,
                     &plan,
+                    range,
                     &mut stdout,
                 )?;
                 stdout
@@ -1854,7 +1874,7 @@ USAGE:
   mirrarium corpus export-sync-schema
   mirrarium corpus export-sync-plan-schema
   mirrarium corpus export-sync-plan [--require-fresh]
-  mirrarium corpus export-sync-fetch
+  mirrarium corpus export-sync-fetch [start-index count]
   mirrarium corpus export-sync-checkpoint
   mirrarium corpus export-sync [--require-fresh]
   mirrarium corpus export-sync-negotiated
