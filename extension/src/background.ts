@@ -61,6 +61,7 @@ type CacheReplayHit = {
 };
 
 type PendingCacheLookup = {
+  port: chrome.runtime.Port;
   resolve: (hit: CacheReplayHit | null) => void;
   timeoutId: number;
   url: string;
@@ -82,6 +83,7 @@ type PrivateReadHit = {
 };
 
 type PendingPrivateReadLookup = {
+  port: chrome.runtime.Port;
   resolve: (hit: PrivateReadHit | null) => void;
   timeoutId: number;
   url: string;
@@ -140,6 +142,9 @@ const pendingCacheLookups = new Map<string, PendingCacheLookup>();
 const pendingPrivateReadLookups = new Map<string, PendingPrivateReadLookup>();
 const privateRevalidations = new Map<string, PrivateReadHit>();
 let nativePort: chrome.runtime.Port | undefined;
+// A capture is one native-host transaction. Its start, request body, response
+// chunks and finish may never be spliced across host process lifetimes.
+const capturePorts = new Map<string, chrome.runtime.Port>();
 let staleInstalledBuildNotice: string | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -224,12 +229,20 @@ function finishPrivateReadLookup(
   pending.resolve(hit);
 }
 
-function failAllCacheLookups(): void {
-  for (const lookupId of Array.from(pendingCacheLookups.keys())) {
-    finishCacheLookup(lookupId, null);
+function failLookupsForPort(port: chrome.runtime.Port): void {
+  for (const [lookupId, pending] of pendingCacheLookups) {
+    if (pending.port === port) finishCacheLookup(lookupId, null);
   }
-  for (const lookupId of Array.from(pendingPrivateReadLookups.keys())) {
-    finishPrivateReadLookup(lookupId, null);
+  for (const [lookupId, pending] of pendingPrivateReadLookups) {
+    if (pending.port === port) finishPrivateReadLookup(lookupId, null);
+  }
+}
+
+function retireNativePort(port: chrome.runtime.Port): void {
+  if (nativePort === port) nativePort = undefined;
+  failLookupsForPort(port);
+  for (const [captureId, owner] of capturePorts) {
+    if (owner === port) capturePorts.delete(captureId);
   }
 }
 
@@ -468,11 +481,12 @@ function getNativePort(): chrome.runtime.Port | undefined {
   try {
     const port = chrome.runtime.connectNative(NATIVE_HOST);
     port.onDisconnect.addListener(() => {
-      if (nativePort === port) nativePort = undefined;
-      failAllCacheLookups();
+      retireNativePort(port);
       void chrome.runtime.lastError;
     });
-    port.onMessage.addListener(handleNativeMessage);
+    port.onMessage.addListener((message: unknown) => {
+      if (nativePort === port) handleNativeMessage(message);
+    });
     nativePort = port;
     port.postMessage({
       type: "extension_runtime_state",
@@ -480,22 +494,63 @@ function getNativePort(): chrome.runtime.Port | undefined {
     });
     return port;
   } catch (error) {
-    nativePort = undefined;
-    failAllCacheLookups();
+    if (nativePort) retireNativePort(nativePort);
     console.warn("Mirrarium native host unavailable", error);
     return undefined;
   }
 }
 
 function postNative(message: unknown): void {
-  const port = getNativePort();
+  const record =
+    message !== null && typeof message === "object"
+      ? (message as Record<string, unknown>)
+      : undefined;
+  const type = record?.type;
+  const captureId =
+    typeof record?.capture_id === "string"
+      ? record.capture_id
+      : type === "capture_start" &&
+          record?.metadata !== null &&
+          typeof record?.metadata === "object"
+        ? (record.metadata as Record<string, unknown>).capture_id
+        : undefined;
+  const captureMessage =
+    type === "capture_start" ||
+    type === "capture_chunk" ||
+    type === "request_body_start" ||
+    type === "request_body_chunk" ||
+    type === "request_body_finish" ||
+    type === "capture_finish";
+
+  let port: chrome.runtime.Port | undefined;
+  if (type === "capture_start") {
+    port = getNativePort();
+    if (port && typeof captureId === "string") {
+      capturePorts.set(captureId, port);
+    }
+  } else if (captureMessage) {
+    // Missing or retired owner means the old host lost this in-flight
+    // transaction. Never connect a new host just to send an orphaned chunk.
+    if (typeof captureId !== "string") return;
+    port = capturePorts.get(captureId);
+    if (!port || port !== nativePort) {
+      capturePorts.delete(captureId);
+      return;
+    }
+  } else {
+    port = getNativePort();
+  }
   if (!port) return;
 
   try {
     port.postMessage(message);
   } catch (error) {
-    if (nativePort === port) nativePort = undefined;
+    retireNativePort(port);
     console.warn("Mirrarium could not send to native host", error);
+  } finally {
+    if (type === "capture_finish" && typeof captureId === "string") {
+      capturePorts.delete(captureId);
+    }
   }
 }
 
@@ -543,6 +598,7 @@ function lookupCachedResponse(
       finishCacheLookup(lookupId, null);
     }, CACHE_LOOKUP_TIMEOUT_MS);
     pendingCacheLookups.set(lookupId, {
+      port,
       resolve,
       timeoutId,
       url,
@@ -559,7 +615,7 @@ function lookupCachedResponse(
         resource_type: resourceType,
       });
     } catch (error) {
-      if (nativePort === port) nativePort = undefined;
+      retireNativePort(port);
       console.warn("Mirrarium could not query local cache", error);
       finishCacheLookup(lookupId, null);
     }
@@ -576,6 +632,7 @@ function lookupPrivateRead(url: string): Promise<PrivateReadHit | null> {
       finishPrivateReadLookup(lookupId, null);
     }, CACHE_LOOKUP_TIMEOUT_MS);
     pendingPrivateReadLookups.set(lookupId, {
+      port,
       resolve,
       timeoutId,
       url,
@@ -590,7 +647,7 @@ function lookupPrivateRead(url: string): Promise<PrivateReadHit | null> {
         url,
       });
     } catch (error) {
-      if (nativePort === port) nativePort = undefined;
+      retireNativePort(port);
       console.warn("Mirrarium could not query private read cache", error);
       finishPrivateReadLookup(lookupId, null);
     }
