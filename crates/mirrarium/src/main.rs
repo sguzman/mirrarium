@@ -356,6 +356,13 @@ fn run() -> Result<()> {
                     "writing corpus interop schema bundle v3",
                 )?;
             }
+            Some("export-schema-bundle-v4") => {
+                write_stdout_json_line(
+                    serde_json::to_vec(&corpus::interop_schema_bundle_v4()?)
+                        .context("serializing corpus interop schema bundle v4")?,
+                    "writing corpus interop schema bundle v4",
+                )?;
+            }
             Some("export-schema") => {
                 write_stdout_bytes(
                     corpus::CORPUS_EXPORT_SCHEMA_V1_JSON.as_bytes(),
@@ -396,6 +403,12 @@ fn run() -> Result<()> {
                 write_stdout_bytes(
                     corpus::CORPUS_CAPABILITIES_SCHEMA_V2_JSON.as_bytes(),
                     "writing corpus capabilities v2 schema",
+                )?;
+            }
+            Some("export-capabilities-v3-schema") => {
+                write_stdout_bytes(
+                    corpus::CORPUS_CAPABILITIES_SCHEMA_V3_JSON.as_bytes(),
+                    "writing corpus capabilities v3 schema",
                 )?;
             }
             Some("export-consumer-requirements-schema") => {
@@ -639,6 +652,14 @@ fn run() -> Result<()> {
                     serde_json::to_vec(&capabilities)
                         .context("serializing corpus capabilities v2")?,
                     "writing corpus capabilities v2",
+                )?;
+            }
+            Some("export-capabilities-v3") => {
+                let capabilities = corpus::interop_capabilities_v3(&root)?;
+                write_stdout_json_line(
+                    serde_json::to_vec(&capabilities)
+                        .context("serializing corpus capabilities v3")?,
+                    "writing corpus capabilities v3",
                 )?;
             }
             Some("export-negotiate") => {
@@ -1858,6 +1879,7 @@ USAGE:
   mirrarium corpus export-schema-bundle
   mirrarium corpus export-schema-bundle-v2
   mirrarium corpus export-schema-bundle-v3
+  mirrarium corpus export-schema-bundle-v4
   mirrarium corpus export-negotiation-schema-bundle
   mirrarium corpus export-schema
   mirrarium corpus export-source-schema
@@ -1866,6 +1888,7 @@ USAGE:
   mirrarium corpus export-status-schema
   mirrarium corpus export-capabilities-schema
   mirrarium corpus export-capabilities-v2-schema
+  mirrarium corpus export-capabilities-v3-schema
   mirrarium corpus export-consumer-requirements-schema
   mirrarium corpus export-compatibility-schema
   mirrarium corpus export-sync-negotiated-schema
@@ -1883,6 +1906,7 @@ USAGE:
   mirrarium corpus export-delta
   mirrarium corpus export-capabilities
   mirrarium corpus export-capabilities-v2
+  mirrarium corpus export-capabilities-v3
   mirrarium corpus export-negotiate
   mirrarium corpus export-source
   mirrarium corpus export-manifest

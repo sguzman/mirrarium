@@ -2629,6 +2629,41 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         bundledV3Ajv.getSchema("urn:mirrarium:corpus:capabilities:v2"),
       ).toBeTruthy();
 
+      const { stdout: corpusSchemaBundleV4Stdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-schema-bundle-v4"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSchemaBundleV4 = JSON.parse(corpusSchemaBundleV4Stdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        schemas: Array<{ $id?: string }>;
+      };
+      expect(corpusSchemaBundleV4).toMatchObject({
+        schema: "mirrarium.corpus.schema-bundle",
+        schema_version: 4,
+        record_type: "schema-bundle",
+      });
+      expect(corpusSchemaBundleV4.schemas.slice(0, -1)).toEqual(
+        corpusSchemaBundleV3.schemas,
+      );
+      expect(corpusSchemaBundleV4.schemas.at(-1)?.$id).toBe(
+        "urn:mirrarium:corpus:capabilities:v3",
+      );
+      const bundledV4Ajv = new Ajv2020({ allErrors: true, strict: true });
+      for (const schema of corpusSchemaBundleV4.schemas) {
+        bundledV4Ajv.addSchema(schema);
+      }
+      expect(
+        bundledV4Ajv.getSchema("urn:mirrarium:corpus:capabilities:v3"),
+      ).toBeTruthy();
+
       const { stdout: negotiationSchemaBundleStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-negotiation-schema-bundle"],
@@ -2925,6 +2960,68 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(
         validateBundledCapabilitiesV2?.(corpusCapabilitiesV2),
         JSON.stringify(validateBundledCapabilitiesV2?.errors),
+      ).toBe(true);
+
+      const { stdout: corpusCapabilitiesV3SchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-capabilities-v3-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const validateCorpusCapabilitiesV3 = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(JSON.parse(corpusCapabilitiesV3SchemaStdout));
+      const { stdout: corpusCapabilitiesV3Stdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-capabilities-v3"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusCapabilitiesV3 = JSON.parse(corpusCapabilitiesV3Stdout) as
+        typeof corpusCapabilitiesV2;
+      expect(
+        validateCorpusCapabilitiesV3(corpusCapabilitiesV3),
+        JSON.stringify(validateCorpusCapabilitiesV3.errors),
+      ).toBe(true);
+      expect(corpusCapabilitiesV3.schema_version).toBe(3);
+      expect(corpusCapabilitiesV3.archive_id).toBe(corpusCapabilitiesV2.archive_id);
+      expect(corpusCapabilitiesV3.wire_versions).toEqual({
+        ...corpusCapabilitiesV2.wire_versions,
+        capabilities: 3,
+        schema_bundle: 4,
+      });
+      expect(corpusCapabilitiesV3.limits).toEqual(corpusCapabilitiesV2.limits);
+      expect(corpusCapabilitiesV3.features).toEqual({
+        ...corpusCapabilitiesV2.features,
+        plan_bound_range_fetch: true,
+      });
+      expect(corpusCapabilitiesV2.features).not.toHaveProperty(
+        "plan_bound_range_fetch",
+      );
+      const v3WithoutRangeFeature = {
+        ...corpusCapabilitiesV3,
+        features: {
+          ...corpusCapabilitiesV3.features,
+          plan_bound_range_fetch: false,
+        },
+      };
+      expect(validateCorpusCapabilitiesV3(v3WithoutRangeFeature)).toBe(false);
+      const validateBundledCapabilitiesV3 = bundledV4Ajv.getSchema(
+        "urn:mirrarium:corpus:capabilities:v3",
+      );
+      expect(validateBundledCapabilitiesV3).toBeTruthy();
+      expect(
+        validateBundledCapabilitiesV3?.(corpusCapabilitiesV3),
+        JSON.stringify(validateBundledCapabilitiesV3?.errors),
       ).toBe(true);
 
       const { stdout: consumerRequirementsSchemaStdout } = await execFileAsync(

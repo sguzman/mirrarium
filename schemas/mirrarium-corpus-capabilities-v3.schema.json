@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mirrarium:corpus:capabilities:v3",
+  "title": "Mirrarium corpus interoperability capabilities v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "record_type",
+    "archive_id",
+    "producer_corpus_schema_version",
+    "wire_versions",
+    "limits",
+    "record_hash_algorithm",
+    "index_hash_algorithm",
+    "features"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mirrarium.corpus.capabilities"
+    },
+    "schema_version": {
+      "const": 3
+    },
+    "record_type": {
+      "const": "capabilities"
+    },
+    "archive_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "producer_corpus_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "wire_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conversation",
+        "conversation_index",
+        "export_manifest",
+        "export_source",
+        "export_status",
+        "capabilities",
+        "consumer_requirements",
+        "compatibility",
+        "negotiated_sync_request",
+        "sync_state",
+        "sync_checkpoint",
+        "sync_delta",
+        "sync_transaction",
+        "sync_plan",
+        "schema_bundle"
+      ],
+      "properties": {
+        "conversation": {
+          "const": 1
+        },
+        "conversation_index": {
+          "const": 1
+        },
+        "export_manifest": {
+          "const": 1
+        },
+        "export_source": {
+          "const": 1
+        },
+        "export_status": {
+          "const": 1
+        },
+        "capabilities": {
+          "const": 3
+        },
+        "consumer_requirements": {
+          "const": 1
+        },
+        "compatibility": {
+          "const": 1
+        },
+        "negotiated_sync_request": {
+          "const": 1
+        },
+        "sync_state": {
+          "const": 1
+        },
+        "sync_checkpoint": {
+          "const": 1
+        },
+        "sync_delta": {
+          "const": 1
+        },
+        "sync_transaction": {
+          "const": 1
+        },
+        "sync_plan": {
+          "const": 1
+        },
+        "schema_bundle": {
+          "const": 4
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sync_state_max_bytes",
+        "sync_checkpoint_input_max_bytes",
+        "consumer_requirements_max_bytes",
+        "negotiated_sync_request_max_bytes",
+        "sync_plan_input_max_bytes"
+      ],
+      "properties": {
+        "sync_state_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sync_checkpoint_input_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "consumer_requirements_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "negotiated_sync_request_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sync_plan_input_max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "record_hash_algorithm": {
+      "const": "sha256"
+    },
+    "index_hash_algorithm": {
+      "const": "sha256"
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_bound_sync",
+        "require_fresh_sync",
+        "negotiated_sync",
+        "metadata_sync_plan",
+        "plan_bound_batch_fetch",
+        "plan_bound_range_fetch"
+      ],
+      "properties": {
+        "source_bound_sync": {
+          "const": true
+        },
+        "require_fresh_sync": {
+          "const": true
+        },
+        "negotiated_sync": {
+          "const": true
+        },
+        "metadata_sync_plan": {
+          "const": true
+        },
+        "plan_bound_batch_fetch": {
+          "const": true
+        },
+        "plan_bound_range_fetch": {
+          "const": true
+        }
+      }
+    }
+  }
+}

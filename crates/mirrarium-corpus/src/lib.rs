@@ -43,6 +43,9 @@ pub const CORPUS_CAPABILITIES_SCHEMA_V1_JSON: &str =
 pub const CORPUS_CAPABILITIES_SCHEMA_V2_VERSION: u32 = 2;
 pub const CORPUS_CAPABILITIES_SCHEMA_V2_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-capabilities-v2.schema.json");
+pub const CORPUS_CAPABILITIES_SCHEMA_V3_VERSION: u32 = 3;
+pub const CORPUS_CAPABILITIES_SCHEMA_V3_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-capabilities-v3.schema.json");
 pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-consumer-requirements-v1.schema.json");
@@ -77,6 +80,7 @@ pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
 pub const CORPUS_SCHEMA_BUNDLE_VERSION: u32 = 1;
 pub const CORPUS_SCHEMA_BUNDLE_V2_VERSION: u32 = 2;
 pub const CORPUS_SCHEMA_BUNDLE_V3_VERSION: u32 = 3;
+pub const CORPUS_SCHEMA_BUNDLE_V4_VERSION: u32 = 4;
 pub const CORPUS_NEGOTIATION_SCHEMA_BUNDLE_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize)]
@@ -240,6 +244,59 @@ pub fn interop_capabilities_v2(
             negotiated_sync: true,
             metadata_sync_plan: true,
             plan_bound_batch_fetch: true,
+        },
+    })
+}
+
+/// Additive capability discovery; published v1/v2 discovery remains byte-for-byte stable.
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropFeaturesV3 {
+    pub source_bound_sync: bool,
+    pub require_fresh_sync: bool,
+    pub negotiated_sync: bool,
+    pub metadata_sync_plan: bool,
+    pub plan_bound_batch_fetch: bool,
+    pub plan_bound_range_fetch: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropCapabilitiesV3 {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
+    pub producer_corpus_schema_version: i64,
+    pub wire_versions: CorpusInteropWireVersionsV2,
+    pub limits: CorpusInteropLimitsV2,
+    pub record_hash_algorithm: String,
+    pub index_hash_algorithm: String,
+    pub features: CorpusInteropFeaturesV3,
+}
+
+pub fn interop_capabilities_v3(
+    raw_root: impl AsRef<Path>,
+) -> Result<CorpusInteropCapabilitiesV3> {
+    let previous = interop_capabilities_v2(raw_root)?;
+    let mut wire_versions = previous.wire_versions;
+    wire_versions.capabilities = CORPUS_CAPABILITIES_SCHEMA_V3_VERSION;
+    wire_versions.schema_bundle = CORPUS_SCHEMA_BUNDLE_V4_VERSION;
+    Ok(CorpusInteropCapabilitiesV3 {
+        schema: previous.schema,
+        schema_version: CORPUS_CAPABILITIES_SCHEMA_V3_VERSION,
+        record_type: previous.record_type,
+        archive_id: previous.archive_id,
+        producer_corpus_schema_version: previous.producer_corpus_schema_version,
+        wire_versions,
+        limits: previous.limits,
+        record_hash_algorithm: previous.record_hash_algorithm,
+        index_hash_algorithm: previous.index_hash_algorithm,
+        features: CorpusInteropFeaturesV3 {
+            source_bound_sync: previous.features.source_bound_sync,
+            require_fresh_sync: previous.features.require_fresh_sync,
+            negotiated_sync: previous.features.negotiated_sync,
+            metadata_sync_plan: previous.features.metadata_sync_plan,
+            plan_bound_batch_fetch: previous.features.plan_bound_batch_fetch,
+            plan_bound_range_fetch: true,
         },
     })
 }
@@ -635,6 +692,27 @@ pub fn interop_schema_bundle_v3() -> Result<CorpusInteropSchemaBundle> {
         "duplicate embedded corpus interop schema v3 id {id:?}"
     );
     bundle.schema_version = CORPUS_SCHEMA_BUNDLE_V3_VERSION;
+    bundle.schemas.push(value);
+    Ok(bundle)
+}
+
+/// Add only the capabilities-v3 schema; earlier bundle generations stay frozen.
+pub fn interop_schema_bundle_v4() -> Result<CorpusInteropSchemaBundle> {
+    let mut bundle = interop_schema_bundle_v3()?;
+    let value: Value = serde_json::from_str(CORPUS_CAPABILITIES_SCHEMA_V3_JSON)
+        .context("parsing embedded corpus capabilities v3 schema")?;
+    let id = value
+        .get("$id")
+        .and_then(Value::as_str)
+        .context("embedded corpus capabilities v3 schema is missing $id")?;
+    anyhow::ensure!(
+        !bundle
+            .schemas
+            .iter()
+            .any(|schema| schema.get("$id").and_then(Value::as_str) == Some(id)),
+        "duplicate embedded corpus interop schema v4 id {id:?}"
+    );
+    bundle.schema_version = CORPUS_SCHEMA_BUNDLE_V4_VERSION;
     bundle.schemas.push(value);
     Ok(bundle)
 }
@@ -7470,6 +7548,18 @@ mod tests {
         };
         let error = validate_negotiated_sync_request(&request).unwrap_err();
         assert!(error.to_string().contains("negotiated sync request schema"));
+    }
+
+    #[test]
+    fn interop_schema_bundle_v4_extends_v3_without_mutating_old_generations() {
+        let old = interop_schema_bundle_v3().unwrap();
+        let new = interop_schema_bundle_v4().unwrap();
+        assert_eq!(old.schema_version, CORPUS_SCHEMA_BUNDLE_V3_VERSION);
+        assert_eq!(new.schema_version, CORPUS_SCHEMA_BUNDLE_V4_VERSION);
+        assert_eq!(new.schemas.len(), old.schemas.len() + 1);
+        assert_eq!(&new.schemas[..old.schemas.len()], old.schemas.as_slice());
+        let last = new.schemas.last().unwrap();
+        assert_eq!(last["$id"], "urn:mirrarium:corpus:capabilities:v3");
     }
 
     #[test]
