@@ -3712,6 +3712,16 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         },
       );
       expect(deletionOnlyFetchStdout).toBe("");
+      const { stdout: deletionOnlyPageStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-fetch", "0", "1"],
+        deletionOnlyPlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(deletionOnlyPageStdout).toBe("");
 
       const { stdout: deletionOnlySyncStdout } = await execFileWithInput(
         cliPath,
@@ -5025,6 +5035,43 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         .filter((line) => line.length > 0)
         .map((line) => JSON.parse(line));
       expect(plannedBatchRecords).toEqual(c1ToC2Sync.delta.upserts);
+
+      const { stdout: firstPageStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-fetch", "0", "1"],
+        c1ToC2PlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(firstPageStdout).toBe(plannedBatchStdout);
+
+      const outOfRangeFetch = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-fetch", "1", "1"],
+        c1ToC2PlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(outOfRangeFetch.code).not.toBe(0);
+      expect(outOfRangeFetch.stdout).toBe("");
+      expect(outOfRangeFetch.stderr).toContain("outside 1 planned upserts");
+
+      const zeroCountFetch = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-fetch", "0", "0"],
+        c1ToC2PlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(zeroCountFetch.code).not.toBe(0);
+      expect(zeroCountFetch.stdout).toBe("");
+      expect(zeroCountFetch.stderr).toContain("count must be a positive integer");
 
       const staleBootstrapFetch = await execFileWithInputResult(
         cliPath,
