@@ -93,7 +93,7 @@ fn expect_ack(
     capture_id: &str,
     stage: CaptureMessageStage,
     sequence: Option<u32>,
-) {
+) -> Option<String> {
     match response {
         HostResponse::CaptureMessageAck {
             capture_id: actual,
@@ -109,6 +109,7 @@ fn expect_ack(
             assert_eq!(actual, capture_id);
             assert_eq!(actual_stage, stage);
             assert_eq!(actual_sequence, sequence);
+            archive_id
         }
         other => panic!("expected capture message ack for {capture_id}, got {other:?}"),
     }
@@ -147,7 +148,7 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
 
     let mut first = NativeHost::spawn(root, &key_path);
 
-    expect_ack(
+    let original_archive_id = expect_ack(
         first.send(&HostRequest::CaptureStart {
             metadata: metadata(
                 "committed-before-crash",
@@ -157,7 +158,7 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
         "committed-before-crash",
         CaptureMessageStage::CaptureStart,
         None,
-    );
+    ).expect("original writer start ACK must identify its archive");
     let committed_body = br#"{"committed":true}"#;
     expect_ack(
         first.send(&HostRequest::CaptureChunk {
@@ -216,7 +217,7 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
     ] {
         match second.send(&HostRequest::CaptureCommitProbe {
             capture_id: capture_id.to_owned(),
-            expected_archive_id: Some(mirrarium_store::archive_identity(root).unwrap()),
+            expected_archive_id: Some(original_archive_id.clone()),
         }) {
             HostResponse::CaptureCommitStatus {
                 capture_id: actual,
@@ -225,7 +226,7 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             } => {
                 assert_eq!(
                     archive_id.as_deref(),
-                    Some(mirrarium_store::archive_identity(root).unwrap().as_str())
+                    Some(original_archive_id.as_str())
                 );
                 assert_eq!(actual, capture_id);
                 assert_eq!(observed, committed);

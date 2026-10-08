@@ -466,20 +466,23 @@ function handleNativeMessage(message: unknown): void {
       record.sequence,
     );
     if (delivery && delivery.port === nativePort && key) {
+      if (!delivery.pendingMessageAcks.has(key)) {
+        // Never let an unexpected or duplicate ACK overwrite the immutable
+        // archive binding learned from the original capture_start receipt.
+        console.warn("Mirrarium received unmatched capture progress acknowledgment");
+        return;
+      }
       if (key === "capture_start") {
         const archiveId = record.archive_id;
-        if (typeof archiveId !== "string" || !/^[0-9a-f]{64}$/.test(archiveId)) {
-          abortCaptureDelivery(captureId!);
-          console.warn("Mirrarium refused capture start lacking a valid archive identity");
-          return;
+        if (typeof archiveId === "string" && /^[0-9a-f]{64}$/.test(archiveId)) {
+          delivery.archiveId = archiveId;
+        } else {
+          // Older native hosts can still archive normally. Without an
+          // authenticated original archive ID, later recovery is unconfirmed.
+          console.warn("Mirrarium start ACK has no usable archive identity; recovery unbound");
         }
-        delivery.archiveId = archiveId;
       }
-      if (!delivery.pendingMessageAcks.delete(key)) {
-        // A duplicate/unexpected receipt is not evidence of data loss, but
-        // must not be counted as progress or proof of committed bytes.
-        console.warn("Mirrarium received unmatched capture progress acknowledgment");
-      }
+      delivery.pendingMessageAcks.delete(key);
     }
     return;
   }
