@@ -349,6 +349,7 @@ function handleNativeMessage(message: unknown): void {
       typeof record.capture_id === "string" ? record.capture_id : undefined;
     if (
       captureId &&
+      nativePort !== undefined &&
       pendingCommitProbes.get(captureId) === nativePort &&
       typeof record.committed === "boolean"
     ) {
@@ -664,7 +665,7 @@ function getNativePort(): chrome.runtime.Port | undefined {
       build_id: RUNNING_BUILD_ID,
     });
     sendCommitProbes(port);
-    return port;
+    return nativePort === port ? port : undefined;
   } catch (error) {
     if (nativePort) retireNativePort(nativePort);
     console.warn("Mirrarium native host unavailable", error);
