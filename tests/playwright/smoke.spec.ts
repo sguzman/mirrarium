@@ -4767,6 +4767,37 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         c1ToC2Sync.delta.upserts[0],
       );
 
+      const { stdout: plannedBatchStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-fetch"],
+        c1ToC2PlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const plannedBatchRecords = plannedBatchStdout
+        .trim()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line));
+      expect(plannedBatchRecords).toEqual(c1ToC2Sync.delta.upserts);
+
+      const staleBootstrapFetch = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-fetch"],
+        bootstrapPlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(staleBootstrapFetch.code).not.toBe(0);
+      expect(staleBootstrapFetch.stdout).toBe("");
+      expect(staleBootstrapFetch.stderr).toContain(
+        "different published corpus generation",
+      );
+
       const { stdout: c1ToC2SyncRepeatStdout } = await execFileWithInput(
         cliPath,
         ["corpus", "export-sync", "--require-fresh"],
