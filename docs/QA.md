@@ -66,6 +66,8 @@ The fixture deliberately exercises the current production boundaries rather than
 - the Chatarium-facing corpus interoperability contract: AJV validation against every published v1 schema plus the installed-binary schema bundle/capabilities handshake, the golden record-hash vector, deterministic full export/index/manifest/sync-checkpoint bytes, hash-guarded `export-one`, generation-pinned sync deltas with explicit deletions, source-bound bootstrap/incremental sync transactions with cross-archive, torn-checkpoint, and structurally damaged-upsert rejection without an authoritative next checkpoint, plus a real C1→late browser capture→rebuild G2→single-upsert C2 progression, cached no-change sync without raw-ledger access, and rejection of structurally damaged changed records without a successful/parseable delta;
 - stable installed-extension update/reload behavior in disposable Chromium, including deliberate installed-tree mutation that must flip `extension status` to invalid until the original file is restored.
 
+Cache telemetry can continue increasing while isolated Chromium performs additional replay/revalidation. Assertions comparing counters from **separate CLI invocations** must tolerate monotonic growth; exact sum identities belong within a single CLI report/snapshot. This prevents live-capture timing from being mistaken for a corrupted aggregate.
+
 The suite therefore proves classification, privacy-scoped deduplication, failure semantics, replay/revalidation safety, transport evidence boundaries, encrypted persistence, derived-corpus integrity, and browser deployment lifecycle without using a real ChatGPT account.
 
 ## Live-site tests
