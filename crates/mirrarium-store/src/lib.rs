@@ -519,6 +519,13 @@ impl CaptureStore {
             "capture already in flight: {}",
             metadata.capture_id
         );
+        // A committed capture ID is immutable. Reject reuse before creating
+        // or truncating staging files rather than relying on a late PK error.
+        anyhow::ensure!(
+            self.capture_by_id(&metadata.capture_id)?.is_none(),
+            "capture already committed: {}",
+            metadata.capture_id
+        );
 
         let suppressed_reason = credential_endpoint_reason(&metadata.url).map(str::to_owned);
         metadata.url = sanitize_url_for_storage(&metadata.url);
@@ -526,9 +533,11 @@ impl CaptureStore {
 
         let temp_name = format!("{}.part", sha256_hex(metadata.capture_id.as_bytes()));
         let temp_path = self.root.join(".incoming").join(temp_name);
+        // O_CREAT | O_EXCL refuses existing files and symlinks. Stage paths
+        // are derived from UUIDs but must not be clobberable even when their
+        // names are known or a previous abnormal exit left a stale part.
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temp_path)
             .with_context(|| format!("opening {}", temp_path.display()))?;
@@ -560,6 +569,20 @@ impl CaptureStore {
         );
 
         Ok(())
+    }
+
+    /// Discard an incomplete capture without producing any ledger row or
+    /// content-addressed object. An unknown/already-committed ID is a no-op.
+    /// A failed removal leaves only abandoned staging for startup cleanup.
+    pub fn abort(&mut self, capture_id: &str) -> Result<bool> {
+        let Some(capture) = self.in_flight.remove(capture_id) else {
+            return Ok(false);
+        };
+        let staged = capture.temp_path.clone();
+        drop(capture);
+        fs::remove_file(&staged)
+            .with_context(|| format!("discarding aborted capture part {}", staged.display()))?;
+        Ok(true)
     }
 
     pub fn append_chunk(
@@ -4556,6 +4579,81 @@ mod tests {
         assert!(body.data.contains("message=hello"));
         assert!(body.data.contains("access_token=%5BREDACTED%5D"));
         assert!(!body.data.contains("secret"));
+    }
+
+    #[test]
+    fn abort_releases_inflight_staging_without_creating_evidence() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let id = "abort-privacy-fixture";
+        store.begin(metadata(
+            id,
+            "https://chatgpt.com/backend-api/conversation/abort",
+            "Fetch",
+        )).unwrap();
+        store.append_chunk(id, 0, &BASE64.encode(b"synthetic private fragment")).unwrap();
+        let staged = directory.path().join(".incoming")
+            .join(format!("{}.part", sha256_hex(id.as_bytes())));
+        assert!(staged.is_file());
+        assert!(store.abort(id).unwrap());
+        assert!(!staged.exists());
+        assert!(store.capture_by_id(id).unwrap().is_none());
+        assert!(!store.abort(id).unwrap());
+        assert!(store.finish(id, None, None).is_err());
+        assert_eq!(store.stats().unwrap().captures, 0);
+        // Aborted IDs are free for a deliberate fresh start in this writer.
+        store.begin(metadata(
+            id,
+            "https://chatgpt.com/backend-api/conversation/abort",
+            "Fetch",
+        )).unwrap();
+        assert!(store.abort(id).unwrap());
+    }
+
+    #[test]
+    fn committed_capture_id_cannot_replace_or_stage_again() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let id = "already-durable";
+        store.begin(metadata(id, "https://chatgpt.com/backend-api/durable", "Fetch")).unwrap();
+        store.append_chunk(id, 0, &BASE64.encode(br#"{"committed":true}"#)).unwrap();
+        store.finish(id, None, None).unwrap();
+        let original = store.capture_by_id(id).unwrap().unwrap();
+        assert!(store.begin(metadata(
+            id,
+            "https://chatgpt.com/backend-api/should-not-replace",
+            "Fetch",
+        )).unwrap_err().to_string().contains("already committed"));
+        assert!(!store.abort(id).unwrap());
+        let after = store.capture_by_id(id).unwrap().unwrap();
+        assert_eq!(after.url, original.url);
+        assert_eq!(after.body_hash, original.body_hash);
+        let staged = directory.path().join(".incoming")
+            .join(format!("{}.part", sha256_hex(id.as_bytes())));
+        assert!(!staged.exists());
+        assert_eq!(store.stats().unwrap().captures, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn begin_refuses_preexisting_symlink_staging_without_following_it() {
+        use std::os::unix::fs::symlink;
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let id = "hostile-staging-name";
+        let outside = directory.path().join("keep-me");
+        fs::write(&outside, b"untouched").unwrap();
+        let staged = directory.path().join(".incoming")
+            .join(format!("{}.part", sha256_hex(id.as_bytes())));
+        symlink(&outside, &staged).unwrap();
+        assert!(store.begin(metadata(
+            id,
+            "https://chatgpt.com/backend-api/staging",
+            "Fetch",
+        )).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&staged).unwrap().file_type().is_symlink());
+        assert!(store.capture_by_id(id).unwrap().is_none());
     }
 
     #[test]
