@@ -123,7 +123,12 @@ type CdpResponse = {
 const attachedTabs = new Set<number>();
 // A tab can navigate away while debugger.attach/Network.enable/Fetch.enable
 // are still pending. Cancellation must work before attachedTabs is populated.
-const pendingAttachTabs = new Map<number, { cancelled: boolean }>();
+type PendingAttach = {
+  cancelled: boolean;
+  retryIfSupported: boolean;
+  selfDetaching: boolean;
+};
+const pendingAttachTabs = new Map<number, PendingAttach>();
 const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
@@ -940,7 +945,11 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
   checkInstalledExtensionVersion();
   // Avoid overlapping asynchronous debugger.attach attempts for one tab.
   if (attachedTabs.has(tabId) || pendingAttachTabs.has(tabId)) return;
-  const pending = { cancelled: false };
+  const pending: PendingAttach = {
+    cancelled: false,
+    retryIfSupported: false,
+    selfDetaching: false,
+  };
   pendingAttachTabs.set(tabId, pending);
 
   let debuggerAttached = false;
@@ -1070,6 +1079,7 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
   } finally {
     fetchSetupTabs.delete(tabId);
     if (!ready && debuggerAttached) {
+      pending.selfDetaching = true;
       try {
         await chrome.debugger.detach({ tabId });
       } catch {
@@ -1079,7 +1089,7 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
     if (pendingAttachTabs.get(tabId) === pending) {
       pendingAttachTabs.delete(tabId);
     }
-    if (pending.cancelled) {
+    if (pending.cancelled && pending.retryIfSupported) {
       // An out-and-back navigation can finish while the prior setup is
       // unwinding. Recheck once instead of abandoning the supported tab.
       void chrome.tabs.get(tabId).then((tab) => {
@@ -1093,7 +1103,10 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
 
 async function detach(tabId: number): Promise<void> {
   const pending = pendingAttachTabs.get(tabId);
-  if (pending) pending.cancelled = true;
+  if (pending) {
+    pending.cancelled = true;
+    pending.retryIfSupported = true;
+  }
   clearTabState(tabId);
 
   if (!attachedTabs.has(tabId)) return;
@@ -1993,6 +2006,13 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId !== undefined) {
+    const pending = pendingAttachTabs.get(source.tabId);
+    if (pending && !pending.selfDetaching) {
+      // An external debugger takeover/detach is not an origin-navigation
+      // retry. Never resurrect our attachment against the other debugger.
+      pending.cancelled = true;
+      pending.retryIfSupported = false;
+    }
     fetchSetupTabs.delete(source.tabId);
     attachedTabs.delete(source.tabId);
     clearTabState(source.tabId);
@@ -2283,7 +2303,10 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   const pending = pendingAttachTabs.get(tabId);
-  if (pending) pending.cancelled = true;
+  if (pending) {
+    pending.cancelled = true;
+    pending.retryIfSupported = false;
+  }
   fetchSetupTabs.delete(tabId);
   attachedTabs.delete(tabId);
   clearTabState(tabId);
