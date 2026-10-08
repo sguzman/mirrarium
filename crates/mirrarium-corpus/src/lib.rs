@@ -620,6 +620,25 @@ pub fn interop_schema_bundle_v2() -> Result<CorpusInteropSchemaBundle> {
     })
 }
 
+pub fn interop_schema_bundle_v3() -> Result<CorpusInteropSchemaBundle> {
+    let mut bundle = interop_schema_bundle_v2()?;
+    let value: Value = serde_json::from_str(CORPUS_CAPABILITIES_SCHEMA_V2_JSON)
+        .context("parsing embedded corpus capabilities v2 schema")?;
+    let id = value
+        .get("$id")
+        .and_then(Value::as_str)
+        .context("embedded corpus capabilities v2 schema is missing $id")?;
+    anyhow::ensure!(
+        !bundle.schemas.iter().any(|schema| {
+            schema.get("$id").and_then(Value::as_str) == Some(id)
+        }),
+        "duplicate embedded corpus interop schema v3 id {id:?}"
+    );
+    bundle.schema_version = CORPUS_SCHEMA_BUNDLE_V3_VERSION;
+    bundle.schemas.push(value);
+    Ok(bundle)
+}
+
 pub fn interop_negotiation_schema_bundle() -> Result<CorpusInteropSchemaBundle> {
     let schema_sources = [
         CORPUS_EXPORT_MANIFEST_SCHEMA_V1_JSON,
