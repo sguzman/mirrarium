@@ -98,8 +98,18 @@ test("native transport acknowledges only a durably finished capture", async () =
     ).toBe(0);
     const responses = readFrames(Buffer.concat(outputChunks));
     expect(responses).toHaveLength(5);
-    expect(responses[0]).toEqual({ type: "ack", capture_id: captureId });
-    expect(responses[1]).toEqual({ type: "ack", capture_id: captureId });
+    expect(responses[0]).toEqual({
+      type: "capture_message_ack",
+      capture_id: captureId,
+      stage: "capture_start",
+      sequence: null,
+    });
+    expect(responses[1]).toEqual({
+      type: "capture_message_ack",
+      capture_id: captureId,
+      stage: "capture_chunk",
+      sequence: 0,
+    });
     expect(responses[2]).toEqual({
       type: "capture_committed",
       capture_id: captureId,

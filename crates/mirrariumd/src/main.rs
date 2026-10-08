@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use mirrarium_cache as cache;
-use mirrarium_protocol::{HostRequest, HostResponse};
+use mirrarium_protocol::{CaptureMessageStage, HostRequest, HostResponse};
 use mirrarium_store::{default_data_root, CaptureStore};
 use sha2::{Digest, Sha256};
 
@@ -311,6 +311,22 @@ fn request_capture_id(request: &HostRequest) -> Option<String> {
 
 fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostResponse {
     let terminal_capture = matches!(&request, HostRequest::CaptureFinish { .. });
+    let progress = match &request {
+        HostRequest::CaptureStart { .. } => Some((CaptureMessageStage::CaptureStart, None)),
+        HostRequest::CaptureChunk { sequence, .. } => {
+            Some((CaptureMessageStage::CaptureChunk, Some(*sequence)))
+        }
+        HostRequest::RequestBodyStart { .. } => {
+            Some((CaptureMessageStage::RequestBodyStart, None))
+        }
+        HostRequest::RequestBodyChunk { sequence, .. } => {
+            Some((CaptureMessageStage::RequestBodyChunk, Some(*sequence)))
+        }
+        HostRequest::RequestBodyFinish { .. } => {
+            Some((CaptureMessageStage::RequestBodyFinish, None))
+        }
+        _ => None,
+    };
     let capture_id = request_capture_id(&request);
 
     let result = match request {
@@ -395,6 +411,14 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
         Ok(()) if terminal_capture => HostResponse::CaptureCommitted {
             capture_id: capture_id.expect("capture finish always has a capture ID"),
         },
+        Ok(()) if progress.is_some() => {
+            let (stage, sequence) = progress.expect("checked above");
+            HostResponse::CaptureMessageAck {
+                capture_id: capture_id.expect("capture progress always has a capture ID"),
+                stage,
+                sequence,
+            }
+        }
         Ok(()) => HostResponse::Ack { capture_id },
         Err(error) => HostResponse::Error {
             capture_id,
@@ -655,7 +679,11 @@ mod tests {
         };
         assert!(matches!(
             handle_request(&mut store, HostRequest::CaptureStart { metadata }),
-            HostResponse::Ack { capture_id: Some(ref id) } if id == &capture_id
+            HostResponse::CaptureMessageAck {
+                capture_id: ref id,
+                stage: CaptureMessageStage::CaptureStart,
+                sequence: None,
+            } if id == &capture_id
         ));
         assert!(matches!(
             handle_request(
@@ -666,7 +694,11 @@ mod tests {
                     data_base64: BASE64.encode(br#"{"id":"receipt"}"#),
                 },
             ),
-            HostResponse::Ack { capture_id: Some(ref id) } if id == &capture_id
+            HostResponse::CaptureMessageAck {
+                capture_id: ref id,
+                stage: CaptureMessageStage::CaptureChunk,
+                sequence: Some(0),
+            } if id == &capture_id
         ));
         let committed = handle_request(
             &mut store,
@@ -680,6 +712,19 @@ mod tests {
             committed,
             HostResponse::CaptureCommitted { ref capture_id } if capture_id == "receipt-proof"
         ));
+        assert_eq!(
+            serde_json::to_value(&HostResponse::CaptureMessageAck {
+                capture_id: capture_id.clone(),
+                stage: CaptureMessageStage::CaptureChunk,
+                sequence: Some(7),
+            }).unwrap(),
+            serde_json::json!({
+                "type": "capture_message_ack",
+                "capture_id": "receipt-proof",
+                "stage": "capture_chunk",
+                "sequence": 7
+            }),
+        );
         assert_eq!(
             serde_json::to_value(&committed).unwrap(),
             serde_json::json!({

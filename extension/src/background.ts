@@ -4,6 +4,7 @@ const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
 const CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS = 60_000;
+const MAX_CAPTURE_PROGRESS_RECEIPTS = 128;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
 const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
@@ -148,8 +149,34 @@ let nativePort: chrome.runtime.Port | undefined;
 type CaptureDelivery = {
   port: chrome.runtime.Port;
   awaitingCommit: boolean;
+  // Only compact fragment identities; never buffer capture payload bytes.
+  pendingMessageAcks: Set<string>;
   receiptTimeoutId?: number;
 };
+
+function captureProgressKey(
+  stage: string,
+  sequence: unknown,
+): string | undefined {
+  if (stage === "capture_chunk" || stage === "request_body_chunk") {
+    if (
+      typeof sequence !== "number" ||
+      !Number.isSafeInteger(sequence) ||
+      sequence < 0 ||
+      sequence > 0xffff_ffff
+    ) return undefined;
+    return `${stage}:${sequence}`;
+  }
+  if (
+    stage === "capture_start" ||
+    stage === "request_body_start" ||
+    stage === "request_body_finish"
+  ) {
+    if (sequence !== undefined && sequence !== null) return undefined;
+    return stage;
+  }
+  return undefined;
+}
 const capturePorts = new Map<string, CaptureDelivery>();
 
 function clearCaptureDelivery(captureId: string): void {
@@ -296,6 +323,24 @@ function handleNativeMessage(message: unknown): void {
     return;
   }
 
+  if (type === "capture_message_ack") {
+    const captureId =
+      typeof record.capture_id === "string" ? record.capture_id : undefined;
+    const delivery = captureId ? capturePorts.get(captureId) : undefined;
+    const key = captureProgressKey(
+      typeof record.stage === "string" ? record.stage : "",
+      record.sequence,
+    );
+    if (delivery?.port === nativePort && key) {
+      if (!delivery.pendingMessageAcks.delete(key)) {
+        // A duplicate/unexpected receipt is not evidence of data loss, but
+        // must not be counted as progress or proof of committed bytes.
+        console.warn("Mirrarium received unmatched capture progress acknowledgment");
+      }
+    }
+    return;
+  }
+
   if (type === "capture_committed") {
     const captureId =
       typeof record.capture_id === "string" ? record.capture_id : undefined;
@@ -307,7 +352,13 @@ function handleNativeMessage(message: unknown): void {
       delivery?.awaitingCommit &&
       delivery.port === nativePort
     ) {
-      clearCaptureDelivery(captureId);
+      if (delivery.pendingMessageAcks.size === 0) {
+        clearCaptureDelivery(captureId);
+      } else {
+        // An unacknowledged fragment cannot be silently certified by a
+        // terminal receipt if the host's intermediate protocol is torn.
+        console.warn("Mirrarium capture committed with missing fragment acknowledgments");
+      }
     }
     return;
   }
@@ -583,7 +634,11 @@ function postNative(message: unknown): void {
     if (typeof captureId !== "string" || capturePorts.has(captureId)) return;
     port = getNativePort();
     if (port) {
-      capturePorts.set(captureId, { port, awaitingCommit: false });
+      capturePorts.set(captureId, {
+        port,
+        awaitingCommit: false,
+        pendingMessageAcks: new Set<string>(),
+      });
     }
   } else if (captureMessage) {
     // Missing or retired owner means the old host lost this in-flight
@@ -599,6 +654,24 @@ function postNative(message: unknown): void {
     port = getNativePort();
   }
   if (!port) return;
+
+  if (captureMessage && type !== "capture_finish" && typeof captureId === "string") {
+    const delivery = capturePorts.get(captureId);
+    const key = captureProgressKey(typeof type === "string" ? type : "", record?.sequence);
+    if (
+      !delivery ||
+      !key ||
+      delivery.pendingMessageAcks.has(key) ||
+      delivery.pendingMessageAcks.size >= MAX_CAPTURE_PROGRESS_RECEIPTS
+    ) {
+      // A failed bound/protocol check leaves the old host staging transaction
+      // uncommitted. Never send terminal success for that capture.
+      clearCaptureDelivery(captureId);
+      console.warn("Mirrarium capture transport progress bound or sequence rejected");
+      return;
+    }
+    delivery.pendingMessageAcks.add(key);
+  }
 
   try {
     port.postMessage(message);

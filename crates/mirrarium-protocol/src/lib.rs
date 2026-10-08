@@ -102,6 +102,18 @@ pub enum HostRequest {
     },
 }
 
+/// The identity of a processed nonterminal capture message. These receipts
+/// confirm ingestion by the active native host, NOT durable capture commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMessageStage {
+    CaptureStart,
+    CaptureChunk,
+    RequestBodyStart,
+    RequestBodyChunk,
+    RequestBodyFinish,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostResponse {
@@ -159,6 +171,13 @@ pub enum HostResponse {
         message: String,
     },
     Ack { capture_id: Option<String> },
+    /// Acknowledges the exact nonterminal message and chunk index. A staging
+    /// ACK is not durable; only CaptureCommitted proves the final commit.
+    CaptureMessageAck {
+        capture_id: String,
+        stage: CaptureMessageStage,
+        sequence: Option<u32>,
+    },
     /// Returned only after a successful synchronous raw-ledger commit.
     CaptureCommitted { capture_id: String },
     Error {

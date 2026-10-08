@@ -7,7 +7,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use mirrarium_protocol::{
-    CaptureMetadata, CaptureProvenance, HostRequest, HostResponse,
+    CaptureMessageStage, CaptureMetadata, CaptureProvenance, HostRequest, HostResponse,
 };
 
 struct NativeHost {
@@ -88,12 +88,23 @@ fn metadata(capture_id: &str, url: &str) -> CaptureMetadata {
     }
 }
 
-fn expect_ack(response: HostResponse, capture_id: &str) {
+fn expect_ack(
+    response: HostResponse,
+    capture_id: &str,
+    stage: CaptureMessageStage,
+    sequence: Option<u32>,
+) {
     match response {
-        HostResponse::Ack {
-            capture_id: Some(actual),
-        } => assert_eq!(actual, capture_id),
-        other => panic!("expected capture ack for {capture_id}, got {other:?}"),
+        HostResponse::CaptureMessageAck {
+            capture_id: actual,
+            stage: actual_stage,
+            sequence: actual_sequence,
+        } => {
+            assert_eq!(actual, capture_id);
+            assert_eq!(actual_stage, stage);
+            assert_eq!(actual_sequence, sequence);
+        }
+        other => panic!("expected capture message ack for {capture_id}, got {other:?}"),
     }
 }
 
@@ -138,6 +149,8 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             ),
         }),
         "committed-before-crash",
+        CaptureMessageStage::CaptureStart,
+        None,
     );
     let committed_body = br#"{"committed":true}"#;
     expect_ack(
@@ -147,6 +160,8 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             data_base64: BASE64.encode(committed_body),
         }),
         "committed-before-crash",
+        CaptureMessageStage::CaptureChunk,
+        Some(0),
     );
     expect_committed(
         first.send(&HostRequest::CaptureFinish {
@@ -164,6 +179,8 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             ),
         }),
         "crash-capture",
+        CaptureMessageStage::CaptureStart,
+        None,
     );
 
     let partial_body = br#"{"partial":true}"#;
@@ -174,6 +191,8 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             data_base64: BASE64.encode(partial_body),
         }),
         "crash-capture",
+        CaptureMessageStage::CaptureChunk,
+        Some(0),
     );
 
     let abandoned = incoming_parts(root);
@@ -190,6 +209,8 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             ),
         }),
         "recovered-capture",
+        CaptureMessageStage::CaptureStart,
+        None,
     );
 
     let recovered_body = br#"{"ok":true}"#;
@@ -200,6 +221,8 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
             data_base64: BASE64.encode(recovered_body),
         }),
         "recovered-capture",
+        CaptureMessageStage::CaptureChunk,
+        Some(0),
     );
     expect_committed(
         second.send(&HostRequest::CaptureFinish {
