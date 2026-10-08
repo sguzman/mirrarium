@@ -129,6 +129,7 @@ type PendingAttach = {
   selfDetaching: boolean;
 };
 const pendingAttachTabs = new Map<number, PendingAttach>();
+const detachingTabs = new Map<number, Promise<void>>();
 const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
@@ -942,6 +943,17 @@ async function handlePausedRequest(
 
 async function attach(tabId: number, url: string | undefined): Promise<void> {
   if (!isSupportedChatGptUrl(url)) return;
+  const detaching = detachingTabs.get(tabId);
+  if (detaching) {
+    // A supported return navigation can arrive before the old debugger
+    // has completed detach. Wait rather than losing this attach request.
+    await detaching;
+    const currentTab = await chrome.tabs.get(tabId).catch(() => undefined);
+    if (isSupportedChatGptUrl(currentTab?.url)) {
+      await attach(tabId, currentTab?.url);
+    }
+    return;
+  }
   checkInstalledExtensionVersion();
   // Avoid overlapping asynchronous debugger.attach attempts for one tab.
   if (attachedTabs.has(tabId) || pendingAttachTabs.has(tabId)) return;
@@ -1090,11 +1102,14 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
       pendingAttachTabs.delete(tabId);
     }
     if (pending.cancelled && pending.retryIfSupported) {
-      // An out-and-back navigation can finish while the prior setup is
-      // unwinding. Recheck once instead of abandoning the supported tab.
-      void chrome.tabs.get(tabId).then((tab) => {
-        if (isSupportedChatGptUrl(tab.url)) void attach(tabId, tab.url);
-      }).catch(() => {
+      // An out-and-back navigation can finish while the prior setup or
+      // a completed attachment's detach is still unwinding.
+      void (async () => {
+        const detaching = detachingTabs.get(tabId);
+        if (detaching) await detaching;
+        const tab = await chrome.tabs.get(tabId);
+        if (isSupportedChatGptUrl(tab.url)) await attach(tabId, tab.url);
+      })().catch(() => {
         // Closed tabs have no debugger session to recover.
       });
     }
@@ -1106,17 +1121,39 @@ async function detach(tabId: number): Promise<void> {
   if (pending) {
     pending.cancelled = true;
     pending.retryIfSupported = true;
+    pending.selfDetaching = true;
   }
   clearTabState(tabId);
 
+  const alreadyDetaching = detachingTabs.get(tabId);
+  if (alreadyDetaching) {
+    await alreadyDetaching;
+    return;
+  }
   if (!attachedTabs.has(tabId)) return;
 
+  const operation = (async () => {
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch {
+      // The tab may already be gone or Chromium may already have detached us.
+    } finally {
+      attachedTabs.delete(tabId);
+    }
+  })();
+  detachingTabs.set(tabId, operation);
   try {
-    await chrome.debugger.detach({ tabId });
-  } catch {
-    // The tab may already be gone or Chromium may already have detached us.
+    await operation;
   } finally {
-    attachedTabs.delete(tabId);
+    if (detachingTabs.get(tabId) === operation) {
+      detachingTabs.delete(tabId);
+    }
+  }
+  // If a tab navigated away and back before detach finished, onUpdated's
+  // attach request might have arrived while attachedTabs still contained it.
+  const currentTab = await chrome.tabs.get(tabId).catch(() => undefined);
+  if (isSupportedChatGptUrl(currentTab?.url)) {
+    void attach(tabId, currentTab?.url);
   }
 }
 

@@ -438,6 +438,50 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           { timeout: 10_000 },
         )
         .toBe(true);
+
+      // A quick return to a supported origin must restore Mirrarium's
+      // debugger after the prior detach, not silently leave a blind tab.
+      await foreignTabs[0]!.goto("https://chatgpt.com:43117/warmup");
+      await expect
+        .poll(
+          async () =>
+            await worker.evaluate(async () => {
+              const chromeApi = (
+                globalThis as typeof globalThis & {
+                  chrome: {
+                    tabs: {
+                      query(queryInfo: object): Promise<Array<{ id?: number; url?: string }>>;
+                    };
+                    debugger: {
+                      sendCommand(
+                        target: { tabId: number },
+                        method: string,
+                        params?: object,
+                      ): Promise<unknown>;
+                    };
+                  };
+                }
+              ).chrome;
+              const tabs = await chromeApi.tabs.query({});
+              const backTab = tabs.find((tab) =>
+                tab.url?.startsWith("https://chatgpt.com:43117/warmup"),
+              );
+              if (backTab?.id === undefined) return false;
+              try {
+                await chromeApi.debugger.sendCommand(
+                  { tabId: backTab.id },
+                  "Runtime.evaluate",
+                  { expression: "1" },
+                );
+                return true;
+              } catch {
+                return false;
+              }
+            }),
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+      await foreignTabs[0]!.goto("http://127.0.0.1:43118/foreign-origin");
       for (const transientPage of foreignTabs) await transientPage.close();
 
       // Warm up the ChatGPT origin so the extension can attach CDP before the
