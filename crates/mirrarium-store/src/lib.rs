@@ -2767,13 +2767,12 @@ fn collect_orphan_object_files(
         PrivacyClass::Private,
         PrivacyClass::Unknown,
     ] {
-        let objects_root = root.join(class.as_str()).join("objects");
-        if !objects_root.exists() {
+        let Some(objects_root) = cas_object_root_status(root, class)? else {
             continue;
-        }
+        };
         anyhow::ensure!(
-            objects_root.is_dir(),
-            "refusing orphan prune: object root is not a directory: {}",
+            fs::symlink_metadata(&objects_root)?.file_type().is_dir(),
+            "refusing orphan prune: CAS directory is not a real directory: {}",
             objects_root.display()
         );
 
@@ -3960,6 +3959,26 @@ fn is_lower_hex(value: &str) -> bool {
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Inspect both path components without following a symlink in either one.
+/// A dangling symlink must not be mistaken for a missing CAS directory.
+fn cas_object_root_status(root: &Path, class: PrivacyClass) -> Result<Option<PathBuf>> {
+    let class_root = root.join(class.as_str());
+    let objects_root = class_root.join("objects");
+    for path in [&class_root, &objects_root] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Ok(Some(path.to_path_buf())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspecting CAS directory {}", path.display()));
+            }
+        }
+    }
+    Ok(Some(objects_root))
+}
+
 fn audit_unindexed_object_files(
     root: &Path,
     indexed_paths: &BTreeSet<PathBuf>,
@@ -3970,17 +3989,16 @@ fn audit_unindexed_object_files(
         PrivacyClass::Private,
         PrivacyClass::Unknown,
     ] {
-        let objects_root = root.join(class.as_str()).join("objects");
-        if !objects_root.exists() {
+        let Some(objects_root) = cas_object_root_status(root, class)? else {
             continue;
-        }
-        if !objects_root.is_dir() {
+        };
+        if !fs::symlink_metadata(&objects_root)?.file_type().is_dir() {
             report.unexpected_object_entries = report
                 .unexpected_object_entries
                 .checked_add(1)
                 .context("unexpected object entry count overflow")?;
             report.errors.push(format!(
-                "{} object root is not a directory: {}",
+                "{} CAS directory is not a real directory: {}",
                 class.as_str(),
                 objects_root.display()
             ));
@@ -5109,6 +5127,73 @@ mod tests {
             .contains("refusing orphan prune because raw verification is not clean"));
         assert!(orphan_path.is_file());
         assert!(malformed.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_and_prune_reject_cas_root_symlinks_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        for dangling in [false, true] {
+            let archive = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let root = archive.path();
+            drop(CaptureStore::open(root).unwrap());
+
+            let outside_dir = outside.path().join("foreign-objects");
+            let prefix = outside_dir.join("aa");
+            fs::create_dir_all(&prefix).unwrap();
+            let foreign_file = prefix.join("a".repeat(64));
+            fs::write(&foreign_file, b"must stay external").unwrap();
+
+            let objects_root = root.join("unknown/objects");
+            fs::remove_dir(&objects_root).unwrap();
+            let target = if dangling {
+                outside.path().join("missing-foreign-root")
+            } else {
+                outside_dir
+            };
+            symlink(&target, &objects_root).unwrap();
+
+            let reader = CaptureStore::open_read_only(root).unwrap();
+            let report = reader.verify().unwrap();
+            assert_eq!(report.unexpected_object_entries, 1);
+            assert!(report.errors.iter().any(|error| {
+                error.contains("CAS directory is not a real directory")
+            }));
+            drop(reader);
+
+            let error = prune_orphan_objects(root).unwrap_err();
+            assert!(
+                error.to_string().contains("raw verification is not clean"),
+                "unexpected prune error: {error:#}"
+            );
+            assert_eq!(fs::read(&foreign_file).unwrap(), b"must stay external");
+            assert!(fs::symlink_metadata(&objects_root).unwrap().file_type().is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_rejects_symlinked_cas_class_directory() {
+        use std::os::unix::fs::symlink;
+
+        let archive = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let root = archive.path();
+        drop(CaptureStore::open(root).unwrap());
+
+        let class_root = root.join("unknown");
+        fs::remove_dir(class_root.join("objects")).unwrap();
+        fs::remove_dir(&class_root).unwrap();
+        symlink(outside.path(), &class_root).unwrap();
+
+        let reader = CaptureStore::open_read_only(root).unwrap();
+        let report = reader.verify().unwrap();
+        assert_eq!(report.unexpected_object_entries, 1);
+        assert!(report.errors.iter().any(|error| error.contains("unknown CAS directory")));
+        drop(reader);
+        assert!(prune_orphan_objects(root).is_err());
     }
 
     #[test]
