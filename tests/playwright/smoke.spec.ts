@@ -490,23 +490,30 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           return await response.text();
         }),
       ).toBe("ok");
-      const { stdout: foreignCaptureAuditStdout } = await execFileAsync(
+      // The raw archive may not exist yet: foreign-origin browsing alone
+      // must not be the event that creates it.
+      const preCaptureForeignProbe = await execFileWithInputResult(
         cliPath,
         ["captures", "100"],
+        "",
         {
-          env: {
-            ...childEnv,
-            MIRRARIUM_DATA_DIR: dataDir,
-          },
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
         },
       );
-      const foreignCaptureAudit = JSON.parse(foreignCaptureAuditStdout) as
-        Array<{ url: string }>;
-      expect(
-        foreignCaptureAudit.some((capture) =>
-          capture.url.includes("127.0.0.1:43118"),
-        ),
-      ).toBe(false);
+      if (preCaptureForeignProbe.code === 0) {
+        const earlyCaptures = JSON.parse(preCaptureForeignProbe.stdout) as
+          Array<{ url: string }>;
+        expect(
+          earlyCaptures.some((capture) =>
+            capture.url.includes("127.0.0.1:43118"),
+          ),
+        ).toBe(false);
+      } else {
+        expect(preCaptureForeignProbe.stderr).toContain(
+          "raw ledger does not exist",
+        );
+      }
       for (const transientPage of foreignTabs) await transientPage.close();
 
       // Warm up the ChatGPT origin so the extension can attach CDP before the
@@ -534,6 +541,26 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       await expect
         .poll(async () => (await readStats()).private_objects, { timeout: 10_000 })
         .toBeGreaterThanOrEqual(3);
+
+      // Recheck after the archive is definitely initialized, so foreign
+      // navigation cannot be hidden by an early "ledger does not exist".
+      const { stdout: foreignCaptureAuditStdout } = await execFileAsync(
+        cliPath,
+        ["captures", "100"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const foreignCaptureAudit = JSON.parse(foreignCaptureAuditStdout) as
+        Array<{ url: string }>;
+      expect(
+        foreignCaptureAudit.some((capture) =>
+          capture.url.includes("127.0.0.1:43118"),
+        ),
+      ).toBe(false);
 
       const stats = await readStats();
       expect(stats.public_objects).toBeGreaterThanOrEqual(2);
