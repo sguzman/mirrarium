@@ -8314,7 +8314,8 @@ mod tests {
         symlink(&external, &database).unwrap();
 
         assert!(open_corpus_read_only(directory.path())
-            .unwrap_err()
+            .err()
+            .expect("symlinked corpus must fail")
             .to_string()
             .contains("not a regular non-symlink file"));
         assert!(ensure_corpus_publish_target_quiescent(&database)
