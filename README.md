@@ -225,6 +225,8 @@ Edge is the default browser target. The command installs only Mirrarium's user-l
 
 Use `mirrarium native-host status` to inspect whether the manifest exists and `mirrarium native-host uninstall` to remove only that manifest. Supported browser names are `edge`, `chromium`, `chrome`, and `chrome-for-testing`. An explicit daemon path may be supplied after the browser name when `mirrariumd` is not next to the CLI. `MIRRARIUM_BROWSER_USER_DATA_DIR` overrides the browser user-data root for non-default or disposable profiles.
 
+The native host acknowledges intermediate transport messages separately from the final `capture_committed` receipt, which is sent only after the raw archive commits that capture. A missing receipt is an **unconfirmed** delivery, not proof of data loss or success. After upgrading the host binary, reconnect or reload the unpacked extension so the active native-host process uses the new protocol; an older daemon can still archive traffic but cannot provide this receipt. Mirrarium does not replay private capture bodies from plaintext browser storage after a crash.
+
 The data root is resolved from `MIRRARIUM_DATA_DIR`, then `XDG_DATA_HOME/mirrarium`, then `~/.local/share/mirrarium`.
 
 ## Historical MVP: Passive Recorder
