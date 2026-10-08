@@ -91,6 +91,7 @@ mirrarium corpus verify
 mirrarium corpus export-schema-bundle
 mirrarium corpus export-schema-bundle-v2
 mirrarium corpus export-schema-bundle-v3
+mirrarium corpus export-schema-bundle-v4
 mirrarium corpus export-negotiation-schema-bundle
 mirrarium corpus export-schema
 mirrarium corpus export-source-schema
@@ -99,6 +100,7 @@ mirrarium corpus export-manifest-schema
 mirrarium corpus export-status-schema
 mirrarium corpus export-capabilities-schema
 mirrarium corpus export-capabilities-v2-schema
+mirrarium corpus export-capabilities-v3-schema
 mirrarium corpus export-consumer-requirements-schema
 mirrarium corpus export-compatibility-schema
 mirrarium corpus export-sync-negotiated-schema
@@ -116,6 +118,7 @@ mirrarium corpus export-delta-schema
 mirrarium corpus export-delta
 mirrarium corpus export-capabilities
 mirrarium corpus export-capabilities-v2
+mirrarium corpus export-capabilities-v3
 mirrarium corpus export-negotiate
 mirrarium corpus export-source
 mirrarium corpus export-manifest
