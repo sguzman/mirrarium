@@ -4927,6 +4927,46 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         "different published corpus generation",
       );
 
+      const crossArchivePlan = JSON.parse(
+        JSON.stringify(c1ToC2Plan),
+      ) as typeof c1ToC2Plan;
+      crossArchivePlan.archive_id = "b".repeat(64);
+      crossArchivePlan.checkpoint.archive_id = crossArchivePlan.archive_id;
+      const crossArchiveFetch = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-fetch"],
+        JSON.stringify(crossArchivePlan),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(crossArchiveFetch.code).not.toBe(0);
+      expect(crossArchiveFetch.stdout).toBe("");
+      expect(crossArchiveFetch.stderr).toContain("refuse cross-archive fetch");
+
+      const duplicateUpsertPlan = JSON.parse(
+        JSON.stringify(c1ToC2Plan),
+      ) as typeof c1ToC2Plan;
+      duplicateUpsertPlan.upserts = [
+        c1ToC2Plan.upserts[0]!,
+        c1ToC2Plan.upserts[0]!,
+      ];
+      const duplicateUpsertFetch = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-fetch"],
+        JSON.stringify(duplicateUpsertPlan),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(duplicateUpsertFetch.code).not.toBe(0);
+      expect(duplicateUpsertFetch.stdout).toBe("");
+      expect(duplicateUpsertFetch.stderr).toContain(
+        "upserts must be strictly ordered",
+      );
+
       const { stdout: c1ToC2SyncRepeatStdout } = await execFileWithInput(
         cliPath,
         ["corpus", "export-sync", "--require-fresh"],
