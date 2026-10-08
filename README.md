@@ -90,6 +90,7 @@ mirrarium corpus stats
 mirrarium corpus verify
 mirrarium corpus export-schema-bundle
 mirrarium corpus export-schema-bundle-v2
+mirrarium corpus export-schema-bundle-v3
 mirrarium corpus export-negotiation-schema-bundle
 mirrarium corpus export-schema
 mirrarium corpus export-source-schema
@@ -97,6 +98,7 @@ mirrarium corpus export-index-schema
 mirrarium corpus export-manifest-schema
 mirrarium corpus export-status-schema
 mirrarium corpus export-capabilities-schema
+mirrarium corpus export-capabilities-v2-schema
 mirrarium corpus export-consumer-requirements-schema
 mirrarium corpus export-compatibility-schema
 mirrarium corpus export-sync-negotiated-schema
@@ -113,6 +115,7 @@ mirrarium corpus export-sync-state
 mirrarium corpus export-delta-schema
 mirrarium corpus export-delta
 mirrarium corpus export-capabilities
+mirrarium corpus export-capabilities-v2
 mirrarium corpus export-negotiate
 mirrarium corpus export-source
 mirrarium corpus export-manifest
@@ -258,4 +261,4 @@ Chatarium owns the local conversation ecology.
 
 `mirrarium corpus export [limit]` is the first explicit bridge between them. It emits versioned JSONL, one conversation record per line in deterministic conversation-ID order, containing the derived evidence view, a canonical view when safely derivable, stream revisions, attachment/download provenance, and the raw capture IDs needed to drill back into Mirrarium. Canonical ambiguity remains explicit through warnings, while structural CAS/JSON/database failures abort export rather than being serialized as apparently valid records. The export does not expose Mirrarium's encrypted SQLite schema and does not add raw CAS payloads beyond content already present in the derived corpus. The CLI streams one record at a time under a pinned corpus generation, so exporting a large archive does not require first holding every conversation record in memory. Repeating the same export against an unchanged generation produces identical JSONL bytes.
 
-The v1 contract is documented in `docs/INTEROP.md`. Chatarium can consume that stream without independently crawling account history. `mirrarium corpus export-status` tells the consumer whether that published derived generation is caught up to the current append-only raw capture ledger or has pending raw evidence awaiting rebuild. For incremental import the preferred path is `mirrarium corpus export-sync`: empty stdin bootstraps a source-bound transaction, while later calls accept the prior producer checkpoint and return both the delta and next checkpoint from one pinned generation. For large imports that separate metadata planning from private body transfer, `export-sync-plan` plus `export-sync-fetch` provides a source- and generation-bound two-step path with batched JSONL fetches under one corpus lock. It rejects cross-archive or internally torn checkpoints before emitting private upserts. Consumers may still use the manifest/index/`export-one` optimistic protocol or the older unbound `export-delta` path when they manage source identity themselves. `mirrarium corpus export-sync-state` emits the exact current schema-valid ID→hash checkpoint directly from the verified materialized index, so a consumer does not need to reconstruct that object from JSONL itself. Manifest/index and unchanged delta comparisons read the rebuild-verified hash index directly, so they do not reconstruct every canonical conversation or reread its CAS bodies; full export, `export-one`, and changed delta upserts still rebuild the actual record and require it to match the cached hash before plaintext leaves Mirrarium. The export/delta stream is intentionally plaintext private data at the interoperability boundary; Mirrarium's SQLCipher/CAS at-rest encryption does not automatically extend to a pipe or redirected file.
+The v1 contract is documented in `docs/INTEROP.md`. Chatarium can consume that stream without independently crawling account history. New consumers can use `mirrarium corpus export-capabilities-v2` to discover the additive negotiation, metadata-plan, and plan-bound batch-fetch surface without changing the frozen capabilities-v1 bytes used by older clients. `mirrarium corpus export-status` tells the consumer whether that published derived generation is caught up to the current append-only raw capture ledger or has pending raw evidence awaiting rebuild. For incremental import the preferred path is `mirrarium corpus export-sync`: empty stdin bootstraps a source-bound transaction, while later calls accept the prior producer checkpoint and return both the delta and next checkpoint from one pinned generation. For large imports that separate metadata planning from private body transfer, `export-sync-plan` plus `export-sync-fetch` provides a source- and generation-bound two-step path with batched JSONL fetches under one corpus lock. It rejects cross-archive or internally torn checkpoints before emitting private upserts. Consumers may still use the manifest/index/`export-one` optimistic protocol or the older unbound `export-delta` path when they manage source identity themselves. `mirrarium corpus export-sync-state` emits the exact current schema-valid ID→hash checkpoint directly from the verified materialized index, so a consumer does not need to reconstruct that object from JSONL itself. Manifest/index and unchanged delta comparisons read the rebuild-verified hash index directly, so they do not reconstruct every canonical conversation or reread its CAS bodies; full export, `export-one`, and changed delta upserts still rebuild the actual record and require it to match the cached hash before plaintext leaves Mirrarium. The export/delta stream is intentionally plaintext private data at the interoperability boundary; Mirrarium's SQLCipher/CAS at-rest encryption does not automatically extend to a pipe or redirected file.
