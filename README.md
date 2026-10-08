@@ -10,6 +10,8 @@ Its job is to observe normal ChatGPT use, preserve the site and account data the
 
 Mirrarium starts as a passive recorder. It must become trustworthy before it is allowed to change ChatGPT network behavior.
 
+The [capture-delivery contract](docs/CAPTURE_DELIVERY.md) specifies native-host acknowledgments, abort/reconnect behavior, and exactly what remains unimplemented about crash-resumable delivery.
+
 ## Browser and QA contract
 
 - The extension targets Chromium Manifest V3.
