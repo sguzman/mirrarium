@@ -285,7 +285,14 @@ function handleNativeMessage(message: unknown): void {
     if (typeof record.capture_id === "string") {
       clearCaptureDelivery(record.capture_id);
     }
-    console.error("Mirrarium native host error", message);
+    // Native errors can include a capture ID, path, or resource metadata.
+    // Keep diagnostics useful without copying that private evidence into
+    // browser logs (which have a different retention/security boundary).
+    console.error(
+      typeof record.capture_id === "string"
+        ? "Mirrarium native host rejected capture delivery; details withheld"
+        : "Mirrarium native host operation failed; details withheld",
+    );
     return;
   }
 
