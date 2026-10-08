@@ -3622,6 +3622,24 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ),
       ).toEqual(currentSyncState.records);
 
+      // An independent consumer can reconstruct the exact full JSONL export
+      // by transferring a single pinned plan in contiguous bounded slices.
+      const pageSize = Math.max(1, Math.ceil(bootstrapPlan.upserts.length / 2));
+      const pageOutputs: string[] = [];
+      for (let start = 0; start < bootstrapPlan.upserts.length; start += pageSize) {
+        const { stdout: pageStdout } = await execFileWithInput(
+          cliPath,
+          ["corpus", "export-sync-fetch", String(start), String(pageSize)],
+          bootstrapPlanStdout,
+          {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        );
+        pageOutputs.push(pageStdout);
+      }
+      expect(pageOutputs.join("")).toBe(corpusExportStdout);
+
       const { stdout: noopPlanStdout } = await execFileWithInput(
         cliPath,
         ["corpus", "export-sync-plan"],
