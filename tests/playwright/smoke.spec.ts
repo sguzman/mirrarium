@@ -3640,6 +3640,120 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(noopPlan.deleted_conversation_ids).toEqual([]);
       expect(noopPlan.checkpoint).toEqual(currentCheckpoint);
 
+      // A consumer can legitimately have a record absent from this generation.
+      // Its source-bound plan must represent a deletion without fabricating an
+      // upsert, and an empty fetch is a complete successful transfer.
+      const retiredConversationId = "zz-fixture-retired";
+      const deletionOnlyState = {
+        ...currentCheckpoint.sync_state,
+        records: {
+          ...currentCheckpoint.sync_state.records,
+          [retiredConversationId]: "f".repeat(64),
+        },
+      };
+      const deletionOnlyIndexBytes = Object.entries(deletionOnlyState.records)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(
+          ([conversationId, recordSha256]) =>
+            JSON.stringify({
+              schema: "mirrarium.corpus.conversation-index",
+              schema_version: 1,
+              conversation_schema_version: 1,
+              producer_corpus_schema_version:
+                currentCheckpoint.manifest.producer_corpus_schema_version,
+              record_type: "conversation-index",
+              conversation_id: conversationId,
+              record_sha256: recordSha256,
+            }) + "\n",
+        )
+        .join("");
+      const deletionOnlyCheckpoint = {
+        ...currentCheckpoint,
+        manifest: {
+          ...currentCheckpoint.manifest,
+          conversation_count: Object.keys(deletionOnlyState.records).length,
+          index_sha256: createHash("sha256")
+            .update(deletionOnlyIndexBytes, "utf8")
+            .digest("hex"),
+        },
+        sync_state: deletionOnlyState,
+      };
+      expect(
+        validateCorpusSyncCheckpoint(deletionOnlyCheckpoint),
+        JSON.stringify(validateCorpusSyncCheckpoint.errors),
+      ).toBe(true);
+
+      const { stdout: deletionOnlyPlanStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-plan"],
+        JSON.stringify(deletionOnlyCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const deletionOnlyPlan = JSON.parse(deletionOnlyPlanStdout) as typeof bootstrapPlan;
+      expect(
+        validateCorpusSyncPlan(deletionOnlyPlan),
+        JSON.stringify(validateCorpusSyncPlan.errors),
+      ).toBe(true);
+      expect(deletionOnlyPlan.upserts).toEqual([]);
+      expect(deletionOnlyPlan.deleted_conversation_ids).toEqual([
+        retiredConversationId,
+      ]);
+      expect(deletionOnlyPlan.checkpoint).toEqual(currentCheckpoint);
+      const { stdout: deletionOnlyFetchStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync-fetch"],
+        deletionOnlyPlanStdout,
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(deletionOnlyFetchStdout).toBe("");
+
+      const { stdout: deletionOnlySyncStdout } = await execFileWithInput(
+        cliPath,
+        ["corpus", "export-sync"],
+        JSON.stringify(deletionOnlyCheckpoint),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      const deletionOnlySync = JSON.parse(deletionOnlySyncStdout) as {
+        delta: {
+          upserts: typeof exportRecords;
+          deleted_conversation_ids: string[];
+        };
+        checkpoint: typeof currentCheckpoint;
+      };
+      expect(deletionOnlySync.delta.upserts).toEqual([]);
+      expect(deletionOnlySync.delta.deleted_conversation_ids).toEqual([
+        retiredConversationId,
+      ]);
+      expect(deletionOnlySync.checkpoint).toEqual(currentCheckpoint);
+
+      const invalidDeletionPlan = {
+        ...deletionOnlyPlan,
+        deleted_conversation_ids: ["fixture-conversation"],
+      };
+      const invalidDeletionFetch = await execFileWithInputResult(
+        cliPath,
+        ["corpus", "export-sync-fetch"],
+        JSON.stringify(invalidDeletionPlan),
+        {
+          ...childEnv,
+          MIRRARIUM_DATA_DIR: dataDir,
+        },
+      );
+      expect(invalidDeletionFetch.code).not.toBe(0);
+      expect(invalidDeletionFetch.stdout).toBe("");
+      expect(invalidDeletionFetch.stderr).toContain(
+        "is still present in nested checkpoint sync-state",
+      );
+
       const { stdout: bootstrapSyncStdout } = await execFileWithInput(
         cliPath,
         ["corpus", "export-sync"],
