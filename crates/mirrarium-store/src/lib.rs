@@ -24,6 +24,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+// Keep concurrent open temp writers, request bodies and file descriptors
+// bounded even when a browser or a broken peer never finishes its captures.
+const MAX_IN_FLIGHT_CAPTURES: usize = 128;
 const MAX_RESPONSE_BODY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES: u64 = 1024 * 1024;
 const MAX_EVENTSOURCE_MESSAGE_BYTES: u64 = 1024 * 1024;
@@ -525,6 +528,10 @@ impl CaptureStore {
             self.capture_by_id(&metadata.capture_id)?.is_none(),
             "capture already committed: {}",
             metadata.capture_id
+        );
+        anyhow::ensure!(
+            self.in_flight.len() < MAX_IN_FLIGHT_CAPTURES,
+            "too many in-flight captures (limit {MAX_IN_FLIGHT_CAPTURES})"
         );
 
         let suppressed_reason = credential_endpoint_reason(&metadata.url).map(str::to_owned);
@@ -4579,6 +4586,42 @@ mod tests {
         assert!(body.data.contains("message=hello"));
         assert!(body.data.contains("access_token=%5BREDACTED%5D"));
         assert!(!body.data.contains("secret"));
+    }
+
+    #[test]
+    fn in_flight_capture_admission_is_bounded_and_abort_releases_capacity() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        for i in 0..MAX_IN_FLIGHT_CAPTURES {
+            let id = format!("bounded-{i}");
+            store.begin(metadata(
+                &id,
+                "https://chatgpt.com/_next/static/bounded.js",
+                "Script",
+            )).unwrap();
+        }
+        let extra = "new-capture-after-limit";
+        assert!(store.begin(metadata(
+            extra,
+            "https://chatgpt.com/_next/static/bounded.js",
+            "Script",
+        )).unwrap_err().to_string().contains("too many in-flight captures"));
+        assert_eq!(store.in_flight.len(), MAX_IN_FLIGHT_CAPTURES);
+        assert_eq!(fs::read_dir(directory.path().join(".incoming")).unwrap().count(),
+            MAX_IN_FLIGHT_CAPTURES);
+        assert!(store.abort("bounded-0").unwrap());
+        store.begin(metadata(
+            extra,
+            "https://chatgpt.com/_next/static/bounded.js",
+            "Script",
+        )).unwrap();
+        for i in 1..MAX_IN_FLIGHT_CAPTURES {
+            assert!(store.abort(&format!("bounded-{i}")).unwrap());
+        }
+        assert!(store.abort(extra).unwrap());
+        assert!(store.in_flight.is_empty());
+        assert_eq!(store.stats().unwrap().captures, 0);
+        assert_eq!(fs::read_dir(directory.path().join(".incoming")).unwrap().count(), 0);
     }
 
     #[test]
