@@ -2589,6 +2589,42 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         ),
       ).toBeTruthy();
 
+      const { stdout: corpusSchemaBundleV3Stdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-schema-bundle-v3"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusSchemaBundleV3 = JSON.parse(corpusSchemaBundleV3Stdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        schemas: Array<{ $id?: string }>;
+      };
+      expect(corpusSchemaBundleV3).toMatchObject({
+        schema: "mirrarium.corpus.schema-bundle",
+        schema_version: 3,
+        record_type: "schema-bundle",
+      });
+      expect(corpusSchemaBundleV3.schemas.map((schema) => schema.$id)).toEqual([
+        ...corpusSchemaBundleV2.schemas.map((schema) => schema.$id),
+        "urn:mirrarium:corpus:capabilities:v2",
+      ]);
+      const bundledV3Ajv = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      });
+      for (const schema of corpusSchemaBundleV3.schemas) {
+        bundledV3Ajv.addSchema(schema);
+      }
+      expect(
+        bundledV3Ajv.getSchema("urn:mirrarium:corpus:capabilities:v2"),
+      ).toBeTruthy();
+
       const { stdout: negotiationSchemaBundleStdout } = await execFileAsync(
         cliPath,
         ["corpus", "export-negotiation-schema-bundle"],
@@ -2792,6 +2828,99 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(
         validateBundledCapabilities?.(corpusCapabilities),
         JSON.stringify(validateBundledCapabilities?.errors),
+      ).toBe(true);
+
+      const { stdout: corpusCapabilitiesV2SchemaStdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-capabilities-v2-schema"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusCapabilitiesV2Schema = JSON.parse(
+        corpusCapabilitiesV2SchemaStdout,
+      );
+      const validateCorpusCapabilitiesV2 = new Ajv2020({
+        allErrors: true,
+        strict: true,
+      }).compile(corpusCapabilitiesV2Schema);
+      const { stdout: corpusCapabilitiesV2Stdout } = await execFileAsync(
+        cliPath,
+        ["corpus", "export-capabilities-v2"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const corpusCapabilitiesV2 = JSON.parse(corpusCapabilitiesV2Stdout) as {
+        schema: string;
+        schema_version: number;
+        record_type: string;
+        archive_id: string;
+        producer_corpus_schema_version: number;
+        wire_versions: Record<string, number>;
+        limits: Record<string, number>;
+        record_hash_algorithm: string;
+        index_hash_algorithm: string;
+        features: Record<string, boolean>;
+      };
+      expect(
+        validateCorpusCapabilitiesV2(corpusCapabilitiesV2),
+        JSON.stringify(validateCorpusCapabilitiesV2.errors),
+      ).toBe(true);
+      expect(corpusCapabilitiesV2).toMatchObject({
+        schema: "mirrarium.corpus.capabilities",
+        schema_version: 2,
+        record_type: "capabilities",
+        archive_id: corpusCapabilities.archive_id,
+        producer_corpus_schema_version:
+          corpusCapabilities.producer_corpus_schema_version,
+        record_hash_algorithm: "sha256",
+        index_hash_algorithm: "sha256",
+      });
+      expect(corpusCapabilitiesV2.wire_versions).toEqual({
+        conversation: 1,
+        conversation_index: 1,
+        export_manifest: 1,
+        export_source: 1,
+        export_status: 1,
+        capabilities: 2,
+        consumer_requirements: 1,
+        compatibility: 1,
+        negotiated_sync_request: 1,
+        sync_state: 1,
+        sync_checkpoint: 1,
+        sync_delta: 1,
+        sync_transaction: 1,
+        sync_plan: 1,
+        schema_bundle: 3,
+      });
+      expect(corpusCapabilitiesV2.limits).toEqual({
+        sync_state_max_bytes: 64 * 1024 * 1024,
+        sync_checkpoint_input_max_bytes: 65 * 1024 * 1024,
+        consumer_requirements_max_bytes: 64 * 1024,
+        negotiated_sync_request_max_bytes: 66 * 1024 * 1024 + 64 * 1024,
+        sync_plan_input_max_bytes: 128 * 1024 * 1024,
+      });
+      expect(corpusCapabilitiesV2.features).toEqual({
+        source_bound_sync: true,
+        require_fresh_sync: true,
+        negotiated_sync: true,
+        metadata_sync_plan: true,
+        plan_bound_batch_fetch: true,
+      });
+      const validateBundledCapabilitiesV2 = bundledV3Ajv.getSchema(
+        "urn:mirrarium:corpus:capabilities:v2",
+      );
+      expect(validateBundledCapabilitiesV2).toBeTruthy();
+      expect(
+        validateBundledCapabilitiesV2?.(corpusCapabilitiesV2),
+        JSON.stringify(validateBundledCapabilitiesV2?.errors),
       ).toBe(true);
 
       const { stdout: consumerRequirementsSchemaStdout } = await execFileAsync(
