@@ -201,6 +201,26 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
     first.kill();
 
     let mut second = NativeHost::spawn(root, &key_path);
+    // These probes must be read-only on a freshly spawned host: previously
+    // committed evidence is present, but the interrupted staging capture
+    // must not be misreported as durable.
+    for (capture_id, committed) in [
+        ("committed-before-crash", true),
+        ("crash-capture", false),
+    ] {
+        match second.send(&HostRequest::CaptureCommitProbe {
+            capture_id: capture_id.to_owned(),
+        }) {
+            HostResponse::CaptureCommitStatus {
+                capture_id: actual,
+                committed: observed,
+            } => {
+                assert_eq!(actual, capture_id);
+                assert_eq!(observed, committed);
+            }
+            other => panic!("expected commit status after restart, got {other:?}"),
+        }
+    }
     expect_ack(
         second.send(&HostRequest::CaptureStart {
             metadata: metadata(
