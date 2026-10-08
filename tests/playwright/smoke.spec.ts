@@ -1108,14 +1108,18 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       expect(opportunities.private_current_policy_body_bytes).toBeGreaterThan(0);
       expect(opportunities.top_public_expansion).toBeNull();
       expect(opportunities.top_private_expansion).toBeNull();
-      expect(opportunities.runtime_public_replayed_bytes).toBe(
+      // These are independent CLI reads while Chromium can still replay
+      // resources. The later aggregate may include additional successful
+      // operations; only fields within that one snapshot must match exactly.
+      expect(opportunities.runtime_public_replayed_bytes).toBeGreaterThanOrEqual(
         replayStats.replayed_bytes,
       );
-      expect(opportunities.runtime_private_revalidated_saved_body_bytes).toBe(
-        revalidationStats.saved_body_bytes,
-      );
+      expect(
+        opportunities.runtime_private_revalidated_saved_body_bytes,
+      ).toBeGreaterThanOrEqual(revalidationStats.saved_body_bytes);
       expect(opportunities.runtime_total_saved_body_bytes).toBe(
-        replayStats.replayed_bytes + revalidationStats.saved_body_bytes,
+        opportunities.runtime_public_replayed_bytes +
+          opportunities.runtime_private_revalidated_saved_body_bytes,
       );
 
       const websocketRoundTrip = await page.evaluate(
