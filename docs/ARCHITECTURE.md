@@ -60,6 +60,10 @@ Classification is intentionally conservative:
 
 On Unix the data root, private store, incoming area, database, and private objects are permission-hardened. The derived corpus directory is rejected if symlinked (including dangling symlinks) before rebuild or export uses it. The rebuild's directory permission hardening uses a verified open directory handle; the shared `.rebuild.lock` used by rebuild/export must be a real regular file, checked against the opened handle before permissions are applied through that handle. Private CAS payloads and in-flight private response staging use authenticated XChaCha20-Poly1305 envelopes, while the authoritative raw ledger and rebuildable derived corpus use SQLCipher with domain-separated keys derived from Mirrarium's master key.
 
+## Extension installation safety
+
+An extension update builds a staged tree and activates it inside a stable user-level install root. Existing destination directories must be real directories, never symlinks, and a recursive preflight rejects nested redirects before any replacement. Activation rechecks directory entries before writing; extension uninstall also refuses redirected roots. The personal Edge profile remains outside the automated QA boundary.
+
 ## Replay boundary
 
 Recording does not imply replay permission.
