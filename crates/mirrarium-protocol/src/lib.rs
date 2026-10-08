@@ -159,6 +159,8 @@ pub enum HostResponse {
         message: String,
     },
     Ack { capture_id: Option<String> },
+    /// Returned only after a successful synchronous raw-ledger commit.
+    CaptureCommitted { capture_id: String },
     Error {
         capture_id: Option<String>,
         message: String,

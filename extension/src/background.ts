@@ -3,6 +3,7 @@ const CDP_VERSION = "1.3";
 const BASE64_CHUNK_CHARS = 512 * 1024;
 const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
+const CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS = 60_000;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
 const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
@@ -144,7 +145,21 @@ const privateRevalidations = new Map<string, PrivateReadHit>();
 let nativePort: chrome.runtime.Port | undefined;
 // A capture is one native-host transaction. Its start, request body, response
 // chunks and finish may never be spliced across host process lifetimes.
-const capturePorts = new Map<string, chrome.runtime.Port>();
+type CaptureDelivery = {
+  port: chrome.runtime.Port;
+  awaitingCommit: boolean;
+  receiptTimeoutId?: number;
+};
+const capturePorts = new Map<string, CaptureDelivery>();
+
+function clearCaptureDelivery(captureId: string): void {
+  const delivery = capturePorts.get(captureId);
+  if (!delivery) return;
+  if (delivery.receiptTimeoutId !== undefined) {
+    clearTimeout(delivery.receiptTimeoutId);
+  }
+  capturePorts.delete(captureId);
+}
 let staleInstalledBuildNotice: string | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -242,9 +257,9 @@ function retireNativePort(port: chrome.runtime.Port): void {
   if (nativePort === port) nativePort = undefined;
   failLookupsForPort(port);
   let unconfirmedCaptures = 0;
-  for (const [captureId, owner] of capturePorts) {
-    if (owner === port) {
-      capturePorts.delete(captureId);
+  for (const [captureId, delivery] of capturePorts) {
+    if (delivery.port === port) {
+      clearCaptureDelivery(captureId);
       unconfirmedCaptures += 1;
     }
   }
@@ -268,9 +283,25 @@ function handleNativeMessage(message: unknown): void {
     // the native host process itself remains connected. Do not send more
     // chunks or a successful finish for a rejected capture start/chunk.
     if (typeof record.capture_id === "string") {
-      capturePorts.delete(record.capture_id);
+      clearCaptureDelivery(record.capture_id);
     }
     console.error("Mirrarium native host error", message);
+    return;
+  }
+
+  if (type === "capture_committed") {
+    const captureId =
+      typeof record.capture_id === "string" ? record.capture_id : undefined;
+    const delivery = captureId ? capturePorts.get(captureId) : undefined;
+    // This is the only receipt proving successful store.finish. Generic
+    // intermediate ACKs and postMessage return values are not commit receipts.
+    if (
+      captureId &&
+      delivery?.awaitingCommit &&
+      delivery.port === nativePort
+    ) {
+      clearCaptureDelivery(captureId);
+    }
     return;
   }
 
@@ -542,17 +573,19 @@ function postNative(message: unknown): void {
 
   let port: chrome.runtime.Port | undefined;
   if (type === "capture_start") {
+    if (typeof captureId !== "string" || capturePorts.has(captureId)) return;
     port = getNativePort();
-    if (port && typeof captureId === "string") {
-      capturePorts.set(captureId, port);
+    if (port) {
+      capturePorts.set(captureId, { port, awaitingCommit: false });
     }
   } else if (captureMessage) {
     // Missing or retired owner means the old host lost this in-flight
     // transaction. Never connect a new host just to send an orphaned chunk.
     if (typeof captureId !== "string") return;
-    port = capturePorts.get(captureId);
-    if (!port || port !== nativePort) {
-      capturePorts.delete(captureId);
+    const delivery = capturePorts.get(captureId);
+    port = delivery?.port;
+    if (!port || port !== nativePort || delivery?.awaitingCommit) {
+      clearCaptureDelivery(captureId);
       return;
     }
   } else {
@@ -562,13 +595,22 @@ function postNative(message: unknown): void {
 
   try {
     port.postMessage(message);
+    if (type === "capture_finish" && typeof captureId === "string") {
+      const delivery = capturePorts.get(captureId);
+      if (delivery?.port === port) {
+        delivery.awaitingCommit = true;
+        delivery.receiptTimeoutId = setTimeout(() => {
+          if (capturePorts.get(captureId) === delivery) {
+            clearCaptureDelivery(captureId);
+            // Do not expose private capture identifiers in diagnostics.
+            console.warn("Mirrarium capture commit receipt timed out; delivery unconfirmed");
+          }
+        }, CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS);
+      }
+    }
   } catch (error) {
     retireNativePort(port);
     console.warn("Mirrarium could not send to native host", error);
-  } finally {
-    if (type === "capture_finish" && typeof captureId === "string") {
-      capturePorts.delete(captureId);
-    }
   }
 }
 
