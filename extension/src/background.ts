@@ -331,7 +331,7 @@ function handleNativeMessage(message: unknown): void {
       typeof record.stage === "string" ? record.stage : "",
       record.sequence,
     );
-    if (delivery?.port === nativePort && key) {
+    if (delivery && delivery.port === nativePort && key) {
       if (!delivery.pendingMessageAcks.delete(key)) {
         // A duplicate/unexpected receipt is not evidence of data loss, but
         // must not be counted as progress or proof of committed bytes.
