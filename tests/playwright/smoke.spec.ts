@@ -5615,6 +5615,74 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         running_build_id: updatedBuildId,
         reload_required: false,
       });
+
+      // Kill only the isolated Chromium native-host process, never the user's
+      // browser or a system service. A later capture must start on a fresh
+      // host instead of sending orphaned chunks into the restarted process.
+      const nativeHostPids = async (): Promise<number[]> => {
+        const { stdout } = await execFileAsync("ps", ["-eo", "pid=,args="]);
+        return stdout
+          .split("\n")
+          .map((line) => line.trim().match(/^(\d+)\s+(.*)$/))
+          .filter((match): match is RegExpMatchArray => match !== null)
+          .filter((match) =>
+            match[2] === daemonPath || match[2]!.startsWith(daemonPath + " "),
+          )
+          .map((match) => Number(match[1]));
+      };
+      await expect
+        .poll(nativeHostPids, { timeout: 10_000 })
+        .not.toEqual([]);
+      const existingNativePids = await nativeHostPids();
+      expect(existingNativePids).toHaveLength(1);
+      const killedPid = existingNativePids[0]!;
+      process.kill(killedPid, "SIGKILL");
+      await expect
+        .poll(nativeHostPids, { timeout: 10_000 })
+        .not.toContain(killedPid);
+
+      await page.goto("https://chatgpt.com:43117/warmup");
+      await page.waitForTimeout(500);
+      const recoveryId = `reconnect-${Date.now()}`;
+      const recoveryPath = `/backend-api/stress-write/${recoveryId}`;
+      expect(
+        await page.evaluate(async (path) => {
+          const response = await fetch(path, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ recovery: "native-host-restarted" }),
+          });
+          return response.ok ? await response.json() : null;
+        }, recoveryPath),
+      ).toEqual({ ok: true });
+      await expect
+        .poll(
+          async () => {
+            const { stdout } = await execFileAsync(
+              cliPath,
+              ["captures", "1500"],
+              { env: { ...childEnv, MIRRARIUM_DATA_DIR: dataDir } },
+            );
+            const captures = JSON.parse(stdout) as Array<{
+              capture_id: string;
+              url: string;
+              body_hash: string | null;
+              request_body_hash?: string | null;
+            }>;
+            return captures.some(
+              (capture) =>
+                capture.url.endsWith(recoveryPath) &&
+                !!capture.body_hash &&
+                !!capture.request_body_hash,
+            );
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+      await expect
+        .poll(nativeHostPids, { timeout: 10_000 })
+        .not.toEqual([]);
+      expect(await nativeHostPids()).not.toContain(killedPid);
     } finally {
       await context.close();
     }
