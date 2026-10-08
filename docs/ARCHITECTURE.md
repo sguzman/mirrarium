@@ -124,6 +124,7 @@ Implemented:
 - CLI-readable JSON store statistics;
 - whole raw-ledger verification begins with SQLCipher/SQLite integrity and foreign-key checks plus explicit required-table/column validation, then applies bidirectional object-reference invariants: capture/request-body hashes must resolve to the correctly classified indexed CAS object with matching logical bytes, and every indexed object must be referenced by at least one capture/request body; structural damage, FK violations, schema loss, and indexed-but-unreferenced rows fail verification;
 - non-destructive filesystem CAS orphan auditing remains separate: `verify` reports well-formed unindexed object files and stored bytes without failing, while malformed CAS-tree entries are errors; orphan files are never deleted automatically;
+- symlink-safe CAS root checks on both privacy-class and `objects` path components: writable startup preflights them before creating the store, while read-only verification and manual prune reject directory-root symlinks (including dangling ones) and never traverse an external target;
 - explicit orphan-CAS pruning is manual and exclusive: `maintenance prune-orphans` acquires the raw writer lock, requires a fully clean raw verification result except informational orphan totals, rescans and matches those totals before deletion, removes only well-formed unindexed CAS files, syncs touched directories, and never mutates `.incoming` or migration-recovery evidence;
 - local ChatGPT-shaped fixture traffic;
 - Playwright/Chromium end-to-end capture test;
