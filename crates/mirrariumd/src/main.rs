@@ -91,6 +91,25 @@ fn run_native_host() -> Result<()> {
                 };
                 write_native_response(&mut output, &response)?;
             }
+            Ok(HostRequest::CaptureAbort { capture_id }) => {
+                // An abort on a fresh host is a harmless no-op. Never create
+                // a writable ledger only to discard an unknown capture.
+                let result = match store.as_mut() {
+                    Some(writer) => writer.abort(&capture_id),
+                    None => Ok(false),
+                };
+                let response = match result {
+                    Ok(discarded) => HostResponse::CaptureAborted {
+                        capture_id,
+                        discarded,
+                    },
+                    Err(error) => HostResponse::Error {
+                        capture_id: Some(capture_id),
+                        message: format!("discarding incomplete capture failed: {error:#}"),
+                    },
+                };
+                write_native_response(&mut output, &response)?;
+            }
             Ok(HostRequest::CaptureCommitProbe { capture_id }) => {
                 let response = match capture_commit_status(&root, store.as_ref(), &capture_id) {
                     Ok(committed) => HostResponse::CaptureCommitStatus {
@@ -333,7 +352,8 @@ fn request_capture_id(request: &HostRequest) -> Option<String> {
         | HostRequest::RequestBodyStart { capture_id, .. }
         | HostRequest::RequestBodyChunk { capture_id, .. }
         | HostRequest::RequestBodyFinish { capture_id, .. }
-        | HostRequest::CaptureFinish { capture_id, .. } => Some(capture_id.clone()),
+        | HostRequest::CaptureFinish { capture_id, .. }
+        | HostRequest::CaptureAbort { capture_id } => Some(capture_id.clone()),
         HostRequest::Ping
         | HostRequest::ExtensionInstallState
         | HostRequest::ExtensionRuntimeState { .. }
@@ -402,6 +422,12 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             return HostResponse::Error {
                 capture_id: Some(capture_id),
                 message: "capture commit probe must use the read-only path".to_owned(),
+            };
+        }
+        HostRequest::CaptureAbort { capture_id } => {
+            return HostResponse::Error {
+                capture_id: Some(capture_id),
+                message: "capture abort must use the direct native path".to_owned(),
             };
         }
         HostRequest::CacheReplayOutcome {

@@ -104,6 +104,29 @@ test("native transport acknowledges only a durably finished capture", async () =
       encoded_data_length: body.length,
       body_error: null,
     },
+    {
+      type: "capture_start",
+      metadata: {
+        capture_id: "abort-wire-fixture",
+        tab_id: 1,
+        request_id: "abort-wire-request",
+        method: "GET",
+        url: "https://chatgpt.com/backend-api/abort-fixture",
+        status: 200,
+        mime_type: "application/json",
+        resource_type: "Fetch",
+        provenance: {},
+      },
+    },
+    {
+      type: "capture_chunk",
+      capture_id: "abort-wire-fixture",
+      sequence: 0,
+      data_base64: body.toString("base64"),
+    },
+    { type: "capture_abort", capture_id: "abort-wire-fixture" },
+    { type: "capture_commit_probe", capture_id: "abort-wire-fixture" },
+    { type: "capture_abort", capture_id: "abort-wire-fixture" },
     { type: "ping" },
   ];
 
@@ -127,7 +150,7 @@ test("native transport acknowledges only a durably finished capture", async () =
       Buffer.concat(errorChunks).toString("utf8"),
     ).toBe(0);
     const responses = readFrames(Buffer.concat(outputChunks));
-    expect(responses).toHaveLength(11);
+    expect(responses).toHaveLength(16);
     const expectProgress = (index: number, stage: string, sequence: number | null) =>
       expect(responses[index]).toEqual({
         type: "capture_message_ack",
@@ -162,7 +185,34 @@ test("native transport acknowledges only a durably finished capture", async () =
       type: "error",
       capture_id: captureId,
     });
-    expect(responses[10]).toEqual({ type: "pong" });
+    expect(responses[10]).toEqual({
+      type: "capture_message_ack",
+      capture_id: "abort-wire-fixture",
+      stage: "capture_start",
+      sequence: null,
+    });
+    expect(responses[11]).toEqual({
+      type: "capture_message_ack",
+      capture_id: "abort-wire-fixture",
+      stage: "capture_chunk",
+      sequence: 0,
+    });
+    expect(responses[12]).toEqual({
+      type: "capture_aborted",
+      capture_id: "abort-wire-fixture",
+      discarded: true,
+    });
+    expect(responses[13]).toEqual({
+      type: "capture_commit_status",
+      capture_id: "abort-wire-fixture",
+      committed: false,
+    });
+    expect(responses[14]).toEqual({
+      type: "capture_aborted",
+      capture_id: "abort-wire-fixture",
+      discarded: false,
+    });
+    expect(responses[15]).toEqual({ type: "pong" });
 
     const archive = spawn(cliPath, ["captures", "20"], {
       env,

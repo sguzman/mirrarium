@@ -69,6 +69,9 @@ pub enum HostRequest {
     /// Ask the raw ledger whether this capture ID already committed.
     /// Does not request, disclose, or retransmit any private body.
     CaptureCommitProbe { capture_id: String },
+    /// Abandon a partially received transaction without writing a ledger row.
+    /// This command never reconnects or transfers private body bytes.
+    CaptureAbort { capture_id: String },
     CacheReplayOutcome {
         url: String,
         resource_type: String,
@@ -185,6 +188,8 @@ pub enum HostResponse {
     CaptureCommitted { capture_id: String },
     /// A read-only point-in-time observation, not a future-delivery guarantee.
     CaptureCommitStatus { capture_id: String, committed: bool },
+    /// Whether an in-flight staging capture was discarded. Never a commit.
+    CaptureAborted { capture_id: String, discarded: bool },
     Error {
         capture_id: Option<String>,
         message: String,

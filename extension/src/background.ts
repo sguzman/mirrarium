@@ -220,6 +220,20 @@ function clearCaptureDelivery(captureId: string): void {
   }
   capturePorts.delete(captureId);
 }
+
+function abortCaptureDelivery(captureId: string): void {
+  const delivery = capturePorts.get(captureId);
+  if (!delivery) return;
+  clearCaptureDelivery(captureId);
+  // Never use getNativePort here: abort belongs exclusively to the original
+  // writer generation, and missing owners have no staging to recover.
+  if (delivery.port !== nativePort) return;
+  try {
+    delivery.port.postMessage({ type: "capture_abort", capture_id: captureId });
+  } catch {
+    retireNativePort(delivery.port);
+  }
+}
 let staleInstalledBuildNotice: string | undefined;
 
 function requestKey(tabId: number, requestId: string): string {
@@ -344,6 +358,11 @@ function handleNativeMessage(message: unknown): void {
   const record = message as Record<string, unknown>;
   const type = typeof record.type === "string" ? record.type : undefined;
 
+  if (type === "capture_aborted") {
+    // A discarded staging transaction is not durable evidence.
+    return;
+  }
+
   if (type === "capture_commit_status") {
     const captureId =
       typeof record.capture_id === "string" ? record.capture_id : undefined;
@@ -375,7 +394,7 @@ function handleNativeMessage(message: unknown): void {
       if (pendingCommitProbes.get(captureId) === nativePort) {
         pendingCommitProbes.delete(captureId);
       }
-      clearCaptureDelivery(captureId);
+      abortCaptureDelivery(captureId);
     }
     // Native errors can include a capture ID, path, or resource metadata.
     // Keep diagnostics useful without copying that private evidence into
@@ -730,9 +749,9 @@ function postNative(message: unknown): void {
       delivery.pendingMessageAcks.has(key) ||
       delivery.pendingMessageAcks.size >= MAX_CAPTURE_PROGRESS_RECEIPTS
     ) {
-      // A failed bound/protocol check leaves the old host staging transaction
-      // uncommitted. Never send terminal success for that capture.
-      clearCaptureDelivery(captureId);
+      // A failed bound/protocol check must discard the old staging
+      // transaction, never send terminal success or strand private chunks.
+      abortCaptureDelivery(captureId);
       console.warn("Mirrarium capture transport progress bound or sequence rejected");
       return;
     }
