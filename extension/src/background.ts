@@ -241,8 +241,20 @@ function failLookupsForPort(port: chrome.runtime.Port): void {
 function retireNativePort(port: chrome.runtime.Port): void {
   if (nativePort === port) nativePort = undefined;
   failLookupsForPort(port);
+  let unconfirmedCaptures = 0;
   for (const [captureId, owner] of capturePorts) {
-    if (owner === port) capturePorts.delete(captureId);
+    if (owner === port) {
+      capturePorts.delete(captureId);
+      unconfirmedCaptures += 1;
+    }
+  }
+  if (unconfirmedCaptures > 0) {
+    // Do not log private capture IDs or payloads. postMessage is not a
+    // durable commit receipt, so completion must be described as unknown.
+    console.warn(
+      "Mirrarium native host lost; in-flight capture deliveries unconfirmed:",
+      unconfirmedCaptures,
+    );
   }
 }
 
