@@ -482,6 +482,31 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         )
         .toBe(true);
       await foreignTabs[0]!.goto("http://127.0.0.1:43118/foreign-origin");
+      expect(
+        await foreignTabs[0]!.evaluate(async () => {
+          const response = await fetch("/foreign-origin/unobserved", {
+            cache: "no-store",
+          });
+          return await response.text();
+        }),
+      ).toBe("ok");
+      const { stdout: foreignCaptureAuditStdout } = await execFileAsync(
+        cliPath,
+        ["captures", "100"],
+        {
+          env: {
+            ...childEnv,
+            MIRRARIUM_DATA_DIR: dataDir,
+          },
+        },
+      );
+      const foreignCaptureAudit = JSON.parse(foreignCaptureAuditStdout) as
+        Array<{ url: string }>;
+      expect(
+        foreignCaptureAudit.some((capture) =>
+          capture.url.includes("127.0.0.1:43118"),
+        ),
+      ).toBe(false);
       for (const transientPage of foreignTabs) await transientPage.close();
 
       // Warm up the ChatGPT origin so the extension can attach CDP before the
