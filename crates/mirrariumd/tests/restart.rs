@@ -97,6 +97,15 @@ fn expect_ack(response: HostResponse, capture_id: &str) {
     }
 }
 
+fn expect_committed(response: HostResponse, capture_id: &str) {
+    match response {
+        HostResponse::CaptureCommitted { capture_id: actual } => {
+            assert_eq!(actual, capture_id)
+        }
+        other => panic!("expected durable capture receipt for {capture_id}, got {other:?}"),
+    }
+}
+
 fn incoming_parts(root: &Path) -> Vec<String> {
     let incoming = root.join(".incoming");
     if !incoming.is_dir() {
@@ -139,7 +148,7 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
         }),
         "committed-before-crash",
     );
-    expect_ack(
+    expect_committed(
         first.send(&HostRequest::CaptureFinish {
             capture_id: "committed-before-crash".to_owned(),
             encoded_data_length: Some(committed_body.len() as u64),
@@ -192,7 +201,7 @@ fn daemon_restart_purges_abandoned_capture_and_accepts_new_capture() {
         }),
         "recovered-capture",
     );
-    expect_ack(
+    expect_committed(
         second.send(&HostRequest::CaptureFinish {
             capture_id: "recovered-capture".to_owned(),
             encoded_data_length: Some(recovered_body.len() as u64),
