@@ -2814,7 +2814,32 @@ pub fn write_conversation_sync_plan_fetch_jsonl<W: Write>(
     plan: &ConversationSyncPlan,
     writer: &mut W,
 ) -> Result<()> {
+    write_conversation_sync_plan_fetch_range_jsonl(raw_root, plan, None, writer)
+}
+
+/// Fetch a bounded, contiguous range from the producer-ordered upsert list.
+/// The *entire* source-bound plan is validated against the current generation
+/// before any private output, even when only one record is requested.
+pub fn write_conversation_sync_plan_fetch_range_jsonl<W: Write>(
+    raw_root: impl AsRef<Path>,
+    plan: &ConversationSyncPlan,
+    range: Option<(usize, usize)>,
+    writer: &mut W,
+) -> Result<()> {
     validate_sync_plan(plan)?;
+    let selected_upserts = if let Some((start, count)) = range {
+        anyhow::ensure!(count > 0, "sync-plan fetch range count must be positive");
+        let end = start.checked_add(count).context("sync-plan fetch range overflow")?;
+        anyhow::ensure!(
+            start < plan.upserts.len() || (start == 0 && plan.upserts.is_empty()),
+            "sync-plan fetch range start {} is outside {} planned upserts",
+            start,
+            plan.upserts.len()
+        );
+        &plan.upserts[start..end.min(plan.upserts.len())]
+    } else {
+        &plan.upserts[..]
+    };
     let raw_root = raw_root.as_ref();
     let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
     let archive_id = raw_archive_identity(raw_root)?;
@@ -2860,12 +2885,12 @@ pub fn write_conversation_sync_plan_fetch_jsonl<W: Write>(
         );
     }
 
-    if plan.upserts.is_empty() {
+    if selected_upserts.is_empty() {
         return Ok(());
     }
 
     let raw = open_raw_ledger_read_only(raw_root)?;
-    for index in &plan.upserts {
+    for index in selected_upserts {
         let record = conversation_export_record_for_connections(
             raw_root,
             &corpus,
