@@ -354,7 +354,11 @@ impl CaptureStore {
         }
         // Reject storage-path redirection before create_dir_all or permission hardening.
         ensure_real_cas_directory_roots(&root)?;
+        // Staging contains sensitive partial bodies and is subject to crash cleanup.
+        // Never follow a redirected incoming path before creating or purging files.
+        ensure_incoming_is_real_directory(&root)?;
         fs::create_dir_all(root.join(".incoming"))?;
+        ensure_incoming_is_real_directory(&root)?;
         fs::create_dir_all(root.join("public/objects"))?;
         fs::create_dir_all(root.join("private/objects"))?;
         fs::create_dir_all(root.join("unknown/objects"))?;
@@ -2894,7 +2898,7 @@ pub fn incoming_maintenance_status(
     let writer_active = writer_lock_is_active(root)?;
     let incoming = root.join(".incoming");
 
-    if !incoming.exists() {
+    if !ensure_incoming_is_real_directory(root)? {
         return Ok(IncomingMaintenanceStatus {
             incoming_exists: false,
             writer_active,
@@ -2912,12 +2916,6 @@ pub fn incoming_maintenance_status(
             cleanup_on_next_writer_start: false,
         });
     }
-
-    anyhow::ensure!(
-        incoming.is_dir(),
-        "incoming path is not a directory: {}",
-        incoming.display()
-    );
 
     let mut incomplete_capture_files = 0_u64;
     let mut incomplete_capture_bytes = 0_u64;
@@ -3007,6 +3005,11 @@ pub fn incoming_maintenance_status(
 
 fn purge_abandoned_capture_parts(root: &Path) -> Result<(u64, u64)> {
     let incoming = root.join(".incoming");
+    anyhow::ensure!(
+        ensure_incoming_is_real_directory(root)?,
+        "incoming staging directory is absent: {}",
+        incoming.display()
+    );
     let mut removed_files = 0_u64;
     let mut removed_bytes = 0_u64;
 
@@ -3980,6 +3983,23 @@ fn cas_object_root_status(root: &Path, class: PrivacyClass) -> Result<Option<Pat
         }
     }
     Ok(Some(objects_root))
+}
+
+fn ensure_incoming_is_real_directory(root: &Path) -> Result<bool> {
+    let incoming = root.join(".incoming");
+    match fs::symlink_metadata(&incoming) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_dir(),
+                "incoming staging path is not a real directory: {}",
+                incoming.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting incoming staging path {}", incoming.display())),
+    }
 }
 
 fn ensure_real_cas_directory_roots(root: &Path) -> Result<()> {
@@ -5415,6 +5435,41 @@ mod tests {
         assert!(!object_migration.exists());
         assert!(ledger_target.exists());
         assert!(ledger_backup.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incoming_symlink_cannot_redirect_startup_cleanup_or_maintenance() {
+        use std::os::unix::fs::symlink;
+
+        for dangling in [false, true] {
+            let archive = tempdir().unwrap();
+            let outside = tempdir().unwrap();
+            let root = archive.path();
+            let foreign_incoming = outside.path().join("foreign-staging");
+            fs::create_dir_all(&foreign_incoming).unwrap();
+            let foreign_part = foreign_incoming.join(format!("{}.part", "c".repeat(64)));
+            fs::write(&foreign_part, b"foreign capture evidence").unwrap();
+            let target = if dangling {
+                outside.path().join("missing-staging")
+            } else {
+                foreign_incoming
+            };
+            symlink(&target, root.join(".incoming")).unwrap();
+
+            let open_error = CaptureStore::open(root).err().expect("redirected staging must fail");
+            assert!(
+                open_error.to_string().contains("incoming staging path is not a real directory"),
+                "unexpected startup error: {open_error:#}"
+            );
+            let maintenance_error = incoming_maintenance_status(root).unwrap_err();
+            assert!(
+                maintenance_error.to_string().contains("incoming staging path is not a real directory"),
+                "unexpected maintenance error: {maintenance_error:#}"
+            );
+            assert_eq!(fs::read(&foreign_part).unwrap(), b"foreign capture evidence");
+            assert!(!root.join("ledger.sqlite3").exists());
+        }
     }
 
     #[test]
