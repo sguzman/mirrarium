@@ -488,10 +488,20 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             }
         }
         Ok(()) => HostResponse::Ack { capture_id },
-        Err(error) => HostResponse::Error {
-            capture_id,
-            message: format!("{error:#}"),
-        },
+        Err(error) => {
+            // Once any capture protocol operation fails, its staged stream
+            // can no longer be trusted. Discard it locally before replying,
+            // rather than waiting for the asynchronous extension to abort.
+            // A completed capture is not removed by this operation.
+            let cleanup_error = capture_id
+                .as_deref()
+                .and_then(|id| store.abort(id).err());
+            let message = match cleanup_error {
+                Some(cleanup) => format!("{error:#}; abort cleanup failed: {cleanup:#}"),
+                None => format!("{error:#}"),
+            };
+            HostResponse::Error { capture_id, message }
+        }
     }
 }
 

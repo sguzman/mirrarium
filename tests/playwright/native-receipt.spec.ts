@@ -78,13 +78,6 @@ test("native transport acknowledges only a durably finished capture", async () =
       body_error: null,
     },
     {
-      // Must return an error, never a progress acknowledgment.
-      type: "capture_chunk",
-      capture_id: captureId,
-      sequence: 1,
-      data_base64: body.toString("base64"),
-    },
-    {
       type: "capture_chunk",
       capture_id: captureId,
       sequence: 0,
@@ -104,6 +97,33 @@ test("native transport acknowledges only a durably finished capture", async () =
       encoded_data_length: body.length,
       body_error: null,
     },
+    {
+      type: "capture_start",
+      metadata: {
+        capture_id: "poisoned-sequence-fixture",
+        tab_id: 1,
+        request_id: "poisoned-request",
+        method: "GET",
+        url: "https://chatgpt.com/backend-api/poisoned-sequence",
+        status: 200,
+        mime_type: "application/json",
+        resource_type: "Fetch",
+        provenance: {},
+      },
+    },
+    {
+      type: "capture_chunk",
+      capture_id: "poisoned-sequence-fixture",
+      sequence: 1,
+      data_base64: body.toString("base64"),
+    },
+    {
+      type: "capture_finish",
+      capture_id: "poisoned-sequence-fixture",
+      encoded_data_length: body.length,
+      body_error: null,
+    },
+    { type: "capture_commit_probe", capture_id: "poisoned-sequence-fixture" },
     {
       type: "capture_start",
       metadata: {
@@ -150,7 +170,7 @@ test("native transport acknowledges only a durably finished capture", async () =
       Buffer.concat(errorChunks).toString("utf8"),
     ).toBe(0);
     const responses = readFrames(Buffer.concat(outputChunks));
-    expect(responses).toHaveLength(16);
+    expect(responses).toHaveLength(19);
     const expectProgress = (index: number, stage: string, sequence: number | null) =>
       expect(responses[index]).toEqual({
         type: "capture_message_ack",
@@ -162,57 +182,72 @@ test("native transport acknowledges only a durably finished capture", async () =
     expectProgress(1, "request_body_start", null);
     expectProgress(2, "request_body_chunk", 0);
     expectProgress(3, "request_body_finish", null);
-    expect(responses[4]).toMatchObject({
-      type: "error",
-      capture_id: captureId,
-    });
-    expectProgress(5, "capture_chunk", 0);
-    expect(responses[6]).toEqual({
+    expectProgress(4, "capture_chunk", 0);
+    expect(responses[5]).toEqual({
       type: "capture_committed",
       capture_id: captureId,
     });
-    expect(responses[7]).toEqual({
+    expect(responses[6]).toEqual({
       type: "capture_commit_status",
       capture_id: captureId,
       committed: true,
     });
-    expect(responses[8]).toEqual({
+    expect(responses[7]).toEqual({
       type: "capture_commit_status",
       capture_id: "absent-capture",
       committed: false,
     });
-    expect(responses[9]).toMatchObject({
+    expect(responses[8]).toMatchObject({
       type: "error",
       capture_id: captureId,
     });
-    expect(responses[10]).toEqual({
+    expect(responses[9]).toEqual({
+      type: "capture_message_ack",
+      capture_id: "poisoned-sequence-fixture",
+      stage: "capture_start",
+      sequence: null,
+    });
+    expect(responses[10]).toMatchObject({
+      type: "error",
+      capture_id: "poisoned-sequence-fixture",
+    });
+    expect(responses[11]).toMatchObject({
+      type: "error",
+      capture_id: "poisoned-sequence-fixture",
+    });
+    expect(responses[12]).toEqual({
+      type: "capture_commit_status",
+      capture_id: "poisoned-sequence-fixture",
+      committed: false,
+    });
+    expect(responses[13]).toEqual({
       type: "capture_message_ack",
       capture_id: "abort-wire-fixture",
       stage: "capture_start",
       sequence: null,
     });
-    expect(responses[11]).toEqual({
+    expect(responses[14]).toEqual({
       type: "capture_message_ack",
       capture_id: "abort-wire-fixture",
       stage: "capture_chunk",
       sequence: 0,
     });
-    expect(responses[12]).toEqual({
+    expect(responses[15]).toEqual({
       type: "capture_aborted",
       capture_id: "abort-wire-fixture",
       discarded: true,
     });
-    expect(responses[13]).toEqual({
+    expect(responses[16]).toEqual({
       type: "capture_commit_status",
       capture_id: "abort-wire-fixture",
       committed: false,
     });
-    expect(responses[14]).toEqual({
+    expect(responses[17]).toEqual({
       type: "capture_aborted",
       capture_id: "abort-wire-fixture",
       discarded: false,
     });
-    expect(responses[15]).toEqual({ type: "pong" });
+    expect(responses[18]).toEqual({ type: "pong" });
 
     const archive = spawn(cliPath, ["captures", "20"], {
       env,
