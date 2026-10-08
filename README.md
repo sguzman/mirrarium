@@ -107,7 +107,7 @@ mirrarium corpus export-sync-checkpoint-schema
 mirrarium corpus export-sync-schema
 mirrarium corpus export-sync-plan-schema
 mirrarium corpus export-sync-plan [--require-fresh]
-mirrarium corpus export-sync-fetch
+mirrarium corpus export-sync-fetch [start-index count]
 mirrarium corpus export-sync-checkpoint
 mirrarium corpus export-sync [--require-fresh]
 mirrarium corpus export-sync-negotiated
