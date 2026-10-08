@@ -401,29 +401,39 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
                       query(queryInfo: object): Promise<Array<{ id?: number; url?: string }>>;
                     };
                     debugger: {
-                      getTargets(): Promise<Array<{ tabId?: number; attached: boolean }>>;
+                      sendCommand(
+                        target: { tabId: number },
+                        method: string,
+                        params?: object,
+                      ): Promise<unknown>;
                     };
                   };
                 }
               ).chrome;
-              const [tabs, targets] = await Promise.all([
-                chromeApi.tabs.query({}),
-                chromeApi.debugger.getTargets(),
-              ]);
-              const offOriginTabIds = new Set(
-                tabs
-                  .filter((tab) =>
-                    tab.url?.startsWith("http://127.0.0.1:43118/foreign-origin"),
-                  )
-                  .map((tab) => tab.id),
-              );
-              return (
-                offOriginTabIds.size === 4 &&
-                targets.every(
-                  (target) =>
-                    !target.attached || !offOriginTabIds.has(target.tabId),
+              const tabs = await chromeApi.tabs.query({});
+              const offOriginTabIds = tabs
+                .filter((tab) =>
+                  tab.url?.startsWith("http://127.0.0.1:43118/foreign-origin"),
                 )
-              );
+                .map((tab) => tab.id)
+                .filter((id): id is number => id !== undefined);
+              if (offOriginTabIds.length !== 4) return false;
+              // getTargets().attached can include Playwright's own CDP
+              // sessions. An extension-owned sendCommand must instead fail
+              // unless this particular extension still owns the debugger.
+              for (const tabId of offOriginTabIds) {
+                try {
+                  await chromeApi.debugger.sendCommand(
+                    { tabId },
+                    "Runtime.evaluate",
+                    { expression: "1" },
+                  );
+                  return false;
+                } catch {
+                  // Expected: Mirrarium's debugger session is detached.
+                }
+              }
+              return true;
             }),
           { timeout: 10_000 },
         )
