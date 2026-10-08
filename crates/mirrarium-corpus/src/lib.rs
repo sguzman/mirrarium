@@ -40,6 +40,9 @@ pub const CORPUS_EXPORT_STATUS_SCHEMA_V1_JSON: &str =
 pub const CORPUS_CAPABILITIES_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_CAPABILITIES_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-capabilities-v1.schema.json");
+pub const CORPUS_CAPABILITIES_SCHEMA_V2_VERSION: u32 = 2;
+pub const CORPUS_CAPABILITIES_SCHEMA_V2_JSON: &str =
+    include_str!("../../../schemas/mirrarium-corpus-capabilities-v2.schema.json");
 pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-consumer-requirements-v1.schema.json");
@@ -73,6 +76,7 @@ pub const CORPUS_SYNC_DELTA_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-delta-v1.schema.json");
 pub const CORPUS_SCHEMA_BUNDLE_VERSION: u32 = 1;
 pub const CORPUS_SCHEMA_BUNDLE_V2_VERSION: u32 = 2;
+pub const CORPUS_SCHEMA_BUNDLE_V3_VERSION: u32 = 3;
 pub const CORPUS_NEGOTIATION_SCHEMA_BUNDLE_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize)]
@@ -141,6 +145,102 @@ pub fn interop_capabilities(
         index_hash_algorithm: "sha256".to_owned(),
         source_bound_sync: true,
         require_fresh_sync: true,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropWireVersionsV2 {
+    pub conversation: u32,
+    pub conversation_index: u32,
+    pub export_manifest: u32,
+    pub export_source: u32,
+    pub export_status: u32,
+    pub capabilities: u32,
+    pub consumer_requirements: u32,
+    pub compatibility: u32,
+    pub negotiated_sync_request: u32,
+    pub sync_state: u32,
+    pub sync_checkpoint: u32,
+    pub sync_delta: u32,
+    pub sync_transaction: u32,
+    pub sync_plan: u32,
+    pub schema_bundle: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropLimitsV2 {
+    pub sync_state_max_bytes: u64,
+    pub sync_checkpoint_input_max_bytes: u64,
+    pub consumer_requirements_max_bytes: u64,
+    pub negotiated_sync_request_max_bytes: u64,
+    pub sync_plan_input_max_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropFeaturesV2 {
+    pub source_bound_sync: bool,
+    pub require_fresh_sync: bool,
+    pub negotiated_sync: bool,
+    pub metadata_sync_plan: bool,
+    pub plan_bound_batch_fetch: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorpusInteropCapabilitiesV2 {
+    pub schema: String,
+    pub schema_version: u32,
+    pub record_type: String,
+    pub archive_id: String,
+    pub producer_corpus_schema_version: i64,
+    pub wire_versions: CorpusInteropWireVersionsV2,
+    pub limits: CorpusInteropLimitsV2,
+    pub record_hash_algorithm: String,
+    pub index_hash_algorithm: String,
+    pub features: CorpusInteropFeaturesV2,
+}
+
+pub fn interop_capabilities_v2(
+    raw_root: impl AsRef<Path>,
+) -> Result<CorpusInteropCapabilitiesV2> {
+    Ok(CorpusInteropCapabilitiesV2 {
+        schema: "mirrarium.corpus.capabilities".to_owned(),
+        schema_version: CORPUS_CAPABILITIES_SCHEMA_V2_VERSION,
+        record_type: "capabilities".to_owned(),
+        archive_id: raw_archive_identity(raw_root)?,
+        producer_corpus_schema_version: CORPUS_SCHEMA_VERSION,
+        wire_versions: CorpusInteropWireVersionsV2 {
+            conversation: CORPUS_EXPORT_SCHEMA_VERSION,
+            conversation_index: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+            export_manifest: CORPUS_EXPORT_MANIFEST_SCHEMA_VERSION,
+            export_source: CORPUS_EXPORT_SOURCE_SCHEMA_VERSION,
+            export_status: CORPUS_EXPORT_STATUS_SCHEMA_VERSION,
+            capabilities: CORPUS_CAPABILITIES_SCHEMA_V2_VERSION,
+            consumer_requirements: CORPUS_CONSUMER_REQUIREMENTS_SCHEMA_VERSION,
+            compatibility: CORPUS_COMPATIBILITY_SCHEMA_VERSION,
+            negotiated_sync_request: CORPUS_NEGOTIATED_SYNC_REQUEST_SCHEMA_VERSION,
+            sync_state: CORPUS_SYNC_STATE_SCHEMA_VERSION,
+            sync_checkpoint: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+            sync_delta: CORPUS_SYNC_DELTA_SCHEMA_VERSION,
+            sync_transaction: CORPUS_SYNC_TRANSACTION_SCHEMA_VERSION,
+            sync_plan: CORPUS_SYNC_PLAN_SCHEMA_VERSION,
+            schema_bundle: CORPUS_SCHEMA_BUNDLE_V3_VERSION,
+        },
+        limits: CorpusInteropLimitsV2 {
+            sync_state_max_bytes: CORPUS_SYNC_STATE_MAX_BYTES,
+            sync_checkpoint_input_max_bytes: CORPUS_SYNC_CHECKPOINT_INPUT_MAX_BYTES,
+            consumer_requirements_max_bytes: CORPUS_CONSUMER_REQUIREMENTS_MAX_BYTES,
+            negotiated_sync_request_max_bytes: CORPUS_NEGOTIATED_SYNC_REQUEST_MAX_BYTES,
+            sync_plan_input_max_bytes: CORPUS_SYNC_PLAN_INPUT_MAX_BYTES,
+        },
+        record_hash_algorithm: "sha256".to_owned(),
+        index_hash_algorithm: "sha256".to_owned(),
+        features: CorpusInteropFeaturesV2 {
+            source_bound_sync: true,
+            require_fresh_sync: true,
+            negotiated_sync: true,
+            metadata_sync_plan: true,
+            plan_bound_batch_fetch: true,
+        },
     })
 }
 
