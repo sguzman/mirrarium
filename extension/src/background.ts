@@ -2009,11 +2009,27 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     const event = params as {
       requestId: string;
       resourceType?: string;
+      responseStatusCode?: number;
+      responseErrorReason?: string;
       request: {
         method: string;
         url: string;
       };
     };
+    if (!attachedTabs.has(tabId)) {
+      // Fetch.enable may pause requests while the debugger is being set up.
+      // Never apply replay/revalidation policy before the top-level origin
+      // has been rechecked and the attachment is fully committed.
+      if (
+        event.responseStatusCode !== undefined ||
+        event.responseErrorReason !== undefined
+      ) {
+        void continuePausedResponse(tabId, event.requestId);
+      } else {
+        void continuePausedRequest(tabId, event.requestId);
+      }
+      return;
+    }
     void handlePausedRequest(tabId, event);
     return;
   }
