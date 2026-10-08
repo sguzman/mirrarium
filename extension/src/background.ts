@@ -252,6 +252,12 @@ function handleNativeMessage(message: unknown): void {
   const type = typeof record.type === "string" ? record.type : undefined;
 
   if (type === "error") {
+    // A writable-store error invalidates the capture transaction even if
+    // the native host process itself remains connected. Do not send more
+    // chunks or a successful finish for a rejected capture start/chunk.
+    if (typeof record.capture_id === "string") {
+      capturePorts.delete(record.capture_id);
+    }
     console.error("Mirrarium native host error", message);
     return;
   }
