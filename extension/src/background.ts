@@ -6,6 +6,8 @@ const CACHE_LOOKUP_TIMEOUT_MS = 750;
 const CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS = 60_000;
 const MAX_CAPTURE_PROGRESS_RECEIPTS = 128;
 const MAX_UNCONFIRMED_CAPTURE_IDS = 256;
+const MAX_COMMIT_RECONNECT_ATTEMPTS = 4;
+const COMMIT_RECONNECT_BASE_DELAY_MS = 500;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
 const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
@@ -183,6 +185,27 @@ const capturePorts = new Map<string, CaptureDelivery>();
 // payload, URL or body can enter this set; MV3 worker restart clears it.
 const unconfirmedCaptureIds = new Set<string>();
 const pendingCommitProbes = new Map<string, chrome.runtime.Port>();
+let commitReconnectTimer: number | undefined;
+let commitReconnectAttempts = 0;
+
+function scheduleCommitReconciliation(): void {
+  if (
+    unconfirmedCaptureIds.size === 0 ||
+    nativePort !== undefined ||
+    commitReconnectTimer !== undefined ||
+    commitReconnectAttempts >= MAX_COMMIT_RECONNECT_ATTEMPTS
+  ) return;
+  // Service workers can be suspended: this is bounded best-effort
+  // reconciliation, never a guarantee that private bytes can be replayed.
+  const delay = COMMIT_RECONNECT_BASE_DELAY_MS * 2 ** commitReconnectAttempts;
+  commitReconnectAttempts += 1;
+  commitReconnectTimer = setTimeout(() => {
+    commitReconnectTimer = undefined;
+    if (nativePort === undefined && unconfirmedCaptureIds.size > 0) {
+      void getNativePort();
+    }
+  }, delay);
+}
 
 function rememberUnconfirmedCapture(captureId: string): void {
   if (unconfirmedCaptureIds.has(captureId)) return;
@@ -351,6 +374,7 @@ function retireNativePort(port: chrome.runtime.Port): void {
       unconfirmedCaptures,
     );
   }
+  scheduleCommitReconciliation();
 }
 
 function handleNativeMessage(message: unknown): void {
@@ -374,6 +398,11 @@ function handleNativeMessage(message: unknown): void {
     ) {
       pendingCommitProbes.delete(captureId);
       unconfirmedCaptureIds.delete(captureId);
+      commitReconnectAttempts = 0;
+      if (commitReconnectTimer !== undefined) {
+        clearTimeout(commitReconnectTimer);
+        commitReconnectTimer = undefined;
+      }
       if (record.committed) {
         console.info("Mirrarium recovered a committed capture after missing its receipt");
       } else {
@@ -688,6 +717,7 @@ function getNativePort(): chrome.runtime.Port | undefined {
   } catch (error) {
     if (nativePort) retireNativePort(nativePort);
     console.warn("Mirrarium native host unavailable", error);
+    scheduleCommitReconciliation();
     return undefined;
   }
 }
@@ -770,7 +800,11 @@ function postNative(message: unknown): void {
             clearCaptureDelivery(captureId);
             // Do not expose private capture identifiers in diagnostics.
             console.warn("Mirrarium capture commit receipt timed out; delivery unconfirmed");
-            sendCommitProbes(port);
+            if (nativePort === port) {
+              sendCommitProbes(port);
+            } else {
+              scheduleCommitReconciliation();
+            }
           }
         }, CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS);
       }
