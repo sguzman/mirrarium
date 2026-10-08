@@ -5,6 +5,7 @@ const RAW_CHUNK_BYTES = 384 * 1024;
 const CACHE_LOOKUP_TIMEOUT_MS = 750;
 const CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS = 60_000;
 const MAX_CAPTURE_PROGRESS_RECEIPTS = 128;
+const MAX_UNCONFIRMED_CAPTURE_IDS = 256;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
 const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
@@ -178,6 +179,38 @@ function captureProgressKey(
   return undefined;
 }
 const capturePorts = new Map<string, CaptureDelivery>();
+// Volatile UUID-only evidence of interrupted/uncertain delivery. No private
+// payload, URL or body can enter this set; MV3 worker restart clears it.
+const unconfirmedCaptureIds = new Set<string>();
+const pendingCommitProbes = new Map<string, chrome.runtime.Port>();
+
+function rememberUnconfirmedCapture(captureId: string): void {
+  if (unconfirmedCaptureIds.has(captureId)) return;
+  if (unconfirmedCaptureIds.size >= MAX_UNCONFIRMED_CAPTURE_IDS) {
+    const oldest = unconfirmedCaptureIds.values().next().value;
+    if (oldest !== undefined) {
+      unconfirmedCaptureIds.delete(oldest);
+      pendingCommitProbes.delete(oldest);
+    }
+    console.warn("Mirrarium commit reconciliation ID capacity reached; oldest probe abandoned");
+  }
+  unconfirmedCaptureIds.add(captureId);
+}
+
+function sendCommitProbes(port: chrome.runtime.Port): void {
+  if (port !== nativePort) return;
+  for (const captureId of unconfirmedCaptureIds) {
+    if (pendingCommitProbes.has(captureId)) continue;
+    pendingCommitProbes.set(captureId, port);
+    try {
+      port.postMessage({ type: "capture_commit_probe", capture_id: captureId });
+    } catch {
+      pendingCommitProbes.delete(captureId);
+      retireNativePort(port);
+      return;
+    }
+  }
+}
 
 function clearCaptureDelivery(captureId: string): void {
   const delivery = capturePorts.get(captureId);
@@ -283,9 +316,15 @@ function failLookupsForPort(port: chrome.runtime.Port): void {
 function retireNativePort(port: chrome.runtime.Port): void {
   if (nativePort === port) nativePort = undefined;
   failLookupsForPort(port);
+  // A response on the retired port is no longer authoritative; keep the
+  // UUID so the next port can perform a fresh read-only ledger check.
+  for (const [captureId, owner] of pendingCommitProbes) {
+    if (owner === port) pendingCommitProbes.delete(captureId);
+  }
   let unconfirmedCaptures = 0;
   for (const [captureId, delivery] of capturePorts) {
     if (delivery.port === port) {
+      rememberUnconfirmedCapture(captureId);
       clearCaptureDelivery(captureId);
       unconfirmedCaptures += 1;
     }
@@ -305,12 +344,37 @@ function handleNativeMessage(message: unknown): void {
   const record = message as Record<string, unknown>;
   const type = typeof record.type === "string" ? record.type : undefined;
 
+  if (type === "capture_commit_status") {
+    const captureId =
+      typeof record.capture_id === "string" ? record.capture_id : undefined;
+    if (
+      captureId &&
+      pendingCommitProbes.get(captureId) === nativePort &&
+      typeof record.committed === "boolean"
+    ) {
+      pendingCommitProbes.delete(captureId);
+      unconfirmedCaptureIds.delete(captureId);
+      if (record.committed) {
+        console.info("Mirrarium recovered a committed capture after missing its receipt");
+      } else {
+        // A negative result means absence *at query time*; never conflate
+        // it with proof that private bytes were recoverable or re-sent.
+        console.warn("Mirrarium unconfirmed capture not present in raw ledger at probe time");
+      }
+    }
+    return;
+  }
+
   if (type === "error") {
     // A writable-store error invalidates the capture transaction even if
     // the native host process itself remains connected. Do not send more
     // chunks or a successful finish for a rejected capture start/chunk.
     if (typeof record.capture_id === "string") {
-      clearCaptureDelivery(record.capture_id);
+      const captureId = record.capture_id;
+      if (pendingCommitProbes.get(captureId) === nativePort) {
+        pendingCommitProbes.delete(captureId);
+      }
+      clearCaptureDelivery(captureId);
     }
     // Native errors can include a capture ID, path, or resource metadata.
     // Keep diagnostics useful without copying that private evidence into
@@ -599,6 +663,7 @@ function getNativePort(): chrome.runtime.Port | undefined {
       type: "extension_runtime_state",
       build_id: RUNNING_BUILD_ID,
     });
+    sendCommitProbes(port);
     return port;
   } catch (error) {
     if (nativePort) retireNativePort(nativePort);
@@ -681,9 +746,11 @@ function postNative(message: unknown): void {
         delivery.awaitingCommit = true;
         delivery.receiptTimeoutId = setTimeout(() => {
           if (capturePorts.get(captureId) === delivery) {
+            rememberUnconfirmedCapture(captureId);
             clearCaptureDelivery(captureId);
             // Do not expose private capture identifiers in diagnostics.
             console.warn("Mirrarium capture commit receipt timed out; delivery unconfirmed");
+            sendCommitProbes(port);
           }
         }, CAPTURE_COMMIT_RECEIPT_TIMEOUT_MS);
       }
