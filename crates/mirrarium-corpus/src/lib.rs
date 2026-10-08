@@ -2568,6 +2568,58 @@ fn validate_sync_plan(plan: &ConversationSyncPlan) -> Result<()> {
     Ok(())
 }
 
+/// A plan's new checkpoint alone cannot establish which bodies a consumer
+/// already owns. Verify the *complete* delta against the committed prior state
+/// before returning a plan. Importers must independently enforce this invariant.
+fn validate_sync_plan_against_previous_checkpoint(
+    plan: &ConversationSyncPlan,
+    previous: Option<&ConversationSyncCheckpoint>,
+) -> Result<()> {
+    validate_sync_plan(plan)?;
+    if let Some(checkpoint) = previous {
+        validate_sync_checkpoint_for_archive(checkpoint, &plan.archive_id)?;
+    }
+    let previous_records = previous.map(|checkpoint| &checkpoint.sync_state.records);
+    let current_records = &plan.checkpoint.sync_state.records;
+
+    let expected_upserts = current_records
+        .iter()
+        .filter(|(conversation_id, record_sha256)| {
+            previous_records.and_then(|records| records.get(*conversation_id))
+                != Some(*record_sha256)
+        })
+        .map(|(conversation_id, record_sha256)| {
+            (conversation_id.as_str(), record_sha256.as_str())
+        })
+        .collect::<Vec<_>>();
+    let actual_upserts = plan
+        .upserts
+        .iter()
+        .map(|record| (record.conversation_id.as_str(), record.record_sha256.as_str()))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        actual_upserts == expected_upserts,
+        "sync-plan upserts are not the complete diff from the previous checkpoint"
+    );
+
+    let expected_deletions = previous_records
+        .into_iter()
+        .flat_map(|records| records.keys())
+        .filter(|conversation_id| !current_records.contains_key(*conversation_id))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let actual_deletions = plan
+        .deleted_conversation_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        actual_deletions == expected_deletions,
+        "sync-plan deletions are not the complete diff from the previous checkpoint"
+    );
+    Ok(())
+}
+
 fn validate_sync_checkpoint(checkpoint: &ConversationSyncCheckpoint) -> Result<()> {
     anyhow::ensure!(
         checkpoint.schema == "mirrarium.corpus.sync-checkpoint",
@@ -2873,7 +2925,7 @@ pub fn export_sync_plan(
         })
         .collect();
 
-    Ok(ConversationSyncPlan {
+    let result = ConversationSyncPlan {
         schema: "mirrarium.corpus.sync-plan".to_owned(),
         schema_version: CORPUS_SYNC_PLAN_SCHEMA_VERSION,
         sync_checkpoint_schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
@@ -2884,7 +2936,9 @@ pub fn export_sync_plan(
         upserts,
         deleted_conversation_ids: plan.deleted_conversation_ids,
         checkpoint: next_checkpoint,
-    })
+    };
+    validate_sync_plan_against_previous_checkpoint(&result, previous_checkpoint)?;
+    Ok(result)
 }
 
 pub fn write_conversation_sync_plan_fetch_jsonl<W: Write>(
@@ -7740,6 +7794,67 @@ mod tests {
         records: BTreeMap<String, String>,
     ) -> ConversationSyncCheckpoint {
         checkpoint_fixture_with_producer(archive_id, records, CORPUS_SCHEMA_VERSION)
+    }
+
+    #[test]
+    fn sync_plan_diff_validation_rejects_omitted_upserts_and_deletions() {
+        let archive_id = "a".repeat(64);
+        let previous = checkpoint_fixture(
+            &archive_id,
+            BTreeMap::from([
+                ("changed".to_owned(), "a".repeat(64)),
+                ("deleted".to_owned(), "b".repeat(64)),
+                ("unchanged".to_owned(), "c".repeat(64)),
+            ]),
+        );
+        let checkpoint = checkpoint_fixture(
+            &archive_id,
+            BTreeMap::from([
+                ("added".to_owned(), "d".repeat(64)),
+                ("changed".to_owned(), "e".repeat(64)),
+                ("unchanged".to_owned(), "c".repeat(64)),
+            ]),
+        );
+        let mut plan = ConversationSyncPlan {
+            schema: "mirrarium.corpus.sync-plan".to_owned(),
+            schema_version: CORPUS_SYNC_PLAN_SCHEMA_VERSION,
+            sync_checkpoint_schema_version: CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+            conversation_index_schema_version: CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+            record_type: "sync-plan".to_owned(),
+            archive_id: archive_id.clone(),
+            manifest: checkpoint.manifest.clone(),
+            upserts: vec![
+                conversation_export_index_record("added".to_owned(), "d".repeat(64)),
+                conversation_export_index_record("changed".to_owned(), "e".repeat(64)),
+            ],
+            deleted_conversation_ids: vec!["deleted".to_owned()],
+            checkpoint,
+        };
+        validate_sync_plan_against_previous_checkpoint(&plan, Some(&previous)).unwrap();
+
+        plan.upserts.remove(0);
+        // Wire shape remains valid, but advancing the checkpoint now loses "added".
+        validate_sync_plan(&plan).unwrap();
+        let error = validate_sync_plan_against_previous_checkpoint(&plan, Some(&previous))
+            .unwrap_err();
+        assert!(error.to_string().contains("upserts are not the complete diff"));
+
+        plan.upserts.insert(
+            0,
+            conversation_export_index_record("added".to_owned(), "d".repeat(64)),
+        );
+        plan.deleted_conversation_ids.clear();
+        validate_sync_plan(&plan).unwrap();
+        let error = validate_sync_plan_against_previous_checkpoint(&plan, Some(&previous))
+            .unwrap_err();
+        assert!(error.to_string().contains("deletions are not the complete diff"));
+
+        plan.deleted_conversation_ids.push("deleted".to_owned());
+        let cross_archive = checkpoint_fixture(&"f".repeat(64), BTreeMap::new());
+        assert!(validate_sync_plan_against_previous_checkpoint(&plan, Some(&cross_archive))
+            .unwrap_err()
+            .to_string()
+            .contains("refuse cross-archive synchronization"));
     }
 
     #[test]
