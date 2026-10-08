@@ -60,6 +60,7 @@ pub const CORPUS_SYNC_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 pub const CORPUS_SYNC_TRANSACTION_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-transaction-v1.schema.json");
 pub const CORPUS_SYNC_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SYNC_PLAN_INPUT_MAX_BYTES: u64 = 128 * 1024 * 1024;
 pub const CORPUS_SYNC_PLAN_SCHEMA_V1_JSON: &str =
     include_str!("../../../schemas/mirrarium-corpus-sync-plan-v1.schema.json");
 pub const CORPUS_SYNC_STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -829,7 +830,8 @@ pub struct ConversationExportRecord {
     pub attachments: Vec<AttachmentView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationExportIndexRecord {
     pub schema: String,
     pub schema_version: u32,
@@ -840,7 +842,7 @@ pub struct ConversationExportIndexRecord {
     pub record_sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationExportManifest {
     pub schema: String,
@@ -908,7 +910,8 @@ pub struct ConversationSyncTransaction {
     pub checkpoint: ConversationSyncCheckpoint,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationSyncPlan {
     pub schema: String,
     pub schema_version: u32,
@@ -2213,6 +2216,155 @@ fn validate_export_manifest(manifest: &ConversationExportManifest) -> Result<()>
     Ok(())
 }
 
+fn validate_export_index_record(record: &ConversationExportIndexRecord) -> Result<()> {
+    anyhow::ensure!(
+        record.schema == "mirrarium.corpus.conversation-index",
+        "unsupported conversation-index schema {:?}",
+        record.schema
+    );
+    anyhow::ensure!(
+        record.schema_version == CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+        "unsupported conversation-index schema version {}; expected {}",
+        record.schema_version,
+        CORPUS_EXPORT_INDEX_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        record.conversation_schema_version == CORPUS_EXPORT_SCHEMA_VERSION,
+        "unsupported conversation-index conversation schema version {}; expected {}",
+        record.conversation_schema_version,
+        CORPUS_EXPORT_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        record.producer_corpus_schema_version > 0,
+        "conversation-index producer corpus schema version must be positive"
+    );
+    anyhow::ensure!(
+        record.record_type == "conversation-index",
+        "unsupported conversation-index record type {:?}",
+        record.record_type
+    );
+    anyhow::ensure!(
+        !record.conversation_id.trim().is_empty(),
+        "conversation-index conversation id must not be empty"
+    );
+    anyhow::ensure!(
+        valid_sha256_hex(&record.record_sha256)
+            && record
+                .record_sha256
+                .bytes()
+                .all(|byte| !byte.is_ascii_uppercase()),
+        "conversation-index record SHA-256 must be 64 lowercase hexadecimal characters"
+    );
+    Ok(())
+}
+
+fn validate_sync_plan(plan: &ConversationSyncPlan) -> Result<()> {
+    anyhow::ensure!(
+        plan.schema == "mirrarium.corpus.sync-plan",
+        "unsupported sync-plan schema {:?}",
+        plan.schema
+    );
+    anyhow::ensure!(
+        plan.schema_version == CORPUS_SYNC_PLAN_SCHEMA_VERSION,
+        "unsupported sync-plan schema version {}; expected {}",
+        plan.schema_version,
+        CORPUS_SYNC_PLAN_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        plan.sync_checkpoint_schema_version == CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION,
+        "unsupported sync-plan checkpoint schema version {}; expected {}",
+        plan.sync_checkpoint_schema_version,
+        CORPUS_SYNC_CHECKPOINT_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        plan.conversation_index_schema_version == CORPUS_EXPORT_INDEX_SCHEMA_VERSION,
+        "unsupported sync-plan conversation-index schema version {}; expected {}",
+        plan.conversation_index_schema_version,
+        CORPUS_EXPORT_INDEX_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        plan.record_type == "sync-plan",
+        "unsupported sync-plan record type {:?}",
+        plan.record_type
+    );
+    anyhow::ensure!(
+        valid_sha256_hex(&plan.archive_id)
+            && plan.archive_id.bytes().all(|byte| !byte.is_ascii_uppercase()),
+        "sync-plan archive_id must be 64 lowercase hexadecimal characters"
+    );
+    validate_export_manifest(&plan.manifest)?;
+    validate_sync_checkpoint_for_archive(&plan.checkpoint, &plan.archive_id)?;
+    anyhow::ensure!(
+        plan.checkpoint.manifest == plan.manifest,
+        "sync-plan manifest disagrees with nested checkpoint manifest"
+    );
+
+    let mut previous_upsert: Option<&str> = None;
+    let mut upsert_ids = BTreeSet::new();
+    for record in &plan.upserts {
+        validate_export_index_record(record)?;
+        anyhow::ensure!(
+            record.producer_corpus_schema_version
+                == plan.manifest.producer_corpus_schema_version,
+            "sync-plan upsert {:?} producer corpus schema version {} disagrees with manifest version {}",
+            record.conversation_id,
+            record.producer_corpus_schema_version,
+            plan.manifest.producer_corpus_schema_version
+        );
+        if let Some(previous) = previous_upsert {
+            anyhow::ensure!(
+                previous < record.conversation_id.as_str(),
+                "sync-plan upserts must be strictly ordered by conversation id"
+            );
+        }
+        previous_upsert = Some(record.conversation_id.as_str());
+        anyhow::ensure!(
+            upsert_ids.insert(record.conversation_id.clone()),
+            "sync-plan contains duplicate upsert conversation {:?}",
+            record.conversation_id
+        );
+        anyhow::ensure!(
+            plan.checkpoint
+                .sync_state
+                .records
+                .get(&record.conversation_id)
+                .is_some_and(|hash| hash == &record.record_sha256),
+            "sync-plan upsert {:?} disagrees with nested checkpoint sync-state",
+            record.conversation_id
+        );
+    }
+
+    let mut previous_deleted: Option<&str> = None;
+    let mut deleted_ids = BTreeSet::new();
+    for conversation_id in &plan.deleted_conversation_ids {
+        anyhow::ensure!(
+            !conversation_id.trim().is_empty(),
+            "sync-plan deleted conversation id must not be empty"
+        );
+        if let Some(previous) = previous_deleted {
+            anyhow::ensure!(
+                previous < conversation_id.as_str(),
+                "sync-plan deleted conversation ids must be strictly ordered"
+            );
+        }
+        previous_deleted = Some(conversation_id.as_str());
+        anyhow::ensure!(
+            deleted_ids.insert(conversation_id.clone()),
+            "sync-plan contains duplicate deleted conversation {conversation_id:?}"
+        );
+        anyhow::ensure!(
+            !plan.checkpoint.sync_state.records.contains_key(conversation_id),
+            "sync-plan deleted conversation {conversation_id:?} is still present in nested checkpoint sync-state"
+        );
+        anyhow::ensure!(
+            !upsert_ids.contains(conversation_id),
+            "sync-plan conversation {conversation_id:?} appears in both upserts and deletions"
+        );
+    }
+
+    Ok(())
+}
+
 fn validate_sync_checkpoint(checkpoint: &ConversationSyncCheckpoint) -> Result<()> {
     anyhow::ensure!(
         checkpoint.schema == "mirrarium.corpus.sync-checkpoint",
@@ -2530,6 +2682,79 @@ pub fn export_sync_plan(
         deleted_conversation_ids: plan.deleted_conversation_ids,
         checkpoint: next_checkpoint,
     })
+}
+
+pub fn write_conversation_sync_plan_fetch_jsonl<W: Write>(
+    raw_root: impl AsRef<Path>,
+    plan: &ConversationSyncPlan,
+    writer: &mut W,
+) -> Result<()> {
+    validate_sync_plan(plan)?;
+    let raw_root = raw_root.as_ref();
+    let _export_lock = acquire_corpus_export_lock(&raw_root.join("derived"))?;
+    let archive_id = raw_archive_identity(raw_root)?;
+    anyhow::ensure!(
+        plan.archive_id == archive_id,
+        "sync-plan belongs to archive {}, but current archive is {}; refuse cross-archive fetch",
+        plan.archive_id,
+        archive_id
+    );
+
+    let corpus = open_corpus_read_only(raw_root)?;
+    let (current_manifest, cached_index) = verified_materialized_export_index(&corpus)?;
+    anyhow::ensure!(
+        current_manifest == plan.manifest,
+        "sync-plan targets a different published corpus generation; refresh the sync plan before fetching records"
+    );
+
+    let current_records: BTreeMap<String, String> = cached_index.into_iter().collect();
+    anyhow::ensure!(
+        current_records == plan.checkpoint.sync_state.records,
+        "sync-plan checkpoint state disagrees with the current published corpus generation"
+    );
+
+    for record in &plan.upserts {
+        let current_hash = current_records
+            .get(&record.conversation_id)
+            .with_context(|| {
+                format!(
+                    "sync-plan upsert conversation {:?} is absent from the current published corpus",
+                    record.conversation_id
+                )
+            })?;
+        anyhow::ensure!(
+            current_hash == &record.record_sha256,
+            "sync-plan upsert {:?} changed since the plan was produced; refresh the sync plan",
+            record.conversation_id
+        );
+    }
+    for conversation_id in &plan.deleted_conversation_ids {
+        anyhow::ensure!(
+            !current_records.contains_key(conversation_id),
+            "sync-plan deletion {conversation_id:?} is present in the current published corpus; refresh the sync plan"
+        );
+    }
+
+    if plan.upserts.is_empty() {
+        return Ok(());
+    }
+
+    let raw = open_raw_ledger_read_only(raw_root)?;
+    for index in &plan.upserts {
+        let record = conversation_export_record_for_connections(
+            raw_root,
+            &corpus,
+            &raw,
+            index.conversation_id.clone(),
+        )?;
+        ensure_record_matches_cached_hash(&record, &index.record_sha256)?;
+        serde_json::to_writer(&mut *writer, &record)
+            .context("serializing planned corpus conversation export")?;
+        writer
+            .write_all(b"\n")
+            .context("writing planned corpus conversation export newline")?;
+    }
+    Ok(())
 }
 
 pub fn write_conversation_negotiated_sync_transaction_json<W: Write>(
