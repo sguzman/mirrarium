@@ -28,6 +28,8 @@ The daemon writes each capture to a private temporary incoming area, verifies ch
 
 A failed body read still creates a ledger record but does not create a complete body object.
 
+Debugger attachment is asynchronous. The extension tracks pending per-tab setup separately from completed attachments; unsupported navigation or tab closure cancels in-progress setup, and setup rechecks the actual top-level tab URL before becoming active. A canceled partial setup detaches its debugger session before any supported-tab retry. This closes the window where a tab might leave ChatGPT before it enters the completed-attachment set.
+
 ## Evidence model
 
 Raw observations are evidence and are content-addressed.

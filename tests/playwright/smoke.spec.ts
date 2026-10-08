@@ -380,6 +380,56 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
 
       const page = await context.newPage();
 
+      // Stress a supported -> unsupported top-level navigation on fresh
+      // tabs, including when extension debugger setup is still asynchronous.
+      // The extension must never leave the debugger attached off-origin.
+      const foreignTabs = [];
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const transientPage = await context.newPage();
+        await transientPage.goto("https://chatgpt.com:43117/warmup");
+        await transientPage.goto("http://127.0.0.1:43118/foreign-origin");
+        foreignTabs.push(transientPage);
+      }
+      await expect
+        .poll(
+          async () =>
+            await worker.evaluate(async () => {
+              const chromeApi = (
+                globalThis as typeof globalThis & {
+                  chrome: {
+                    tabs: {
+                      query(queryInfo: object): Promise<Array<{ id?: number; url?: string }>>;
+                    };
+                    debugger: {
+                      getTargets(): Promise<Array<{ tabId?: number; attached: boolean }>>;
+                    };
+                  };
+                }
+              ).chrome;
+              const [tabs, targets] = await Promise.all([
+                chromeApi.tabs.query({}),
+                chromeApi.debugger.getTargets(),
+              ]);
+              const offOriginTabIds = new Set(
+                tabs
+                  .filter((tab) =>
+                    tab.url?.startsWith("http://127.0.0.1:43118/foreign-origin"),
+                  )
+                  .map((tab) => tab.id),
+              );
+              return (
+                offOriginTabIds.size === 4 &&
+                targets.every(
+                  (target) =>
+                    !target.attached || !offOriginTabIds.has(target.tabId),
+                )
+              );
+            }),
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+      for (const transientPage of foreignTabs) await transientPage.close();
+
       // Warm up the ChatGPT origin so the extension can attach CDP before the
       // page whose requests we actually assert.
       await page.goto("https://chatgpt.com:43117/warmup");

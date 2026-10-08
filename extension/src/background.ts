@@ -121,6 +121,9 @@ type CdpResponse = {
 };
 
 const attachedTabs = new Set<number>();
+// A tab can navigate away while debugger.attach/Network.enable/Fetch.enable
+// are still pending. Cancellation must work before attachedTabs is populated.
+const pendingAttachTabs = new Map<number, { cancelled: boolean }>();
 const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
@@ -935,17 +938,23 @@ async function handlePausedRequest(
 async function attach(tabId: number, url: string | undefined): Promise<void> {
   if (!isSupportedChatGptUrl(url)) return;
   checkInstalledExtensionVersion();
-  if (attachedTabs.has(tabId)) return;
+  // Avoid overlapping asynchronous debugger.attach attempts for one tab.
+  if (attachedTabs.has(tabId) || pendingAttachTabs.has(tabId)) return;
+  const pending = { cancelled: false };
+  pendingAttachTabs.set(tabId, pending);
 
   let debuggerAttached = false;
+  let ready = false;
   try {
     await chrome.debugger.attach({ tabId }, CDP_VERSION);
     debuggerAttached = true;
+    if (pending.cancelled) return;
     await chrome.debugger.sendCommand({ tabId }, "Network.enable", {
       maxResourceBufferSize: CDP_MAX_RESOURCE_BUFFER_BYTES,
       maxTotalBufferSize: CDP_MAX_TOTAL_BUFFER_BYTES,
       enableDurableMessages: true,
     });
+    if (pending.cancelled) return;
     fetchSetupTabs.add(tabId);
     await chrome.debugger.sendCommand({ tabId }, "Fetch.enable", {
       patterns: [
@@ -1047,23 +1056,44 @@ async function attach(tabId: number, url: string | undefined): Promise<void> {
         },
       ],
     });
-    fetchSetupTabs.delete(tabId);
+    if (pending.cancelled) return;
+    // The URL supplied by onUpdated/onActivated may already be obsolete.
+    // Rechecking the current top-level tab is mandatory before publication.
+    const currentTab = await chrome.tabs.get(tabId);
+    if (pending.cancelled || !isSupportedChatGptUrl(currentTab.url)) return;
     attachedTabs.add(tabId);
+    ready = true;
   } catch (error) {
+    if (!pending.cancelled) {
+      console.warn("Mirrarium could not attach to ChatGPT tab", tabId, error);
+    }
+  } finally {
     fetchSetupTabs.delete(tabId);
-    attachedTabs.delete(tabId);
-    if (debuggerAttached) {
+    if (!ready && debuggerAttached) {
       try {
         await chrome.debugger.detach({ tabId });
       } catch {
-        // Ignore cleanup failure after a partial debugger setup.
+        // Ignore cleanup failure after partial setup, tab closure or navigation.
       }
     }
-    console.warn("Mirrarium could not attach to ChatGPT tab", tabId, error);
+    if (pendingAttachTabs.get(tabId) === pending) {
+      pendingAttachTabs.delete(tabId);
+    }
+    if (pending.cancelled) {
+      // An out-and-back navigation can finish while the prior setup is
+      // unwinding. Recheck once instead of abandoning the supported tab.
+      void chrome.tabs.get(tabId).then((tab) => {
+        if (isSupportedChatGptUrl(tab.url)) void attach(tabId, tab.url);
+      }).catch(() => {
+        // Closed tabs have no debugger session to recover.
+      });
+    }
   }
 }
 
 async function detach(tabId: number): Promise<void> {
+  const pending = pendingAttachTabs.get(tabId);
+  if (pending) pending.cancelled = true;
   clearTabState(tabId);
 
   if (!attachedTabs.has(tabId)) return;
@@ -2236,6 +2266,8 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const pending = pendingAttachTabs.get(tabId);
+  if (pending) pending.cancelled = true;
   fetchSetupTabs.delete(tabId);
   attachedTabs.delete(tabId);
   clearTabState(tabId);
