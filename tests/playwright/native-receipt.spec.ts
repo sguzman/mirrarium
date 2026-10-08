@@ -336,3 +336,102 @@ test("aborting on an untouched native host does not initialize a writable ledger
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("native recovery refuses same-ID commits from a foreign archive", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mirrarium-cross-archive-"));
+  const captureId = "same-id-two-distinct-archives";
+  const exchange = async (rootDir: string, requests: unknown[]) => {
+    const child = spawn(resolve("target/debug/mirrariumd"), [], {
+      env: {
+        ...process.env,
+        MIRRARIUM_DATA_DIR: join(rootDir, "data"),
+        MIRRARIUM_PRIVATE_KEY_FILE: join(rootDir, "private.key"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const output: Buffer[] = [];
+    const errors: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+    const exited = new Promise<number | null>((resolveExit, rejectExit) => {
+      child.on("error", rejectExit);
+      child.on("close", resolveExit);
+    });
+    child.stdin.end(Buffer.concat(requests.map(nativeFrame)));
+    expect(await exited, Buffer.concat(errors).toString("utf8")).toBe(0);
+    return readFrames(Buffer.concat(output));
+  };
+  const committed = async (archive: string) => {
+    const responses = await exchange(archive, [
+      {
+        type: "capture_start",
+        metadata: {
+          capture_id: captureId,
+          tab_id: 1,
+          request_id: "shared-id",
+          method: "GET",
+          url: "https://chatgpt.com/backend-api/collision",
+          status: 204,
+          mime_type: "application/json",
+          resource_type: "Fetch",
+          provenance: {},
+        },
+      },
+      {
+        type: "capture_finish",
+        capture_id: captureId,
+        encoded_data_length: null,
+        body_error: "suppressed:no_response_body_expected",
+      },
+    ]);
+    expect(responses[0]).toMatchObject({
+      type: "capture_message_ack",
+      capture_id: captureId,
+      stage: "capture_start",
+      sequence: null,
+    });
+    expect(responses[1]).toEqual({
+      type: "capture_committed",
+      capture_id: captureId,
+    });
+    const archiveId = responses[0]?.archive_id;
+    expect(archiveId).toMatch(/^[0-9a-f]{64}$/);
+    return archiveId as string;
+  };
+  try {
+    const originalRoot = join(root, "original");
+    const foreignRoot = join(root, "foreign");
+    const originalId = await committed(originalRoot);
+    const foreignId = await committed(foreignRoot);
+    expect(foreignId).not.toBe(originalId);
+
+    const probe = (expectedArchiveId: string) => ({
+      type: "capture_commit_probe",
+      capture_id: captureId,
+      expected_archive_id: expectedArchiveId,
+    });
+
+    const foreignResponses = await exchange(foreignRoot, [
+      probe(originalId),
+      probe(foreignId),
+    ]);
+    expect(foreignResponses[0]).toMatchObject({
+      type: "error",
+      capture_id: captureId,
+    });
+    expect(foreignResponses[1]).toEqual({
+      type: "capture_commit_status",
+      capture_id: captureId,
+      committed: true,
+      archive_id: foreignId,
+    });
+    expect(await exchange(originalRoot, [probe(originalId)])).toEqual([{
+      type: "capture_commit_status",
+      capture_id: captureId,
+      committed: true,
+      archive_id: originalId,
+    }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
