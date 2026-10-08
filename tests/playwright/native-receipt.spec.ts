@@ -96,6 +96,8 @@ test("native transport acknowledges only a durably finished capture", async () =
       encoded_data_length: body.length,
       body_error: null,
     },
+    { type: "capture_commit_probe", capture_id: captureId },
+    { type: "capture_commit_probe", capture_id: "absent-capture" },
     {
       type: "capture_finish",
       capture_id: captureId,
@@ -125,7 +127,7 @@ test("native transport acknowledges only a durably finished capture", async () =
       Buffer.concat(errorChunks).toString("utf8"),
     ).toBe(0);
     const responses = readFrames(Buffer.concat(outputChunks));
-    expect(responses).toHaveLength(9);
+    expect(responses).toHaveLength(11);
     const expectProgress = (index: number, stage: string, sequence: number | null) =>
       expect(responses[index]).toEqual({
         type: "capture_message_ack",
@@ -146,11 +148,21 @@ test("native transport acknowledges only a durably finished capture", async () =
       type: "capture_committed",
       capture_id: captureId,
     });
-    expect(responses[7]).toMatchObject({
+    expect(responses[7]).toEqual({
+      type: "capture_commit_status",
+      capture_id: captureId,
+      committed: true,
+    });
+    expect(responses[8]).toEqual({
+      type: "capture_commit_status",
+      capture_id: "absent-capture",
+      committed: false,
+    });
+    expect(responses[9]).toMatchObject({
       type: "error",
       capture_id: captureId,
     });
-    expect(responses[8]).toEqual({ type: "pong" });
+    expect(responses[10]).toEqual({ type: "pong" });
 
     const archive = spawn(cliPath, ["captures", "20"], {
       env,

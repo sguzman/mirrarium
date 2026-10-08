@@ -23,6 +23,28 @@ fn open_cache_reader_if_present(root: &Path) -> Result<Option<cache::CacheReader
     cache::CacheReader::open(root).map(Some)
 }
 
+fn capture_commit_status(
+    root: &Path,
+    writable: Option<&CaptureStore>,
+    capture_id: &str,
+) -> Result<bool> {
+    anyhow::ensure!(
+        !capture_id.trim().is_empty() && capture_id.len() <= 256,
+        "capture commit probe requires a bounded nonempty capture id"
+    );
+    if let Some(store) = writable {
+        return Ok(store.capture_by_id(capture_id)?.is_some());
+    }
+    let ledger = root.join("ledger.sqlite3");
+    match fs::symlink_metadata(&ledger) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("inspecting {}", ledger.display())),
+        Ok(_) => {}
+    }
+    let read_only = CaptureStore::open_read_only(root)?;
+    Ok(read_only.capture_by_id(capture_id)?.is_some())
+}
+
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
@@ -65,6 +87,19 @@ fn run_native_host() -> Result<()> {
                     Err(error) => HostResponse::Error {
                         capture_id: None,
                         message: format!("extension runtime state unavailable: {error:#}"),
+                    },
+                };
+                write_native_response(&mut output, &response)?;
+            }
+            Ok(HostRequest::CaptureCommitProbe { capture_id }) => {
+                let response = match capture_commit_status(&root, store.as_ref(), &capture_id) {
+                    Ok(committed) => HostResponse::CaptureCommitStatus {
+                        capture_id,
+                        committed,
+                    },
+                    Err(error) => HostResponse::Error {
+                        capture_id: Some(capture_id),
+                        message: format!("capture commit status unavailable: {error:#}"),
                     },
                 };
                 write_native_response(&mut output, &response)?;
@@ -304,6 +339,7 @@ fn request_capture_id(request: &HostRequest) -> Option<String> {
         | HostRequest::ExtensionRuntimeState { .. }
         | HostRequest::CacheLookup { .. }
         | HostRequest::PrivateReadLookup { .. }
+        | HostRequest::CaptureCommitProbe { .. }
         | HostRequest::CacheReplayOutcome { .. }
         | HostRequest::PrivateRevalidationOutcome { .. } => None,
     }
@@ -360,6 +396,12 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
                 lookup_id,
                 message: "private-read lookup must be handled by the streaming response path"
                     .to_owned(),
+            };
+        }
+        HostRequest::CaptureCommitProbe { capture_id } => {
+            return HostResponse::Error {
+                capture_id: Some(capture_id),
+                message: "capture commit probe must use the read-only path".to_owned(),
             };
         }
         HostRequest::CacheReplayOutcome {
@@ -657,6 +699,36 @@ mod tests {
     use super::*;
     use mirrarium_protocol::{CaptureMetadata, CaptureProvenance};
     use tempfile::tempdir;
+
+    #[test]
+    fn read_only_commit_probe_distinguishes_absent_and_committed_capture() {
+        let directory = tempdir().unwrap();
+        assert!(!capture_commit_status(directory.path(), None, "not-present").unwrap());
+        assert!(!directory.path().join("ledger.sqlite3").exists());
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        assert!(!capture_commit_status(directory.path(), Some(&store), "pending").unwrap());
+        let metadata = CaptureMetadata {
+            capture_id: "pending".to_owned(),
+            tab_id: 1,
+            request_id: "pending-request".to_owned(),
+            method: "GET".to_owned(),
+            url: "https://chatgpt.com/backend-api/pending".to_owned(),
+            status: 204,
+            mime_type: "application/json".to_owned(),
+            resource_type: "Fetch".to_owned(),
+            etag: None,
+            last_modified: None,
+            cache_control: None,
+            provenance: CaptureProvenance::default(),
+        };
+        store.begin(metadata).unwrap();
+        assert!(!capture_commit_status(directory.path(), Some(&store), "pending").unwrap());
+        store.finish("pending", None, Some("suppressed:no_response_body_expected")).unwrap();
+        assert!(capture_commit_status(directory.path(), Some(&store), "pending").unwrap());
+        assert!(capture_commit_status(directory.path(), None, "pending").unwrap());
+        assert!(!capture_commit_status(directory.path(), None, "other").unwrap());
+        assert!(capture_commit_status(directory.path(), None, "").is_err());
+    }
 
     #[test]
     fn terminal_receipt_is_emitted_only_after_capture_commit() {
