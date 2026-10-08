@@ -15,7 +15,7 @@ Mirrarium starts as a passive recorder. It must become trustworthy before it is 
 - The extension targets Chromium Manifest V3.
 - Playwright using its bundled Chromium build is the canonical automated QA environment.
 - Automated tests use disposable Chromium profiles.
-- Automated tooling must never launch, attach to, inspect, modify, or reuse Salvador's personal Microsoft Edge profile.
+- Automated tooling must never launch, attach to, inspect, modify, or reuse the operator's personal Microsoft Edge profile.
 - Edge is a deployment target for normal personal use, not a development or QA sandbox.
 - Normal tests do not require a real ChatGPT account.
 - Live-site tests, if introduced, must be explicit/manual and still run in isolated Chromium.
