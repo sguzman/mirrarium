@@ -5501,7 +5501,7 @@ fn open_corpus_read_only(raw_root: impl AsRef<Path>) -> Result<Connection> {
     ensure_derived_root_is_real_directory(&raw_root.as_ref().join("derived"))?;
     let database = raw_root.as_ref().join("derived/corpus.sqlite3");
     anyhow::ensure!(
-        database.is_file(),
+        corpus_database_is_regular_or_absent(&database)?,
         "derived corpus does not exist; run 'mirrarium corpus rebuild'"
     );
     let connection = Connection::open_with_flags(
@@ -7206,10 +7206,35 @@ fn corpus_sidecar_paths(database: &Path) -> [PathBuf; 2] {
     ]
 }
 
+fn corpus_database_is_regular_or_absent(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "published derived corpus is not a regular non-symlink file: {}",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting published derived corpus {}", path.display())),
+    }
+}
+
 fn ensure_corpus_publish_target_quiescent(database: &Path) -> Result<()> {
+    corpus_database_is_regular_or_absent(database)?;
     for sidecar in corpus_sidecar_paths(database) {
+        let occupied = match fs::symlink_metadata(&sidecar) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspecting SQLite sidecar {}", sidecar.display()));
+            }
+        };
         anyhow::ensure!(
-            !sidecar.exists(),
+            !occupied,
             "cannot atomically replace derived corpus while SQLite sidecar exists: {}; retry after concurrent corpus readers/writers close",
             sidecar.display()
         );
@@ -8273,6 +8298,39 @@ mod tests {
         drop(first);
         let third = acquire_corpus_rebuild_lock(&derived_root).unwrap();
         drop(third);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn published_corpus_and_sidecar_symlinks_block_inspection_and_publication() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let derived_root = directory.path().join("derived");
+        fs::create_dir(&derived_root).unwrap();
+        let database = derived_root.join("corpus.sqlite3");
+        let external = directory.path().join("outside.sqlite3");
+        fs::write(&external, b"preserve external database").unwrap();
+        symlink(&external, &database).unwrap();
+
+        assert!(open_corpus_read_only(directory.path())
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular non-symlink file"));
+        assert!(ensure_corpus_publish_target_quiescent(&database)
+            .unwrap_err()
+            .to_string()
+            .contains("not a regular non-symlink file"));
+        assert_eq!(fs::read(&external).unwrap(), b"preserve external database");
+
+        fs::remove_file(&database).unwrap();
+        let sidecar = PathBuf::from(format!("{}-wal", database.display()));
+        symlink(directory.path().join("missing-wal"), &sidecar).unwrap();
+        assert!(ensure_corpus_publish_target_quiescent(&database)
+            .unwrap_err()
+            .to_string()
+            .contains("sidecar exists"));
+        assert!(!database.exists());
     }
 
     #[cfg(unix)]
