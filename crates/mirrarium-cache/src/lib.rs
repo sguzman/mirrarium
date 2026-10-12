@@ -1793,7 +1793,7 @@ mod tests {
             .execute(
                 "UPDATE captures SET provenance_json = ?1 WHERE capture_id = ?2",
                 params![
-                    serde_json::json!({"account_scope_hash": hash}).to_string(),
+                    format!(r#"{{"account_scope_hash":"{hash}"}}"#),
                     capture_id,
                 ],
             )
