@@ -10,6 +10,7 @@ use mirrarium_store::{open_raw_ledger_read_only, read_verified_object};
 use url::Url;
 
 const MAX_REPLAY_BODY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_OFFLINE_CONVERSATION_BYTES: u64 = 32 * 1024 * 1024;
 
 pub struct CacheReader {
     root: PathBuf,
@@ -249,7 +250,7 @@ pub fn offline_capture_gaps(raw_root: impl AsRef<Path>) -> Result<OfflineCapture
     })?;
     let mut identities = BTreeMap::<(String, Option<String>), (bool, bool)>::new();
     let mut result = OfflineCaptureGaps {
-        response_capture_ceiling_bytes: MAX_REPLAY_BODY_BYTES,
+        response_capture_ceiling_bytes: MAX_OFFLINE_CONVERSATION_BYTES,
         observed_conversation_scopes: 0,
         with_completed_snapshots: 0,
         without_completed_snapshots: 0,
@@ -477,8 +478,8 @@ pub fn offline_conversation_scoped(
         .try_into()
         .context("negative archived conversation body byte count")?;
     anyhow::ensure!(
-        body_bytes <= MAX_REPLAY_BODY_BYTES,
-        "archived conversation exceeds the 16 MiB read ceiling"
+        body_bytes <= MAX_OFFLINE_CONVERSATION_BYTES,
+        "archived conversation exceeds the 32 MiB read ceiling"
     );
     let captured_at_ms: u64 = captured_at_ms
         .try_into()
@@ -2608,7 +2609,7 @@ mod tests {
             ).unwrap();
         }
         let gaps = offline_capture_gaps(dir.path()).unwrap();
-        assert_eq!(gaps.response_capture_ceiling_bytes, 16 * 1024 * 1024);
+        assert_eq!(gaps.response_capture_ceiling_bytes, 32 * 1024 * 1024);
         assert_eq!(gaps.observed_conversation_scopes, 3);
         assert_eq!(gaps.with_completed_snapshots, 1);
         assert_eq!(gaps.without_completed_snapshots, 2);
