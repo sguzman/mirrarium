@@ -316,7 +316,25 @@ under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated
 offline mirror. **Do not export into public repos or synced/shared folders.**
 
-### Bounded-memory UTF-8 capture delivery
+### Passive streaming for large conversation responses
+
+Mirrarium now attempts `Network.streamResourceContent` for successful JSON
+`GET /backend-api/conversation/<id>` responses on supported ChatGPT hosts.
+It copies CDP's buffered response bytes and subsequent streamed network data
+into the native encrypted writer without altering what the website receives.
+Only this precisely validated response class has a **32 MiB capture ceiling**.
+Other response captures remain capped at 16 MiB. If streaming setup is
+unsupported, Mirrarium falls back to the existing bounded 16 MiB capture path.
+The initial CDP handshake buffer is capped at 2 MiB; invalid, oversized, or
+interrupted streams are marked incomplete, never presented as verified snapshots.
+
+Explicit offline conversation reads now support verified bodies up to 32 MiB.
+Automatic private revalidation/replay retains the **16 MiB** body limit and
+matching-account requirement. This feature is verified against synthetic
+Chromium traffic, not yet a real logged-in ChatGPT session. It does not enable
+unconditional or offline response substitution into the live website.
+
+## Bounded-memory UTF-8 capture delivery
 
 When Chromium returns a plain-text response body through CDP, Mirrarium now
 encodes and forwards UTF-8 in bounded chunks, rather than allocating an
@@ -339,7 +357,7 @@ responses without reading message text. It counts conversation/account
 identities with and without complete response-body candidates, oversized
 response observations, oversized conversations lacking any completed
 snapshot, other incomplete observations, and the largest completed
-snapshot. The reported current response ceiling is **16 MiB**. All values
+snapshot. The reported current conversation-response ceiling is **32 MiB**; other response classes retain their **16 MiB** ceiling. All values
 are archive-local metadata; a completed body candidate is not guaranteed
 intact until verified by an explicit offline read. The audit does not
 modify browser capture or allocate larger response buffers.

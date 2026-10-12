@@ -21,7 +21,7 @@ type OriginCounts = { total: number; conditional_304: number };
 type ReplayCounts = { js: number };
 
 test("persists and reuses captured conversations across Chromium restarts", async () => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
 
   const root = await mkdtemp(join(tmpdir(), "mirrarium-browser-restart-"));
   const browserHome = join(root, "home");
@@ -195,6 +195,27 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     });
     expect(first.id).toBe("fixture-conversation");
     expect(first.messages).toEqual([{ role: "user", content: "private corpus material" }]);
+
+    // A normal GET conversation response larger than the old 16 MiB limit
+    // must reach the browser intact and be archived through passive CDP
+    // streaming, without disabling or fulfilling the original request.
+    const streamedLength = await firstPage.evaluate(async () => {
+      const response = await fetch("/backend-api/conversation/stream-probe", {
+        cache: "no-store",
+        headers: { "ChatGPT-Account-Id": "fixture-account" },
+      });
+      expect(response.status).toBe(200);
+      return (await response.arrayBuffer()).byteLength;
+    });
+    expect(streamedLength).toBeGreaterThan(16 * 1024 * 1024);
+    expect(streamedLength).toBeLessThan(32 * 1024 * 1024);
+    await expect.poll(async () => {
+      const index = JSON.parse(await runCli(["cache", "offline-index", "100"])) as
+        Array<{ api_url: string; latest_body_bytes: number }>;
+      return index.find((item) => item.api_url.endsWith(
+        "/backend-api/conversation/stream-probe"
+      ))?.latest_body_bytes;
+    }, { timeout: 30_000 }).toBe(streamedLength);
 
     await context.close();
     context = null;

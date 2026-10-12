@@ -194,3 +194,13 @@ unit-level tests compare its output to `TextEncoder.encode` for two-megabyte
 ASCII strings, multibyte text, surrogate pairs at input-window boundaries,
 unpaired surrogates, minimal chunk capacities, and invalid capacities.
 The existing Chromium smoke suite continues testing complete captures.
+
+## Passive large-conversation capture acceptance
+
+The synthetic HTTPS fixture emits a paced 17 MiB JSON response from an exact
+ChatGPT conversation API URL. A standalone Chromium CDP test proves passive
+network streaming reconstructs the exact SHA-256 while the page receives the
+unaltered response. The extension/native-host browser-restart test additionally
+retrieves this >16 MiB response with Mirrarium installed, checks encrypted
+archive metadata contains its complete body, and verifies the archive after
+browser shutdown. All unrelated response classes remain 16 MiB-limited.

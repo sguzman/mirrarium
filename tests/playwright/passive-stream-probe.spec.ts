@@ -7,7 +7,7 @@ import { chromium, expect, test } from "@playwright/test";
 test("CDP passively streams a 17 MiB response while the webpage reads it", async () => {
   test.setTimeout(90_000);
   const origin = "https://chatgpt.com:43117";
-  const route = "/backend-api/passive-stream-probe";
+  const route = "/backend-api/conversation/stream-probe";
   const browser = await chromium.launch({
     channel: "chromium",
     headless: true,

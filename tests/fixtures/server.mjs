@@ -550,7 +550,7 @@ const fixtureServer = https.createServer(
       return;
     }
 
-    if (request.url === "/backend-api/passive-stream-probe") {
+    if (request.url === "/backend-api/conversation/stream-probe") {
       response.writeHead(200, {
         "content-type": "application/json",
         "cache-control": "private, max-age=0",
