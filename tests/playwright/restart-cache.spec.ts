@@ -204,7 +204,7 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
         cache: "no-store",
         headers: { "ChatGPT-Account-Id": "fixture-account" },
       });
-      expect(response.status).toBe(200);
+      if (response.status !== 200) throw new Error(`stream probe HTTP ${response.status}`);
       return (await response.arrayBuffer()).byteLength;
     });
     expect(streamedLength).toBeGreaterThan(16 * 1024 * 1024);
