@@ -2483,7 +2483,7 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "account-one"
             ));
-        let json = serde_json::to_string(&accounts).unwrap();
+        let json = format!("{accounts:?}");
         assert!(!json.contains("backend-api"));
         assert!(!json.contains("account-one"));
         assert!(!json.contains("chatgpt.com"));
