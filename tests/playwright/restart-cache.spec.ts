@@ -209,6 +209,35 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     });
     expect(afterShutdown.archive.captures).toBeGreaterThan(0);
     expect(afterShutdown.archive.private_captures).toBeGreaterThan(0);
+
+    // The archived conversation is available even with Chromium fully closed,
+    // and the exact-body reader never contacts the fixture origin.
+    const offlineOriginBefore = await originCounts();
+    const archived = JSON.parse(
+      await runCli(["cache", "offline-conversation",
+        fixtureOrigin + "/backend-api/conversation/test"])
+    ) as {
+      source_url: string;
+      offline: boolean;
+      freshness_verified: boolean;
+      body_sha256: string;
+      body_bytes: number;
+      response: typeof first;
+    };
+    expect(archived).toMatchObject({
+      source_url: fixtureOrigin + "/backend-api/conversation/test",
+      offline: true,
+      freshness_verified: false,
+      response: first,
+    });
+    expect(archived.body_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(archived.body_bytes).toBeGreaterThan(0);
+    expect(await originCounts()).toEqual(offlineOriginBefore);
+
+    // Restrict the explicit reader to exact ChatGPT conversation API URLs.
+    await expect(
+      runCli(["cache", "offline-conversation", fixtureOrigin + "/backend-api/auth/session"])
+    ).rejects.toThrow("no complete, locally archived conversation JSON");
     const persisted = (await privateReads()).find((entry) =>
       entry.url.endsWith("/backend-api/conversation/test")
     );
