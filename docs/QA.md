@@ -169,3 +169,11 @@ The isolated Chromium fixture reads and exports a single captured conversation
 with a known account fingerprint; the same URL under a nonexistent account
 fingerprint fails rather than selecting the unfiltered latest response. The
 scoped HTML export does not create a plaintext file on a cache miss.
+
+## Read-only account inventory acceptance
+
+Rust tests group valid complete archived conversation observations by
+archive-local fingerprint, deduplicate multiple captures of one conversation,
+retain a separate legacy unscoped group, and reject impersonated hostnames.
+Chromium checks the account inventory without decrypting messages or causing
+requests to the origin.

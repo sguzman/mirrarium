@@ -2442,6 +2442,54 @@ mod tests {
     }
 
     #[test]
+    fn offline_account_inventory_excludes_fake_hosts_and_deduplicates_snapshots() {
+        let (dir, db) = open_fixture();
+        for (id, time, url) in [
+            ("a1", 10, "https://chatgpt.com/backend-api/conversation/a"),
+            ("a2", 20, "https://chatgpt.com/backend-api/conversation/a"),
+            ("b", 30, "https://chatgpt.com/backend-api/conversation/b"),
+            ("legacy", 40, "https://chatgpt.com/backend-api/conversation/a"),
+            ("spoof", 100, "https://chatgpt.com.evil.test/backend-api/conversation/c"),
+        ] {
+            db.execute(
+                r#"INSERT INTO captures (
+                    capture_id, captured_at_ms, method, url, status, mime_type,
+                    resource_type, privacy_class, body_hash, body_bytes, body_error
+                ) VALUES (?1, ?2, 'GET', ?3, 200, 'application/json', 'Fetch',
+                    'private', ?4, 12, NULL)"#,
+                params![id, time, url,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            ).unwrap();
+        }
+        scope_capture(&db, "a1", "account-one");
+        scope_capture(&db, "a2", "account-one");
+        scope_capture(&db, "b", "account-two");
+        scope_capture(&db, "spoof", "account-three");
+        let accounts = offline_accounts(dir.path()).unwrap();
+        assert_eq!(accounts.len(), 3);
+        assert_eq!(accounts[0], OfflineAccountProfile {
+            account_scope_hash: None,
+            unscoped: true,
+            conversation_count: 1,
+            capture_count: 1,
+            latest_captured_at_ms: 40,
+        });
+        assert_eq!(accounts[1].conversation_count, 1);
+        assert_eq!(accounts[1].capture_count, 1);
+        assert_eq!(accounts[2].conversation_count, 1);
+        assert_eq!(accounts[2].capture_count, 2);
+        assert_eq!(accounts[2].account_scope_hash,
+            mirrarium_store::account_scope_hash(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "account-one"
+            ));
+        let json = serde_json::to_string(&accounts).unwrap();
+        assert!(!json.contains("backend-api"));
+        assert!(!json.contains("account-one"));
+        assert!(!json.contains("chatgpt.com"));
+    }
+
+    #[test]
     fn offline_index_is_latest_first_deduplicated_and_metadata_only() {
         let (dir, db) = open_fixture();
         let a = "https://chatgpt.com/backend-api/conversation/a";

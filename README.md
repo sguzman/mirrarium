@@ -86,6 +86,7 @@ mirrarium cache revalidation-stats
 mirrarium cache candidates [limit]
 mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
+mirrarium cache offline-accounts
 mirrarium cache offline-index [limit] [--scope SHA256]
 mirrarium cache offline-conversation <chatgpt-conversation-url> [--scope SHA256]
 mirrarium cache offline-html <chatgpt-conversation-url> <new-output-file> [--scope SHA256]
@@ -313,6 +314,16 @@ is an explicit manual export; it can include material originally captured
 under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated
 offline mirror. **Do not export into public repos or synced/shared folders.**
+
+### Read-only account inventory
+
+`mirrarium cache offline-accounts` reports the account fingerprints present in
+the archive, along with distinct conversation counts, completed capture
+observations, and latest timestamps. Older captures lacking a fingerprint
+appear as `unscoped`. It reads no conversation bodies, titles, URLs, or raw
+account identifiers. Select a fingerprint from this inventory for
+`--scope` on individual or batch offline exports. This inventory does not
+determine which account is currently authenticated in Chromium.
 
 ### Account-filtered offline library
 

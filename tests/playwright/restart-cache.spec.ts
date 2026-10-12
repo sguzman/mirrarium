@@ -261,6 +261,16 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     const fingerprint = (indexed as typeof indexed & { account_scope_hash: string })
       .account_scope_hash;
     expect(fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    const accounts = JSON.parse(await runCli(["cache", "offline-accounts"])) as
+      Array<{ account_scope_hash: string | null; conversation_count: number;
+        capture_count: number; unscoped: boolean }>;
+    expect(accounts.some((entry) =>
+      entry.account_scope_hash === fingerprint &&
+      entry.conversation_count >= 1 && entry.capture_count >= 1
+    )).toBe(true);
+    expect(JSON.stringify(accounts)).not.toContain("private corpus material");
+    expect(JSON.stringify(accounts)).not.toContain("backend-api");
+    expect(await originCounts()).toEqual(offlineOriginBefore);
     const restricted = JSON.parse(await runCli([
       "cache", "offline-index", "50", "--scope", fingerprint,
     ])) as Array<{ api_url: string; account_scope_hash: string }>;
