@@ -138,6 +138,72 @@ pub struct PrivateReadEntry {
     pub body: Vec<u8>,
 }
 
+/// Archive-local account inventory; never includes titles, URLs, or bodies.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OfflineAccountProfile {
+    pub account_scope_hash: Option<String>,
+    pub unscoped: bool,
+    pub conversation_count: u64,
+    pub capture_count: u64,
+    pub latest_captured_at_ms: u64,
+}
+
+pub fn offline_accounts(raw_root: impl AsRef<Path>) -> Result<Vec<OfflineAccountProfile>> {
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT url,
+               json_extract(provenance_json, '$.account_scope_hash'),
+               COUNT(*), MAX(captured_at_ms)
+        FROM captures
+        WHERE privacy_class = 'private'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND lower(resource_type) IN ('fetch', 'xhr')
+          AND lower(mime_type) LIKE '%json%'
+          AND body_hash IS NOT NULL
+          AND body_error IS NULL
+          AND (url LIKE 'https://chatgpt.com%/backend-api/conversation/%'
+               OR url LIKE 'https://chat.openai.com%/backend-api/conversation/%')
+        GROUP BY url, json_extract(provenance_json, '$.account_scope_hash')
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    let mut accounts = BTreeMap::<Option<String>, OfflineAccountProfile>::new();
+    for row in rows {
+        let (url, scope, captures, latest) = row?;
+        if offline_conversation_url(&url)
+            .is_none_or(|canonical| canonical.as_str() != url)
+        {
+            continue;
+        }
+        validate_offline_scope(scope.as_deref())?;
+        let count: u64 = captures.try_into().context("negative account capture count")?;
+        let latest: u64 = latest.try_into().context("negative account timestamp")?;
+        let entry = accounts.entry(scope.clone()).or_insert_with(|| OfflineAccountProfile {
+            account_scope_hash: scope.clone(),
+            unscoped: scope.is_none(),
+            conversation_count: 0,
+            capture_count: 0,
+            latest_captured_at_ms: 0,
+        });
+        entry.conversation_count = entry.conversation_count.saturating_add(1);
+        entry.capture_count = entry.capture_count.saturating_add(count);
+        entry.latest_captured_at_ms = entry.latest_captured_at_ms.max(latest);
+    }
+    let mut results: Vec<_> = accounts.into_values().collect();
+    results.sort_by(|a, b| b.latest_captured_at_ms.cmp(&a.latest_captured_at_ms)
+        .then_with(|| a.account_scope_hash.cmp(&b.account_scope_hash)));
+    Ok(results)
+}
+
 /// Private archive *metadata*, not a verified response body. The explicit
 /// offline-conversation reader still checks the indexed object and its hash.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
