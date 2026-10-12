@@ -28,6 +28,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 // bounded even when a browser or a broken peer never finishes its captures.
 const MAX_IN_FLIGHT_CAPTURES: usize = 128;
 const MAX_RESPONSE_BODY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_STREAMED_CONVERSATION_BODY_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_WEBSOCKET_FRAME_BYTES: u64 = 1024 * 1024;
 const MAX_EVENTSOURCE_MESSAGE_BYTES: u64 = 1024 * 1024;
 const PRIVATE_OBJECT_MAGIC: &[u8; 8] = b"MIRRPV01";
@@ -37,6 +38,45 @@ const PRIVATE_NONCE_BYTES: usize = 24;
 const PRIVATE_STREAM_NONCE_PREFIX_BYTES: usize = 16;
 const PRIVATE_STREAM_TAG_BYTES: usize = 16;
 const PRIVATE_STREAM_REWRITE_CHUNK_BYTES: usize = 256 * 1024;
+
+fn streamed_conversation_capture(metadata: &CaptureMetadata) -> bool {
+    if metadata.method != "GET"
+        || metadata.status != 200
+        || !matches!(metadata.resource_type.as_str(), "Fetch" | "XHR")
+        || !metadata.mime_type.to_ascii_lowercase().contains("json")
+    {
+        return false;
+    }
+    let Ok(url) = Url::parse(&metadata.url) else {
+        return false;
+    };
+    let Some(id) = url.path().strip_prefix("/backend-api/conversation/") else {
+        return false;
+    };
+    url.scheme() == "https"
+        && matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com"))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+        )
+}
+
+fn capture_size_suppression_for_metadata(
+    metadata: &CaptureMetadata,
+    next_bytes: u64,
+) -> Option<&'static str> {
+    if streamed_conversation_capture(metadata) {
+        (next_bytes > MAX_STREAMED_CONVERSATION_BODY_BYTES)
+            .then_some("response_body_too_large")
+    } else {
+        capture_size_suppression_reason(&metadata.resource_type, next_bytes)
+    }
+}
 
 fn capture_size_suppression_reason(
     resource_type: &str,
@@ -631,7 +671,7 @@ impl CaptureStore {
             .checked_add(bytes.len() as u64)
             .context("capture byte count overflow")?;
         let oversized_reason =
-            capture_size_suppression_reason(&capture.metadata.resource_type, next_bytes);
+            capture_size_suppression_for_metadata(&capture.metadata, next_bytes);
         if let Some(reason) = oversized_reason {
             capture.suppressed_reason = Some(reason.to_owned());
             capture.next_sequence = capture
@@ -4847,6 +4887,48 @@ mod tests {
         let report = store.verify().unwrap();
         assert_eq!(report.checked_objects, 2);
         assert_eq!(report.corrupt_objects, 0);
+    }
+
+    #[test]
+    fn only_exact_conversation_json_gets_the_larger_streaming_ceiling() {
+        let valid = metadata(
+            "streamed", "https://chatgpt.com/backend-api/conversation/synthetic", "Fetch",
+        );
+        assert!(streamed_conversation_capture(&valid));
+        assert_eq!(
+            capture_size_suppression_for_metadata(&valid, MAX_RESPONSE_BODY_BYTES + 1),
+            None,
+        );
+        assert_eq!(
+            capture_size_suppression_for_metadata(&valid, MAX_STREAMED_CONVERSATION_BODY_BYTES),
+            None,
+        );
+        assert_eq!(
+            capture_size_suppression_for_metadata(
+                &valid, MAX_STREAMED_CONVERSATION_BODY_BYTES + 1
+            ),
+            Some("response_body_too_large"),
+        );
+        for url in [
+            "https://chatgpt.com.evil.test/backend-api/conversation/synthetic",
+            "https://chatgpt.com/backend-api/auth/session",
+            "https://chatgpt.com/backend-api/conversation/id?secret=1",
+            "http://chatgpt.com/backend-api/conversation/synthetic",
+            "https://chatgpt.com/backend-api/conversation/synthetic/extra",
+        ] {
+            let fixture = metadata("not-conversation", url, "Fetch");
+            assert!(!streamed_conversation_capture(&fixture));
+            assert_eq!(
+                capture_size_suppression_for_metadata(&fixture, MAX_RESPONSE_BODY_BYTES + 1),
+                Some("response_body_too_large"),
+            );
+        }
+        let mut post = valid.clone();
+        post.method = "POST".to_owned();
+        assert!(!streamed_conversation_capture(&post));
+        let mut document = valid.clone();
+        document.resource_type = "Document".to_owned();
+        assert!(!streamed_conversation_capture(&document));
     }
 
     #[test]
