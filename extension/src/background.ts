@@ -12,6 +12,8 @@ const MAX_COMMIT_RECONNECT_ATTEMPTS = 4;
 const COMMIT_RECONNECT_BASE_DELAY_MS = 500;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_PASSIVE_CONVERSATION_BYTES = 32 * 1024 * 1024;
+const MAX_PASSIVE_SETUP_PENDING_BYTES = 2 * 1024 * 1024;
 const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
 const CDP_MAX_TOTAL_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_JSON_FRAME_BYTES = 1024 * 1024;
@@ -143,6 +145,17 @@ const detachingTabs = new Map<number, Promise<void>>();
 const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
+type PassiveConversationCapture = {
+  captureId: string;
+  setup: Promise<void>;
+  started: boolean;
+  bytes: number;
+  nextSequence: number;
+  pending: string[];
+  pendingBytes: number;
+  error?: string;
+};
+const passiveConversations = new Map<string, PassiveConversationCapture>();
 const webSockets = new Map<string, WebSocketMetadata>();
 const eventSourceSequences = new Map<string, number>();
 const pendingEventSourceLastEventIds = new Map<string, string>();
@@ -321,6 +334,9 @@ function clearTabState(tabId: number): void {
 
   for (const key of responses.keys()) {
     if (key.startsWith(prefix)) responses.delete(key);
+  }
+  for (const key of passiveConversations.keys()) {
+    if (key.startsWith(prefix)) passiveConversations.delete(key);
   }
 
   for (const key of webSockets.keys()) {
@@ -2280,6 +2296,125 @@ function captureEventSourceMessage(
   });
 }
 
+function isPassiveConversationCandidate(
+  request: RequestMetadata | undefined,
+  response: ResponseMetadata,
+): request is RequestMetadata {
+  if (
+    !request ||
+    request.method.toUpperCase() !== "GET" ||
+    request.hasPostData ||
+    request.postData !== undefined ||
+    response.status !== 200 ||
+    !["Fetch", "XHR"].includes(response.resourceType) ||
+    !response.mimeType.toLowerCase().includes("json")
+  ) return false;
+  try {
+    const url = new URL(response.url);
+    const id = url.pathname.match(/^\/backend-api\/conversation\/([a-zA-Z0-9_-]{1,128})$/);
+    return (
+      url.protocol === "https:" &&
+      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
+      url.search === "" &&
+      url.hash === "" &&
+      !!id &&
+      request.url === response.url &&
+      !shouldSuppressResponseBody(response.url)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function emitPassiveConversationChunk(
+  state: PassiveConversationCapture,
+  base64: string,
+): void {
+  if (state.error || base64.length === 0) return;
+  const length = base64DecodedByteLength(base64);
+  if (length === undefined) {
+    state.error = "suppressed:invalid_passive_stream_chunk";
+    return;
+  }
+  if (state.bytes + length > MAX_PASSIVE_CONVERSATION_BYTES) {
+    state.error = "suppressed:response_body_too_large";
+    return;
+  }
+  const chunkSize = BASE64_CHUNK_CHARS - (BASE64_CHUNK_CHARS % 4);
+  for (let offset = 0; offset < base64.length; offset += chunkSize) {
+    postNative({
+      type: "capture_chunk",
+      capture_id: state.captureId,
+      sequence: state.nextSequence,
+      data_base64: base64.slice(offset, offset + chunkSize),
+    });
+    state.nextSequence += 1;
+  }
+  state.bytes += length;
+}
+
+function queuePassiveConversationData(
+  state: PassiveConversationCapture,
+  data: string,
+): void {
+  if (state.error || data.length === 0) return;
+  if (state.started) {
+    emitPassiveConversationChunk(state, data);
+    return;
+  }
+  const bytes = base64DecodedByteLength(data);
+  if (
+    bytes === undefined ||
+    state.pendingBytes + bytes > MAX_PASSIVE_SETUP_PENDING_BYTES
+  ) {
+    state.error = "suppressed:passive_stream_setup_buffer_exceeded";
+    state.pending = [];
+    state.pendingBytes = 0;
+    return;
+  }
+  state.pending.push(data);
+  state.pendingBytes += bytes;
+}
+
+function beginPassiveConversationCapture(
+  tabId: number,
+  requestId: string,
+  request: RequestMetadata,
+  response: ResponseMetadata,
+): void {
+  const key = requestKey(tabId, requestId);
+  const state: PassiveConversationCapture = {
+    captureId: crypto.randomUUID(),
+    setup: Promise.resolve(),
+    started: false,
+    bytes: 0,
+    nextSequence: 0,
+    pending: [],
+    pendingBytes: 0,
+  };
+  passiveConversations.set(key, state);
+  state.setup = chrome.debugger.sendCommand(
+    { tabId },
+    "Network.streamResourceContent",
+    { requestId },
+  ).then((result) => {
+    if (passiveConversations.get(key) !== state) return;
+    const { bufferedData } = result as { bufferedData?: string };
+    postCaptureStart(tabId, requestId, state.captureId, request, response);
+    state.started = true;
+    emitPassiveConversationChunk(state, bufferedData ?? "");
+    for (const chunk of state.pending) {
+      emitPassiveConversationChunk(state, chunk);
+    }
+    state.pending = [];
+    state.pendingBytes = 0;
+  }).catch(() => {
+    // Unsupported streaming must fail open to the existing 16 MiB path.
+    state.pending = [];
+    state.pendingBytes = 0;
+  });
+}
+
 async function captureBody(
   tabId: number,
   requestId: string,
@@ -2289,6 +2424,24 @@ async function captureBody(
   if (!attachedTabs.has(tabId)) return;
 
   const key = requestKey(tabId, requestId);
+  const passive = passiveConversations.get(key);
+  if (passive) {
+    await passive.setup;
+    passiveConversations.delete(key);
+    if (passive.started) {
+      requests.delete(key);
+      responses.delete(key);
+      eventSourceSequences.delete(key);
+      pendingEventSourceLastEventIds.delete(key);
+      postNative({
+        type: "capture_finish",
+        capture_id: passive.captureId,
+        encoded_data_length: encodedDataLength,
+        body_error: failure ?? passive.error ?? null,
+      });
+      return;
+    }
+  }
   const request = requests.get(key);
   const response = responses.get(key);
   requests.delete(key);
@@ -2652,10 +2805,21 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       type: string;
       response: CdpResponse;
     };
-    responses.set(
-      requestKey(tabId, event.requestId),
-      responseMetadataFromCdp(event.response, event.type),
-    );
+    const response = responseMetadataFromCdp(event.response, event.type);
+    responses.set(requestKey(tabId, event.requestId), response);
+    const request = requests.get(requestKey(tabId, event.requestId));
+    if (isPassiveConversationCandidate(request, response)) {
+      beginPassiveConversationCapture(tabId, event.requestId, request, response);
+    }
+    return;
+  }
+
+  if (method === "Network.dataReceived") {
+    const event = params as { requestId: string; data?: string };
+    const passive = passiveConversations.get(requestKey(tabId, event.requestId));
+    if (passive && event.data) {
+      queuePassiveConversationData(passive, event.data);
+    }
     return;
   }
 
