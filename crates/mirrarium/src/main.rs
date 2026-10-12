@@ -280,6 +280,19 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&cache::private_coverage(&root)?)?
                 );
             }
+            Some("offline-index") => {
+                anyhow::ensure!(
+                    arguments.len() <= 3,
+                    "usage: mirrarium cache offline-index [LIMIT]"
+                );
+                let limit = arguments.get(2).map(|arg| arg.parse::<u64>())
+                    .transpose().context("offline-index limit must be an integer")?
+                    .unwrap_or(100);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&cache::offline_index(&root, limit)?)?
+                );
+            }
             Some("offline-conversation") => {
                 anyhow::ensure!(
                     arguments.len() == 3,
@@ -334,10 +347,10 @@ fn run() -> Result<()> {
                 );
             }
             Some(command) => anyhow::bail!(
-                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-conversation, or private-coverage"
+                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-index, offline-conversation, or private-coverage"
             ),
             None => anyhow::bail!(
-                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', or 'mirrarium cache private-coverage' or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>'"
+                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', 'mirrarium cache offline-index [LIMIT]', 'mirrarium cache private-coverage', or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>'"
             ),
         },
         Some("corpus") => match arguments.get(1).map(String::as_str) {
@@ -2042,6 +2055,7 @@ USAGE:
   mirrarium cache candidates [LIMIT]
   mirrarium cache public-coverage
   mirrarium cache private-reads [LIMIT]
+  mirrarium cache offline-index [LIMIT]
   mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>
   mirrarium cache private-coverage
   mirrarium corpus rebuild

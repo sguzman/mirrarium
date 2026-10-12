@@ -86,7 +86,8 @@ mirrarium cache revalidation-stats
 mirrarium cache candidates [limit]
 mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
-mirrarium cache offline-conversation <exact-captured-conversation-api-url>
+mirrarium cache offline-index [limit]
+mirrarium cache offline-conversation <chatgpt-conversation-url>
 mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
@@ -229,6 +230,24 @@ does not substitute stale private responses into the live site. HTTP
 historical archive reader can inspect raw captures even when validators are
 missing or a response was marked `no-store`. The next browser-facing
 milestone requires authenticated account separation and safe freshness rules.
+
+### Read-only offline conversation index
+
+\`mirrarium cache offline-index [limit]\` lists up to 1000 distinct captured
+conversation API identities (100 by default), newest first. Each entry
+contains the conversation ID, a normal \`/c/<id>\` link usable as the
+\`offline-conversation\` selector, the exact captured API URL, latest capture
+ID/time/body hash/byte count, and the number of completed response observations.
+It reads only encrypted-ledger **metadata**: no conversation bodies are
+decrypted, parsed, or emitted. No browser or network request is involved.
+
+**Important:** Index membership is not body-integrity certification. A listed
+capture may have a missing or damaged object; the explicit
+\`offline-conversation\` retrieval rechecks its index and SHA-256 and refuses
+corruption. The index is private account metadata (IDs and URLs), so do not
+publish its output or persist it in shared job logs. Multiple ChatGPT accounts
+can still be represented in one raw archive: this is not account-isolated
+automatic replay and must not be treated as proof of who is signed in.
 
 ## Chromium deployment diagnostics
 

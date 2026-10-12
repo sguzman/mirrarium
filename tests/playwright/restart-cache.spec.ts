@@ -234,6 +234,37 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     expect(archived.body_bytes).toBeGreaterThan(0);
     expect(await originCounts()).toEqual(offlineOriginBefore);
 
+    // The index is metadata-only, ordered by the latest observation, and
+    // immediately supplies usable browser-link selectors for the offline reader.
+    const listed = JSON.parse(await runCli(["cache", "offline-index", "50"])) as
+      Array<{
+        conversation_id: string;
+        chat_url: string;
+        api_url: string;
+        latest_capture_id: string;
+        latest_captured_at_ms: number;
+        latest_body_hash: string;
+        latest_body_bytes: number;
+        capture_count: number;
+      }>;
+    const indexed = listed.find((item) => item.api_url ===
+      fixtureOrigin + "/backend-api/conversation/test");
+    expect(indexed).toBeDefined();
+    expect(indexed).toMatchObject({
+      conversation_id: "test",
+      chat_url: fixtureOrigin + "/c/test",
+      latest_body_hash: archived.body_sha256,
+      latest_body_bytes: archived.body_bytes,
+    });
+    expect(indexed!.capture_count).toBeGreaterThan(0);
+    expect(await originCounts()).toEqual(offlineOriginBefore);
+    // The read-only index must never contain private response message text.
+    expect(JSON.stringify(listed)).not.toContain("private corpus material");
+    expect(JSON.stringify(listed)).not.toContain('"messages"');
+    expect(JSON.parse(await runCli(["cache", "offline-index", "1"]))).toHaveLength(1);
+    await expect(runCli(["cache", "offline-index", "0"]))
+      .rejects.toThrow("offline-index limit must be between 1 and 1000");
+
     const byChatLink = JSON.parse(
       await runCli(["cache", "offline-conversation", fixtureOrigin + "/c/test"])
     ) as typeof archived;

@@ -115,6 +115,104 @@ pub struct PrivateReadEntry {
     pub body: Vec<u8>,
 }
 
+/// Private archive *metadata*, not a verified response body. The explicit
+/// offline-conversation reader still checks the indexed object and its hash.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OfflineConversationIndexEntry {
+    pub conversation_id: String,
+    pub chat_url: String,
+    pub api_url: String,
+    pub latest_capture_id: String,
+    pub latest_captured_at_ms: u64,
+    pub latest_body_hash: String,
+    pub latest_body_bytes: u64,
+    pub capture_count: u64,
+}
+
+/// List the latest recorded complete GET JSON response per exact conversation
+/// API URL without decrypting message text or opening a second writer. The
+/// result is metadata-only: individual bodies require a verified explicit read.
+pub fn offline_index(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+) -> Result<Vec<OfflineConversationIndexEntry>> {
+    anyhow::ensure!(
+        (1..=1000).contains(&limit),
+        "offline-index limit must be between 1 and 1000"
+    );
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            capture_id, url, captured_at_ms, body_hash, body_bytes,
+            COUNT(*) OVER (PARTITION BY url) AS capture_count
+        FROM captures
+        WHERE privacy_class = 'private'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND lower(resource_type) IN ('fetch', 'xhr')
+          AND lower(mime_type) LIKE '%json%'
+          AND body_hash IS NOT NULL
+          AND body_error IS NULL
+          AND (
+              url LIKE 'https://chatgpt.com%/backend-api/conversation/%'
+              OR url LIKE 'https://chat.openai.com%/backend-api/conversation/%'
+          )
+        ORDER BY captured_at_ms DESC, rowid DESC
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for row in rows {
+        let (capture_id, raw_url, timestamp, body_hash, body_bytes, capture_count) = row?;
+        let Some(api_url) = offline_conversation_url(&raw_url) else {
+            continue;
+        };
+        // Exclude malformed or user-facing URL aliases stored as API captures.
+        // Unlike a normal /c/<id> link, the archive must contain the exact
+        // sanitized API identity that the offline reader can fetch.
+        if api_url.as_str() != raw_url || !seen.insert(raw_url.clone()) {
+            continue;
+        }
+        let conversation_id = api_url
+            .path()
+            .strip_prefix("/backend-api/conversation/")
+            .context("validated conversation URL lost its API path")?
+            .to_owned();
+        let mut chat_url = api_url.clone();
+        chat_url.set_path(&format!("/c/{conversation_id}"));
+        let timestamp: u64 = timestamp.try_into().context("negative offline-index timestamp")?;
+        let body_bytes: u64 = body_bytes.try_into().context("negative offline-index body length")?;
+        let capture_count: u64 = capture_count.try_into().context("negative offline-index observation count")?;
+        // Do not mark an entry verified: the user must explicitly request the
+        // body to enforce private object-index, CAS, and SHA-256 checks.
+        result.push(OfflineConversationIndexEntry {
+            conversation_id,
+            chat_url: chat_url.to_string(),
+            api_url: api_url.to_string(),
+            latest_capture_id: capture_id,
+            latest_captured_at_ms: timestamp,
+            latest_body_hash: body_hash,
+            latest_body_bytes: body_bytes,
+            capture_count,
+        });
+        if result.len() >= limit as usize {
+            break;
+        }
+    }
+    Ok(result)
+}
+
 /// Explicit, read-only retrieval of an already captured ChatGPT conversation
 /// JSON response. This never intercepts a browser request and never claims
 /// HTTP freshness; unlike conditional revalidation it needs no ETag.
@@ -2187,6 +2285,51 @@ mod tests {
         assert!(replayable_url("http://chatgpt.com/_next/static/replay.js").is_none());
         assert!(replayable_url("https://chatgpt.com/_next/static/replay.js?v=1").is_none());
         assert!(replayable_url("https://cdn.oaistatic.com/assets/replay.js?v=1").is_none());
+    }
+
+    #[test]
+    fn offline_index_is_latest_first_deduplicated_and_metadata_only() {
+        let (dir, db) = open_fixture();
+        let a = "https://chatgpt.com/backend-api/conversation/a";
+        let b = "https://chat.openai.com/backend-api/conversation/b";
+        for (id, when, url, method, status, resource, mime, privacy) in [
+            ("a1", 10, a, "GET", 200, "Fetch", "application/json", "private"),
+            ("a2", 20, a, "GET", 200, "XHR", "application/json", "private"),
+            ("b1", 30, b, "GET", 200, "Fetch", "application/json", "private"),
+            ("external", 99, "https://chatgpt.com.evil.test/backend-api/conversation/x", "GET", 200, "Fetch", "application/json", "private"),
+            ("query", 98, "https://chatgpt.com/backend-api/conversation/a?token=leak", "GET", 200, "Fetch", "application/json", "private"),
+            ("auth", 97, "https://chatgpt.com/backend-api/conversation/../auth", "GET", 200, "Fetch", "application/json", "private"),
+            ("post", 90, a, "POST", 200, "Fetch", "application/json", "private"),
+            ("failed", 89, a, "GET", 503, "Fetch", "application/json", "private"),
+            ("html", 88, a, "GET", 200, "Document", "text/html", "private"),
+            ("public", 87, a, "GET", 200, "Fetch", "application/json", "public"),
+        ] {
+            db.execute(
+                r#"INSERT INTO captures (
+                    capture_id, captured_at_ms, method, url, status, mime_type,
+                    resource_type, privacy_class, body_hash, body_bytes, body_error
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 17, NULL)"#,
+                params![id, when, method, url, status, mime, resource, privacy,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            ).unwrap();
+        }
+        let index = offline_index(dir.path(), 20).unwrap();
+        assert_eq!(index.len(), 2);
+        assert_eq!(index[0].conversation_id, "b");
+        assert_eq!(index[0].chat_url, "https://chat.openai.com/c/b");
+        assert_eq!(index[0].latest_capture_id, "b1");
+        assert_eq!(index[0].capture_count, 1);
+        assert_eq!(index[1].conversation_id, "a");
+        assert_eq!(index[1].chat_url, "https://chatgpt.com/c/a");
+        assert_eq!(index[1].latest_capture_id, "a2");
+        assert_eq!(index[1].latest_captured_at_ms, 20);
+        assert_eq!(index[1].capture_count, 2);
+        assert_eq!(offline_index(dir.path(), 1).unwrap(), index[..1]);
+        assert!(offline_index(dir.path(), 0).is_err());
+        assert!(offline_index(dir.path(), 1001).is_err());
+        // The index never reads bodies and makes no availability or integrity
+        // claim; an explicit verified read still refuses these missing CAS objects.
+        assert!(offline_conversation(dir.path(), a).is_err());
     }
 
     #[test]
