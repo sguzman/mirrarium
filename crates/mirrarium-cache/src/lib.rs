@@ -51,6 +51,36 @@ impl CacheReader {
         )
     }
 
+    /// Explicitly selected historical body for the same observed account,
+    /// with a separate conservative 16 MiB browser-substitution ceiling.
+    pub fn offline_lookup(
+        &self,
+        raw_url: &str,
+        raw_account_id: Option<&str>,
+    ) -> Result<Option<PrivateReadEntry>> {
+        let scope = self.archive_id.as_deref()
+            .zip(raw_account_id)
+            .and_then(|(archive_id, id)| mirrarium_store::account_scope_hash(archive_id, id));
+        let Some(scope) = scope else { return Ok(None); };
+        let Some(entry) = offline_conversation_scoped(&self.root, raw_url, Some(&scope))? else {
+            return Ok(None);
+        };
+        if entry.body_bytes > MAX_REPLAY_BODY_BYTES {
+            return Ok(None);
+        }
+        Ok(Some(PrivateReadEntry {
+            url: entry.url,
+            mime_type: "application/json".to_owned(),
+            body_hash: entry.body_hash,
+            body_bytes: entry.body_bytes,
+            captured_at_ms: entry.captured_at_ms,
+            cache_control: None,
+            etag: None,
+            last_modified: None,
+            body: entry.body,
+        }))
+    }
+
     pub fn lookup(
         &self,
         raw_url: &str,

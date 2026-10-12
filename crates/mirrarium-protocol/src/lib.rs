@@ -74,6 +74,13 @@ pub enum HostRequest {
         #[serde(default)]
         account_id: Option<String>,
     },
+    /// Explicit historical lookup; only account-matched responses qualify.
+    OfflineConversationLookup {
+        lookup_id: String,
+        url: String,
+        #[serde(default)]
+        account_id: Option<String>,
+    },
     /// Ask the raw ledger whether this capture ID already committed.
     /// Does not request, disclose, or retransmit any private body.
     CaptureCommitProbe {

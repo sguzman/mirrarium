@@ -212,6 +212,41 @@ fn run_native_host() -> Result<()> {
                     lookup_id,
                     &url,
                     account_id.as_deref(),
+                    false,
+                )?;
+            }
+            Ok(HostRequest::OfflineConversationLookup { lookup_id, url, account_id }) => {
+                if cache_reader.is_none() {
+                    match open_cache_reader_if_present(&root) {
+                        Ok(Some(reader)) => cache_reader = Some(reader),
+                        Ok(None) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::PrivateReadMiss { lookup_id },
+                            )?;
+                            continue;
+                        }
+                        Err(error) => {
+                            write_native_response(
+                                &mut output,
+                                &HostResponse::PrivateReadLookupError {
+                                    lookup_id,
+                                    message: format!("{error:#}"),
+                                },
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+                write_private_read_lookup_responses(
+                    &mut output,
+                    cache_reader
+                        .as_ref()
+                        .expect("cache reader initialized above"),
+                    lookup_id,
+                    &url,
+                    account_id.as_deref(),
+                    true,
                 )?;
             }
             Ok(request) => {
@@ -310,8 +345,13 @@ fn write_private_read_lookup_responses(
     lookup_id: String,
     url: &str,
     account_id: Option<&str>,
+    explicit_offline: bool,
 ) -> Result<()> {
-    let entry = match cache_reader.private_lookup(url, account_id) {
+    let entry = match if explicit_offline {
+        cache_reader.offline_lookup(url, account_id)
+    } else {
+        cache_reader.private_lookup(url, account_id)
+    } {
         Ok(entry) => entry,
         Err(error) => {
             return write_native_response(
@@ -382,6 +422,7 @@ fn request_capture_id(request: &HostRequest) -> Option<String> {
         | HostRequest::ExtensionRuntimeState { .. }
         | HostRequest::CacheLookup { .. }
         | HostRequest::PrivateReadLookup { .. }
+        | HostRequest::OfflineConversationLookup { .. }
         | HostRequest::CaptureCommitProbe { .. }
         | HostRequest::CacheReplayOutcome { .. }
         | HostRequest::PrivateRevalidationOutcome { .. } => None,
@@ -432,6 +473,12 @@ fn handle_request(store: &mut CaptureStore, request: HostRequest) -> HostRespons
             return HostResponse::CacheLookupError {
                 lookup_id,
                 message: "cache lookup must be handled by the streaming response path".to_owned(),
+            };
+        }
+        HostRequest::OfflineConversationLookup { lookup_id, .. } => {
+            return HostResponse::PrivateReadLookupError {
+                lookup_id,
+                message: "offline conversation lookup requires the read-only path".to_owned(),
             };
         }
         HostRequest::PrivateReadLookup { lookup_id, .. } => {
@@ -1057,6 +1104,7 @@ mod tests {
             "private-lookup-1".to_owned(),
             "https://chatgpt.com/backend-api/conversation/private",
             Some("fixture-account"),
+            false,
         )
         .unwrap();
 
