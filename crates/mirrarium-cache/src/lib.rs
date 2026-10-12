@@ -1731,6 +1731,12 @@ mod tests {
         connection
             .execute_batch(
                 r#"
+                CREATE TABLE archive_identity (
+                    singleton INTEGER PRIMARY KEY,
+                    archive_id TEXT NOT NULL
+                );
+                INSERT INTO archive_identity (singleton, archive_id)
+                VALUES (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
                 CREATE TABLE objects (
                     storage_class TEXT NOT NULL,
                     hash TEXT NOT NULL,
@@ -1767,12 +1773,31 @@ mod tests {
                     cache_control TEXT,
                     etag TEXT,
                     last_modified TEXT,
-                    body_error TEXT
+                    body_error TEXT,
+                    provenance_json TEXT NOT NULL DEFAULT '{}'
                 );
                 "#,
             )
             .unwrap();
         (directory, connection)
+    }
+
+
+    fn scope_capture(connection: &Connection, capture_id: &str, account_id: &str) {
+        let hash = mirrarium_store::account_scope_hash(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            account_id,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE captures SET provenance_json = ?1 WHERE capture_id = ?2",
+                params![
+                    serde_json::json!({"account_scope_hash": hash}).to_string(),
+                    capture_id,
+                ],
+            )
+            .unwrap();
     }
 
     fn insert_capture(
@@ -2404,7 +2429,7 @@ mod tests {
 
         // An explicit archive read is NOT a network replay. Missing validators
         // and no-store prevent automatic substitution, but not manual export.
-        assert!(private_lookup(directory.path(), url).unwrap().is_none());
+        assert!(private_lookup(directory.path(), url, Some("fixture-account")).unwrap().is_none());
         for invalid in [
             "https://evil.example/backend-api/conversation/synthetic",
             "http://chatgpt.com/backend-api/conversation/synthetic",
@@ -2479,14 +2504,27 @@ mod tests {
             )
             .unwrap();
 
+        scope_capture(&connection, "private-lookup", "fixture-account");
         let entry = private_lookup(
             directory.path(),
             "https://chatgpt.com/backend-api/conversation/a",
+            Some("fixture-account"),
         )
         .unwrap()
         .unwrap();
         assert_eq!(entry.body, body);
         assert_eq!(entry.body_hash, hash);
+        // Cache reuse is not authorized by URL alone.
+        assert!(private_lookup(
+            directory.path(),
+            "https://chatgpt.com/backend-api/conversation/a",
+            None,
+        ).unwrap().is_none());
+        assert!(private_lookup(
+            directory.path(),
+            "https://chatgpt.com/backend-api/conversation/a",
+            Some("another-account"),
+        ).unwrap().is_none());
         assert_eq!(entry.etag.as_deref(), Some("\"fixture-v1\""));
         assert_eq!(entry.captured_at_ms, 10);
     }
@@ -2529,16 +2567,17 @@ mod tests {
                     params![id, timestamp, url, hash, body.len() as i64, etag],
                 )
                 .unwrap();
+            scope_capture(&connection, id, "fixture-account");
         };
 
         write_version("live-v1", 10, "\"live-v1\"", br#"{"version":1}"#);
         let reader = CacheReader::open(directory.path()).unwrap();
-        let first = reader.private_lookup(url).unwrap().unwrap();
+        let first = reader.private_lookup(url, Some("fixture-account")).unwrap().unwrap();
         assert_eq!(first.etag.as_deref(), Some("\"live-v1\""));
         assert_eq!(first.body, br#"{"version":1}"#);
 
         write_version("live-v2", 20, "\"live-v2\"", br#"{"version":2}"#);
-        let second = reader.private_lookup(url).unwrap().unwrap();
+        let second = reader.private_lookup(url, Some("fixture-account")).unwrap().unwrap();
         assert_eq!(second.etag.as_deref(), Some("\"live-v2\""));
         assert_eq!(second.body, br#"{"version":2}"#);
     }
@@ -2601,7 +2640,8 @@ mod tests {
             )
             .unwrap();
 
-        let entry = private_lookup(directory.path(), "https://chatgpt.com/")
+        scope_capture(&connection, "private-html", "fixture-account");
+        let entry = private_lookup(directory.path(), "https://chatgpt.com/", Some("fixture-account"))
             .unwrap()
             .unwrap();
         assert_eq!(entry.body, body);
@@ -2633,13 +2673,15 @@ mod tests {
 
         assert!(private_lookup(
             directory.path(),
-            "https://chatgpt.com/backend-api/conversation/no-store"
+            "https://chatgpt.com/backend-api/conversation/no-store",
+            Some("fixture-account"),
         )
         .unwrap()
         .is_none());
         assert!(private_lookup(
             directory.path(),
-            "https://chatgpt.com/backend-api/conversation/no-validator"
+            "https://chatgpt.com/backend-api/conversation/no-validator",
+            Some("fixture-account"),
         )
         .unwrap()
         .is_none());
@@ -2657,7 +2699,8 @@ mod tests {
         .is_none());
         assert!(private_lookup(
             directory.path(),
-            "https://chatgpt.com/api/auth/session"
+            "https://chatgpt.com/api/auth/session",
+            Some("fixture-account"),
         )
         .unwrap()
         .is_none());
