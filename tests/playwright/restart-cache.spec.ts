@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -51,6 +51,20 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     (await fetch("http://127.0.0.1:43118/private-revalidation-counts").then((r) => r.json())) as OriginCounts;
   const replayCounts = async (): Promise<ReplayCounts> =>
     (await fetch("http://127.0.0.1:43118/replay-counts").then((r) => r.json())) as ReplayCounts;
+  type Doctor = {
+    installation_ready: boolean;
+    live_browser_verified: boolean;
+    extension: { installed: boolean; valid: boolean; error: string | null };
+    native_host: { installed: boolean; valid: boolean; error: string | null };
+    archive: {
+      present: boolean;
+      readable: boolean;
+      captures: number | null;
+      private_captures: number | null;
+    };
+  };
+  const doctor = async (): Promise<Doctor> =>
+    JSON.parse(await runCli(["doctor", "chrome-for-testing"])) as Doctor;
 
   const launch = () =>
     chromium.launchPersistentContext(profile, {
@@ -112,8 +126,38 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     await mkdir(browserHome, { recursive: true });
     await mkdir(profile, { recursive: true });
     await mkdir(dataDir, { recursive: true });
+    const beforeInstall = await doctor();
+    expect(beforeInstall).toMatchObject({
+      installation_ready: false,
+      live_browser_verified: false,
+      extension: { installed: false, valid: false },
+      native_host: { installed: false, valid: false },
+      archive: { present: false, readable: false, captures: null },
+    });
     await runCli(["extension", "install", resolve("extension/dist")]);
     await runCli(["native-host", "install", "chrome-for-testing", daemon]);
+    const ready = await doctor();
+    expect(ready).toMatchObject({
+      installation_ready: true,
+      live_browser_verified: false,
+      extension: { installed: true, valid: true },
+      native_host: { installed: true, valid: true },
+      archive: { present: false, readable: false },
+    });
+
+    // A native-host manifest that points at another extension must never be
+    // reported as ready, even if its binary is present and executable.
+    const manifestFile = join(profile, "NativeMessagingHosts", "com.sguzman.mirrarium.json");
+    const originalManifest = await readFile(manifestFile, "utf8");
+    const poisonedManifest = JSON.parse(originalManifest) as { allowed_origins: string[] };
+    poisonedManifest.allowed_origins = ["chrome-extension://another-extension/"];
+    await writeFile(manifestFile, JSON.stringify(poisonedManifest));
+    const mismatched = await doctor();
+    expect(mismatched.installation_ready).toBe(false);
+    expect(mismatched.native_host.valid).toBe(false);
+    expect(mismatched.native_host.error).toContain("not restricted to the Mirrarium extension ID");
+    await writeFile(manifestFile, originalManifest);
+    expect((await doctor()).installation_ready).toBe(true);
 
     context = await launch();
     const firstPage = await openReadyPage(context);
@@ -147,6 +191,14 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     // Verify that the archive is readable without a running Chromium process
     // or native-host writer, rather than relying on in-memory extension state.
     await runCli(["verify"]);
+    const afterShutdown = await doctor();
+    expect(afterShutdown).toMatchObject({
+      installation_ready: true,
+      live_browser_verified: false,
+      archive: { present: true, readable: true },
+    });
+    expect(afterShutdown.archive.captures).toBeGreaterThan(0);
+    expect(afterShutdown.archive.private_captures).toBeGreaterThan(0);
     const persisted = (await privateReads()).find((entry) =>
       entry.url.endsWith("/backend-api/conversation/test")
     );
