@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mirrarium local conversation mode</title>
+<style>
+  html { color-scheme: dark; font-family: system-ui, sans-serif; }
+  body { width: 310px; margin: 0; padding: 18px; line-height: 1.5; }
+  h1 { font-size: 1.1rem; margin: 0 0 10px; }
+  p { font-size: .85rem; }
+  button { width: 100%; padding: 10px; font: inherit; cursor: pointer; }
+  #status { font-weight: 700; }
+  .caution { color: #c1c8d4; }
+</style>
+</head>
+<body>
+<h1>Mirrarium</h1>
+<p id="status">Checking this tab...</p>
+<button id="toggle" disabled>Enable historical reuse</button>
+<p class="caution">Off by default. When enabled, cached conversation JSON for this account can replace a network response in this tab. Snapshots may be stale. Missing captures fall back to the network. Closing this tab or restarting the extension turns it off.</p>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

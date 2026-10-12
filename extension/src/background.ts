@@ -12,6 +12,7 @@ const MAX_COMMIT_RECONNECT_ATTEMPTS = 4;
 const COMMIT_RECONNECT_BASE_DELAY_MS = 500;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+const OFFLINE_LOOKUP_TIMEOUT_MS = 4_000;
 const MAX_PASSIVE_CONVERSATION_BYTES = 32 * 1024 * 1024;
 const MAX_PASSIVE_SETUP_PENDING_BYTES = 2 * 1024 * 1024;
 const CDP_MAX_RESOURCE_BUFFER_BYTES = MAX_RESPONSE_BODY_BYTES + 4 * 1024 * 1024;
@@ -132,6 +133,10 @@ type CdpResponse = {
   headers?: Record<string, string | number>;
 };
 
+// Explicit per-tab historical mode. Volatile by design: an MV3 worker
+// restart or closing/leaving the tab disables it rather than persisting
+// authorization to substitute private data.
+const offlineEnabledTabs = new Set<number>();
 const attachedTabs = new Set<number>();
 // A tab can navigate away while debugger.attach/Network.enable/Fetch.enable
 // are still pending. Cancellation must work before attachedTabs is populated.
@@ -942,6 +947,7 @@ function lookupCachedResponse(
 function lookupPrivateRead(
   url: string,
   accountId: string | undefined,
+  explicitOffline = false,
 ): Promise<PrivateReadHit | null> {
   // Never request a private body when the active request lacks a stable
   // account identity. This also makes old unscoped archives miss safely.
@@ -955,7 +961,7 @@ function lookupPrivateRead(
   return new Promise((resolve) => {
     const timeoutId = setTimeout(() => {
       finishPrivateReadLookup(lookupId, null);
-    }, CACHE_LOOKUP_TIMEOUT_MS);
+    }, explicitOffline ? OFFLINE_LOOKUP_TIMEOUT_MS : CACHE_LOOKUP_TIMEOUT_MS);
     pendingPrivateReadLookups.set(lookupId, {
       port,
       resolve,
@@ -967,7 +973,7 @@ function lookupPrivateRead(
 
     try {
       port.postMessage({
-        type: "private_read_lookup",
+        type: explicitOffline ? "offline_conversation_lookup" : "private_read_lookup",
         lookup_id: lookupId,
         url,
         account_id: accountId,
@@ -1241,6 +1247,77 @@ async function finishPrivateRevalidation(
   }
 }
 
+function isExactOfflineConversationRequest(
+  urlText: string,
+  method: string,
+  resourceType: string | undefined,
+): boolean {
+  if (
+    method.toUpperCase() !== "GET" ||
+    !resourceType ||
+    !["fetch", "xhr"].includes(resourceType.toLowerCase())
+  ) return false;
+  try {
+    const url = new URL(urlText);
+    return url.protocol === "https:" &&
+      (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com") &&
+      url.username === "" && url.password === "" &&
+      url.search === "" && url.hash === "" &&
+      /^\/backend-api\/conversation\/[a-zA-Z0-9_-]{1,128}$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function setOfflineBadge(tabId: number, enabled: boolean): Promise<void> {
+  try {
+    await chrome.action.setBadgeText({ tabId, text: enabled ? "LOCAL" : "" });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#54687c" });
+    await chrome.action.setTitle({
+      tabId,
+      title: enabled
+        ? "Mirrarium: historical conversation reuse ON (this tab only)"
+        : "Mirrarium: historical conversation reuse OFF",
+    });
+  } catch {
+    // Tab may have closed before badge update completed.
+  }
+}
+
+async function serveExplicitOfflineConversation(
+  tabId: number,
+  event: {
+    requestId: string;
+    request: { method: string; url: string; headers?: Record<string, string> };
+  },
+): Promise<void> {
+  const id = header(event.request.headers, "ChatGPT-Account-Id");
+  // No account identity means no historical private substitution.
+  const hit = await lookupPrivateRead(event.request.url, id, true);
+  if (!offlineEnabledTabs.has(tabId) || !hit ||
+      hit.bodyBytes > MAX_RESPONSE_BODY_BYTES ||
+      hit.mimeType.toLowerCase() !== "application/json") {
+    await continuePausedRequest(tabId, event.requestId);
+    return;
+  }
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Fetch.fulfillRequest", {
+      requestId: event.requestId,
+      responseCode: 200,
+      responsePhrase: "OK",
+      responseHeaders: [
+        { name: "Content-Type", value: "application/json" },
+        { name: "Cache-Control", value: "private, no-store" },
+        { name: "X-Mirrarium-Offline", value: "historical" },
+      ],
+      body: hit.bodyBase64,
+    });
+  } catch {
+    // Browser must keep normal network behavior when replay fails.
+    await continuePausedRequest(tabId, event.requestId);
+  }
+}
+
 async function handlePausedRequest(
   tabId: number,
   event: {
@@ -1265,6 +1342,12 @@ async function handlePausedRequest(
   }
 
   const resourceType = event.resourceType ?? "";
+  if (offlineEnabledTabs.has(tabId) && isExactOfflineConversationRequest(
+    event.request.url, event.request.method, resourceType,
+  )) {
+    await serveExplicitOfflineConversation(tabId, event);
+    return;
+  }
   if (
     isPrivateRevalidationCandidate(
       event.request.url,
@@ -2593,6 +2676,38 @@ async function captureBody(
   }
 }
 
+chrome.runtime.onMessage.addListener((message: unknown, sender, reply) => {
+  // Only the bundled extension popup can change historical replay policy.
+  if (sender.id !== chrome.runtime.id ||
+      sender.url !== chrome.runtime.getURL("popup.html") ||
+      typeof message !== "object" || message === null) return;
+  const command = message as { type?: string; tab_id?: number };
+  if (!Number.isSafeInteger(command.tab_id) || (command.tab_id ?? -1) < 0) return;
+  const tabId = command.tab_id!;
+  if (command.type !== "mirrarium_local_mode_status" &&
+      command.type !== "mirrarium_local_mode_toggle") return;
+  void (async () => {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    const supported = isSupportedChatGptUrl(tab?.url);
+    if (!supported) {
+      offlineEnabledTabs.delete(tabId);
+      reply({ supported: false, enabled: false });
+      return;
+    }
+    if (command.type === "mirrarium_local_mode_toggle") {
+      if (offlineEnabledTabs.has(tabId)) {
+        offlineEnabledTabs.delete(tabId);
+      } else {
+        offlineEnabledTabs.add(tabId);
+      }
+    }
+    const enabled = offlineEnabledTabs.has(tabId);
+    await setOfflineBadge(tabId, enabled);
+    reply({ supported: true, enabled });
+  })().catch(() => reply({ supported: false, enabled: false }));
+  return true;
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   checkInstalledExtensionVersion();
 });
@@ -2609,6 +2724,8 @@ chrome.debugger.onDetach.addListener((source) => {
     fetchSetupTabs.delete(source.tabId);
     attachedTabs.delete(source.tabId);
     clearTabState(source.tabId);
+    offlineEnabledTabs.delete(source.tabId);
+    void setOfflineBadge(source.tabId, false);
   }
 });
 
@@ -2888,6 +3005,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const url = changeInfo.url ?? tab.url;
 
   if (changeInfo.url && !isSupportedChatGptUrl(changeInfo.url)) {
+    offlineEnabledTabs.delete(tabId);
+    void setOfflineBadge(tabId, false);
     void detach(tabId);
     return;
   }
@@ -2908,6 +3027,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  offlineEnabledTabs.delete(tabId);
   const pending = pendingAttachTabs.get(tabId);
   if (pending) {
     pending.cancelled = true;
@@ -2920,6 +3040,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 void chrome.tabs.query({}).then((tabs) => {
   for (const tab of tabs) {
+    if (tab.id !== undefined) void setOfflineBadge(tab.id, false);
     if (tab.id !== undefined && isSupportedChatGptUrl(tab.url)) {
       void attach(tab.id, tab.url);
     }

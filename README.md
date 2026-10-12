@@ -316,7 +316,26 @@ under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated
 offline mirror. **Do not export into public repos or synced/shared folders.**
 
-### Passive streaming for large conversation responses
+### Opt-in historical conversation reuse inside Chromium
+
+The extension toolbar popup now offers **Enable historical reuse**, OFF by
+default and scoped to the active ChatGPT tab. While enabled, an exact
+`GET /backend-api/conversation/<id>` Fetch/XHR request can receive the latest
+locally archived JSON body for the **same request account ID**, without
+contacting ChatGPT for that conversation API response. The native host verifies
+the encrypted object hash before transmitting it. Unmatched accounts, absent
+account headers, missing snapshots, unsupported URLs, and oversized (over
+16 MiB) playback candidates fall back to the normal website request. Sending
+messages and all other API paths are excluded.
+
+The popup and toolbar badge say when the mode is enabled. It is an explicit,
+historical, potentially stale read, not HTTP freshness validation. The toggle
+is ephemeral (per tab, reset on close, navigation away, extension restart, or
+debugger detach); it is never enabled automatically. It does not make the
+entire ChatGPT website work offline: authentication and site resources may still
+need network access.
+
+## Passive streaming for large conversation responses
 
 Mirrarium now attempts `Network.streamResourceContent` for successful JSON
 `GET /backend-api/conversation/<id>` responses on supported ChatGPT hosts.

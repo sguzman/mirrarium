@@ -204,3 +204,12 @@ unaltered response. The extension/native-host browser-restart test additionally
 retrieves this >16 MiB response with Mirrarium installed, checks encrypted
 archive metadata contains its complete body, and verifies the archive after
 browser shutdown. All unrelated response classes remain 16 MiB-limited.
+
+## Opt-in historical conversation reuse
+
+The toolbar popup enables local-first playback only for a chosen ChatGPT tab.
+The native read-only command verifies matching archive-local account
+fingerprints and encrypted body integrity before the extension can fulfill
+an exact conversation GET. Missing captures, a different account, other
+endpoints, and disabled mode continue to use the original network.
+No plaintext conversation is persisted in the popup, browser storage, or logs.

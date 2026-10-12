@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 const dist = new URL("../dist/", import.meta.url);
 const sourceManifest = new URL("../manifest.json", import.meta.url);
 const background = new URL("background.js", dist);
+const sourcePopup = new URL("../popup.html", import.meta.url);
 
 await mkdir(dist, { recursive: true });
 
@@ -18,6 +19,7 @@ const buildHash = createHash("sha256")
 
 manifest.version_name = `${manifest.version}+${buildHash}`;
 
+await writeFile(new URL("popup.html", dist), await readFile(sourcePopup));
 await writeFile(
   new URL("manifest.json", dist),
   JSON.stringify(manifest, null, 2) + "\n",
