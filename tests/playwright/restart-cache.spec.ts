@@ -234,6 +234,12 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     expect(archived.body_bytes).toBeGreaterThan(0);
     expect(await originCounts()).toEqual(offlineOriginBefore);
 
+    const byChatLink = JSON.parse(
+      await runCli(["cache", "offline-conversation", fixtureOrigin + "/c/test"])
+    ) as typeof archived;
+    expect(byChatLink).toEqual(archived);
+    expect(await originCounts()).toEqual(offlineOriginBefore);
+
     // Restrict the explicit reader to exact ChatGPT conversation API URLs.
     await expect(
       runCli(["cache", "offline-conversation", fixtureOrigin + "/backend-api/auth/session"])

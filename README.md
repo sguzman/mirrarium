@@ -201,12 +201,15 @@ The derived corpus is explicitly schema-versioned (currently internal schema v7;
 
 ## Explicit offline conversation snapshot read
 
-`mirrarium cache offline-conversation https://chatgpt.com/backend-api/conversation/<id>`
-reads the **latest complete captured JSON response** for that exact ChatGPT
-conversation API URL directly from the encrypted local archive, without opening
-Chromium, contacting ChatGPT, or requiring a published derived-corpus rebuild.
-Use the exact origin, optional port, and URL that were captured; it also
-supports `https://chat.openai.com/backend-api/conversation/<id>`.
+`mirrarium cache offline-conversation https://chatgpt.com/c/<id>`
+reads the **latest complete captured JSON response** for the corresponding
+ChatGPT conversation API URL directly from the encrypted local archive, without
+opening Chromium, contacting ChatGPT, or requiring a published derived-corpus
+rebuild. The command also accepts exact captured
+`https://chatgpt.com/backend-api/conversation/<id>` URLs and the same forms
+on `https://chat.openai.com`. Use the captured account's exact origin and
+optional port; a regular `/c/<id>` browser link is resolved locally to the
+equivalent API path.
 
 The returned JSON envelope includes the capture ID, capture time, verified body
 hash and byte count, `offline: true`, `freshness_verified: false`, and the

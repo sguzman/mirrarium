@@ -212,7 +212,7 @@ pub fn offline_conversation(
 }
 
 fn offline_conversation_url(raw_url: &str) -> Option<Url> {
-    let url = Url::parse(raw_url).ok()?;
+    let mut url = Url::parse(raw_url).ok()?;
     if url.scheme() != "https"
         || !matches!(url.host_str()?, "chatgpt.com" | "chat.openai.com")
         || !url.username().is_empty()
@@ -222,12 +222,21 @@ fn offline_conversation_url(raw_url: &str) -> Option<Url> {
     {
         return None;
     }
-    let id = url.path().strip_prefix("/backend-api/conversation/")?;
+    // Normal ChatGPT /c/<id> links are a user-facing alias for the archived
+    // GET /backend-api/conversation/<id> request. No network is consulted.
+    let (id, frontend_link) = if let Some(id) = url.path().strip_prefix("/c/") {
+        (id.to_owned(), true)
+    } else {
+        (url.path().strip_prefix("/backend-api/conversation/")?.to_owned(), false)
+    };
     if id.is_empty()
         || id.len() > 128
         || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
     {
         return None;
+    }
+    if frontend_link {
+        url.set_path(&format!("/backend-api/conversation/{id}"));
     }
     Some(url)
 }
@@ -2214,6 +2223,13 @@ mod tests {
         assert_eq!(hit.body_bytes, second_body.len() as u64);
         assert_eq!(hit.body_hash, format!("{:x}", Sha256::digest(second_body)));
 
+        let ordinary_link = "https://chatgpt.com:43117/c/synthetic";
+        let by_link = offline_conversation(directory.path(), ordinary_link)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_link, hit);
+        assert_eq!(by_link.url, url);
+
         // An explicit archive read is NOT a network replay. Missing validators
         // and no-store prevent automatic substitution, but not manual export.
         assert!(private_lookup(directory.path(), url).unwrap().is_none());
@@ -2224,6 +2240,9 @@ mod tests {
             "https://chatgpt.com/backend-api/conversation/../auth",
             "https://chatgpt.com/backend-api/conversation/",
             "https://chatgpt.com/backend-api/conversations",
+            "https://chatgpt.com/c/synthetic?token=secret",
+            "https://chatgpt.com/c/synthetic/extra",
+            "https://chatgpt.com/c/",
         ] {
             assert!(offline_conversation_url(invalid).is_none(), "{invalid}");
         }
