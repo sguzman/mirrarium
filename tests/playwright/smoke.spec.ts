@@ -753,8 +753,10 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         });
         const reloaded = await page.reload({ waitUntil: "load" });
         expect(reloaded?.status()).toBe(200);
-        expect(reloaded?.headers()["x-mirrarium-revalidated"]).toBe("hit");
-        expect(reloaded?.headers()["x-mirrarium-origin-304"]).toBe("preserved");
+        // A top-level navigation carries no ChatGPT account header, so
+        // private HTML is deliberately fetched from the origin.
+        expect(reloaded?.headers()["x-mirrarium-revalidated"]).toBeUndefined();
+        expect(reloaded?.headers()["x-mirrarium-origin-304"]).toBeUndefined();
         await expect(page).toHaveTitle("Mirrarium fixture");
         await expect
           .poll(() => page.locator("body").getAttribute("data-ready"))
@@ -771,7 +773,7 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
       };
       expect(documentCountsAfter.total).toBe(documentCountsBefore.total + 1);
       expect(documentCountsAfter.conditional_304).toBe(
-        documentCountsBefore.conditional_304 + 1,
+        documentCountsBefore.conditional_304,
       );
 
       const { stdout: privateCoverageStdout } = await execFileAsync(
@@ -1083,6 +1085,23 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
         expect(privateCountsAfter.conditional_304).toBe(
           privateCountsBefore.conditional_304 + 2,
         );
+        // Same URL and ETag do not authorize reuse under a different account.
+        // The fixture wrapper preserves this explicitly supplied identity.
+        const otherAccount = await page.evaluate(async () => {
+          const response = await fetch("/backend-api/conversation/test", {
+            cache: "no-store",
+            headers: { "ChatGPT-Account-Id": "fixture-second-account" },
+          });
+          return {
+            status: response.status,
+            marker: response.headers.get("x-mirrarium-revalidated"),
+            body: await response.json(),
+          };
+        });
+        expect(otherAccount.status).toBe(200);
+        expect(otherAccount.marker).toBeNull();
+        expect(otherAccount.body.version).toBe(2);
+
 
         const scriptHit = page.waitForResponse(
           (response) =>

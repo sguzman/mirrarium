@@ -186,7 +186,7 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     });
 
     const first = await firstPage.evaluate(async () => {
-      const response = await fetch("/backend-api/conversation/test", { cache: "no-store" });
+      const response = await fetch("/backend-api/conversation/test", { cache: "no-store", headers: { "ChatGPT-Account-Id": "fixture-account" } });
       return response.json() as Promise<{
         id: string;
         version: number;
@@ -393,7 +393,7 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
       // Normal private reads still contact the origin. Only an origin 304 may
       // authorize substituting the verified local body for a 200 response.
       const reused = await reopenedPage.evaluate(async () => {
-        const response = await fetch("/backend-api/conversation/test", { cache: "no-store" });
+        const response = await fetch("/backend-api/conversation/test", { cache: "no-store", headers: { "ChatGPT-Account-Id": "fixture-account" } });
         return {
           status: response.status,
           marker: response.headers.get("x-mirrarium-revalidated"),

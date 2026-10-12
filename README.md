@@ -202,6 +202,27 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 
 The derived corpus is explicitly schema-versioned (currently internal schema v7; the conversation export wire remains v1). Schema v5 introduced materialization of the exact v1 `record_sha256` for every exported conversation during rebuild, using the same pinned raw-ledger snapshot as derivation; rebuild and `corpus verify` recompute those records and reject any cached-hash disagreement. When the rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors. `corpus verify` is a read-only integrity pass over the encrypted derived database: it runs SQLite integrity and foreign-key checks; validates whole-response SSE counts, sequence shape, and JSON markers; cross-checks conversation snapshots, message observations, stream revisions/reconstructions, attachment observations, and captured downloads against the authoritative raw ledger; and also verifies WebSocket/EventSource stream counts, transport semantics, skipped/derived separation, reconnect edges, JSON consistency, raw capture/hash/URL/direction provenance, and the materialized export identity index.
 
+
+## Private cache account binding
+
+Private revalidation now requires the active request's explicit
+`ChatGPT-Account-Id` header and a matching account fingerprint stored with
+the captured response. The fingerprint is SHA-256 with the raw archive's
+random identity as a domain separator, so it is not a reusable account ID
+across independent archives. The raw header is handled only transiently over
+Native Messaging and is redacted from persisted provenance. Private cache
+lookups without an identity, with an unknown identity, or with a different
+identity **fail open to the network**. This includes old captures that lack
+the new fingerprint, so they remain available for explicit offline export
+but are not automatically substituted.
+
+Top-level document navigations generally do not include this header; private
+HTML revalidation therefore currently fails open to the origin rather than
+guessing an account from the active tab. Public immutable static replay is
+unchanged. The account-binding check protects conditional private
+revalidation; it does **not** yet authorize unconditional/offline private
+replay or imply that one archive holds only one account's historical data.
+
 ## Explicit offline conversation snapshot read
 
 `mirrarium cache offline-conversation https://chatgpt.com/c/<id>`

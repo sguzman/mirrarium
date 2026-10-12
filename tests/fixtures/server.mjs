@@ -89,6 +89,20 @@ const page = `<!doctype html>
 ${stressScriptTags}
 <script src="https://cdn.oaistatic.com:43117/assets/cdn-app.js"></script>
 <script>
+// Apply an explicit synthetic account identity to fixture API requests.
+const fixtureFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+  if (url.startsWith("/backend-api/") ||
+      url.startsWith("https://chatgpt.com:43117/backend-api/")) {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    if (!headers.has("ChatGPT-Account-Id")) {
+      headers.set("ChatGPT-Account-Id", "fixture-account");
+    }
+    return fixtureFetch(input, { ...init, headers });
+  }
+  return fixtureFetch(input, init);
+};
 const requestMessage = ["hello", "from", "request", "body"].join(" ");
 const requestSecret = ["fixture", "secret", "token"].join("-");
 const redirectPostSecret = ["fixture", "redirect", "post", "secret"].join("-");
