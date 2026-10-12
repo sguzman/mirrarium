@@ -295,6 +295,81 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&cache::offline_index(&root, limit)?)?
                 );
             }
+            Some("offline-library") => {
+                anyhow::ensure!(
+                    (3..=4).contains(&arguments.len()),
+                    "usage: mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT]"
+                );
+                let limit = arguments.get(3).map(|value| value.parse::<u64>())
+                    .transpose().context("offline-library limit must be an integer")?
+                    .unwrap_or(25);
+                anyhow::ensure!(
+                    (1..=100).contains(&limit),
+                    "offline-library limit must be between 1 and 100"
+                );
+                let entries = cache::offline_index(&root, limit)?;
+                anyhow::ensure!(!entries.is_empty(), "no archived conversation snapshots found");
+                let destination = PathBuf::from(&arguments[2]);
+                offline_view::create_private_library_directory(&destination)?;
+                let mut generated = Vec::<PathBuf>::new();
+                let export = (|| -> Result<(usize, usize)> {
+                    let mut listing = Vec::new();
+                    let mut total_messages = 0usize;
+                    for (index, item) in entries.iter().enumerate() {
+                        let capture = cache::offline_conversation(&root, &item.api_url)?
+                            .with_context(|| format!(
+                                "archived snapshot unavailable for conversation {}",
+                                item.conversation_id
+                            ))?;
+                        let response: serde_json::Value = serde_json::from_slice(&capture.body)
+                            .context("archived conversation JSON is malformed")?;
+                        let title = response.get("title").and_then(serde_json::Value::as_str)
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or("Archived conversation")
+                            .to_owned();
+                        let (html, message_count) = offline_view::render_offline_html(
+                            &response, &capture.url, capture.captured_at_ms
+                        );
+                        let filename = format!("conversation-{:04}.html", index + 1);
+                        let output = destination.join(&filename);
+                        offline_view::write_private_html(&output, &html)?;
+                        generated.push(output);
+                        total_messages = total_messages.saturating_add(message_count);
+                        listing.push(offline_view::LibraryEntry {
+                            filename,
+                            title,
+                            captured_at_ms: capture.captured_at_ms,
+                            message_count,
+                        });
+                    }
+                    let html = offline_view::render_library_index(&listing);
+                    let output = destination.join("index.html");
+                    offline_view::write_private_html(&output, &html)?;
+                    generated.push(output);
+                    Ok((listing.len(), total_messages))
+                })();
+                let (count, messages) = match export {
+                    Ok(success) => success,
+                    Err(error) => {
+                        // Remove only paths this invocation created. Never
+                        // recursively delete a user-owned or redirected tree.
+                        for path in generated.iter().rev() {
+                            let _ = fs::remove_file(path);
+                        }
+                        let _ = fs::remove_dir(&destination);
+                        return Err(error);
+                    }
+                };
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "written": true,
+                    "path": destination.join("index.html"),
+                    "conversations": count,
+                    "text_messages": messages,
+                    "offline": true,
+                    "freshness_verified": false,
+                    "plaintext_private_files": true,
+                }))?);
+            }
             Some("offline-html") => {
                 anyhow::ensure!(
                     arguments.len() == 4,
@@ -372,10 +447,10 @@ fn run() -> Result<()> {
                 );
             }
             Some(command) => anyhow::bail!(
-                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-index, offline-conversation, offline-html, or private-coverage"
+                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-index, offline-conversation, offline-html, offline-library, or private-coverage"
             ),
             None => anyhow::bail!(
-                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', 'mirrarium cache offline-index [LIMIT]', 'mirrarium cache private-coverage', or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>' or 'mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>'"
+                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', 'mirrarium cache offline-index [LIMIT]', 'mirrarium cache private-coverage', or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>' or 'mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>' or 'mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT]'"
             ),
         },
         Some("corpus") => match arguments.get(1).map(String::as_str) {
@@ -2083,6 +2158,7 @@ USAGE:
   mirrarium cache offline-index [LIMIT]
   mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>
   mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>
+  mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT]
   mirrarium cache private-coverage
   mirrarium corpus rebuild
   mirrarium corpus stats

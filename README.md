@@ -89,6 +89,7 @@ mirrarium cache private-reads [limit]
 mirrarium cache offline-index [limit]
 mirrarium cache offline-conversation <chatgpt-conversation-url>
 mirrarium cache offline-html <chatgpt-conversation-url> <new-output-file>
+mirrarium cache offline-library <new-output-directory> [limit]
 mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
@@ -270,6 +271,24 @@ synced/public directories, and Jobflick log output. Delete the file when no
 longer needed; the encrypted Mirrarium archive is unchanged. This standalone
 viewer does not yet support interactive search or automatic reuse inside the
 ChatGPT website.
+
+### Browsable offline library
+
+\`mirrarium cache offline-library /path/to/new-directory [limit]\` creates an
+entirely new owner-private directory (Unix permissions \`0700\`) containing an
+\`index.html\` and up to 100 individually rendered conversation pages (default
+25). Open \`index.html\` in Chromium to browse and select archived conversations
+with ordinary local file links. The library opens without ChatGPT, localhost
+services, browser extensions, network access, or JavaScript.
+
+All pages are plaintext private snapshots (individual HTML files have Unix
+permissions \`0600\`). Existing output directories are refused. If the export
+fails due to a missing or corrupted archive object, Mirrarium attempts to
+remove only files created by that invocation, without recursive deletion. This
+is an explicit manual export; it can include material originally captured
+under more than one ChatGPT account, and it never changes live-site replay.
+The library remains a historical snapshot rather than an automatically updated
+offline mirror. **Do not export into public repos or synced/shared folders.**
 
 ## Chromium deployment diagnostics
 

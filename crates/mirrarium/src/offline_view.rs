@@ -139,6 +139,54 @@ fn escape_html(input: &str) -> String {
     escaped
 }
 
+/// A user-requested offline library always contains plaintext titles and
+/// messages. No such file is produced by normal recording or diagnostics.
+pub struct LibraryEntry {
+    pub filename: String,
+    pub title: String,
+    pub captured_at_ms: u64,
+    pub message_count: usize,
+}
+
+pub fn render_library_index(items: &[LibraryEntry]) -> String {
+    let mut html = String::from("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    html.push_str("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'none'; connect-src 'none'; img-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; style-src 'unsafe-inline'\">");
+    html.push_str("<title>Mirrarium offline library</title>");
+    html.push_str("<style>html{color-scheme:dark light;font-family:system-ui,Arial,sans-serif}");
+    html.push_str("body{margin:0 auto;max-width:860px;padding:clamp(18px,4vw,48px);background:Canvas;color:CanvasText}");
+    html.push_str("h1{font-size:1.75rem}.note,.meta{color:GrayText;font-size:.86rem;line-height:1.5}");
+    html.push_str("ul{list-style:none;padding:0}li{margin:16px 0;padding:16px;border:1px solid GrayText;border-radius:10px}");
+    html.push_str("a{color:LinkText;font-size:1.05rem;font-weight:650;overflow-wrap:anywhere}</style></head><body><main>");
+    html.push_str("<h1>Mirrarium offline library</h1><p class=\"note\">Historical local snapshots only. Freshness and account access have not been verified. No server or website connection is required.</p><ul>");
+    for item in items {
+        // Filename is created by Mirrarium, not inferred from conversation IDs.
+        html.push_str("<li><a href=\"");
+        html.push_str(&escape_html(&item.filename));
+        html.push_str("\">");
+        html.push_str(&escape_html(&item.title));
+        html.push_str("</a><p class=\"meta\">");
+        html.push_str(&item.message_count.to_string());
+        html.push_str(" text messages · Captured at Unix milliseconds: ");
+        html.push_str(&item.captured_at_ms.to_string());
+        html.push_str("</p></li>");
+    }
+    html.push_str("</ul></main></body></html>\n");
+    html
+}
+
+/// Restrict plaintext exports to an entirely new, owner-private directory.
+pub fn create_private_library_directory(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .with_context(|| format!("creating new private offline library {}", path.display()))
+}
+
 /// Write a plaintext private snapshot only to a *new* user-selected file.
 /// Never truncate an existing file or follow an existing output symlink.
 pub fn write_private_html(path: &Path, html: &str) -> Result<()> {
@@ -212,6 +260,35 @@ mod tests {
         let (empty, count) = render_offline_html(&json!({}), "x", 0);
         assert_eq!(count, 0);
         assert!(empty.contains("No supported text messages"));
+    }
+
+    #[test]
+    fn library_index_escapes_titles_and_links_only_to_local_pages() {
+        let html = render_library_index(&[
+            LibraryEntry {
+                filename: "conversation-0001.html".to_owned(),
+                title: "<script>bad()</script> & example".to_owned(),
+                captured_at_ms: 123,
+                message_count: 2,
+            },
+        ]);
+        assert!(html.contains("href=\"conversation-0001.html\""));
+        assert!(html.contains("&lt;script&gt;bad()&lt;/script&gt; &amp; example"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("connect-src 'none'"));
+    }
+
+    #[test]
+    fn private_library_directory_is_exclusive_and_owner_only() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("library");
+        create_private_library_directory(&directory).unwrap();
+        assert!(create_private_library_directory(&directory).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+        }
     }
 
     #[test]

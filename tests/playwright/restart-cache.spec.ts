@@ -292,6 +292,34 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     ])).rejects.toThrow("creating new private offline page");
     expect(await originCounts()).toEqual(offlineOriginBefore);
 
+    // Explicit batch export: new owner-private directory with an offline
+    // index whose links resolve to file:// pages, not ChatGPT network loads.
+    const libraryPath = join(root, "offline-library");
+    const libraryReport = JSON.parse(await runCli([
+      "cache", "offline-library", libraryPath, "20",
+    ])) as {
+      written: boolean;
+      conversations: number;
+      text_messages: number;
+      plaintext_private_files: boolean;
+    };
+    expect(libraryReport).toMatchObject({
+      written: true,
+      plaintext_private_files: true,
+      offline: true,
+      freshness_verified: false,
+    });
+    expect(libraryReport.conversations).toBeGreaterThanOrEqual(1);
+    expect(libraryReport.text_messages).toBeGreaterThan(0);
+    const libraryHtml = await readFile(join(libraryPath, "index.html"), "utf8");
+    expect(libraryHtml).toContain("Mirrarium offline library");
+    expect(libraryHtml).toContain("Private fixture");
+    expect(libraryHtml).not.toContain("private corpus material");
+    await expect(runCli([
+      "cache", "offline-library", libraryPath, "20",
+    ])).rejects.toThrow("creating new private offline library");
+    expect(await originCounts()).toEqual(offlineOriginBefore);
+
     const byChatLink = JSON.parse(
       await runCli(["cache", "offline-conversation", fixtureOrigin + "/c/test"])
     ) as typeof archived;
@@ -323,6 +351,15 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
       "private corpus material"
     );
     await offlinePage.close();
+    const libraryPage = await context.newPage();
+    await libraryPage.goto(pathToFileURL(join(libraryPath, "index.html")).href);
+    await expect(libraryPage.getByRole("heading", { name: "Mirrarium offline library" }))
+      .toBeVisible();
+    await libraryPage.getByRole("link", { name: "Private fixture" }).click();
+    await expect(libraryPage.locator("h1")).toHaveText("Private fixture");
+    await expect(libraryPage.locator("article .content"))
+      .toContainText("private corpus material");
+    await libraryPage.close();
     const session = await context.newCDPSession(reopenedPage);
     try {
       await session.send("Network.enable");

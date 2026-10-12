@@ -129,3 +129,14 @@ a file URL in disposable Chromium. Rust unit tests cover proper escaping,
 selected-branch ordering, omitted discarded branches, simple message arrays,
 empty views, and exclusive private-file creation. The viewer has a strict
 script/network-denying CSP and renders text only. No real account is used.
+
+## Browsable offline library acceptance
+
+The isolated browser-restart fixture exports a private HTML directory from
+persisted synthetic responses while Chromium is closed. It verifies the
+directory and index, refuses replacement of an existing directory, then opens
+the local file:// index and follows an ordinary hyperlink to a captured
+conversation in disposable Chromium. It checks that message text is absent
+from the index and that no extra origin request occurs. Rust unit tests cover
+index-title HTML escaping, relative-only local links, and owner-private
+directory creation.
