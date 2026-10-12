@@ -115,6 +115,123 @@ pub struct PrivateReadEntry {
     pub body: Vec<u8>,
 }
 
+/// Explicit, read-only retrieval of an already captured ChatGPT conversation
+/// JSON response. This never intercepts a browser request and never claims
+/// HTTP freshness; unlike conditional revalidation it needs no ETag.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OfflineConversation {
+    pub capture_id: String,
+    pub url: String,
+    pub captured_at_ms: u64,
+    pub body_hash: String,
+    pub body_bytes: u64,
+    #[serde(skip)]
+    pub body: Vec<u8>,
+}
+
+pub fn offline_conversation(
+    raw_root: impl AsRef<Path>,
+    raw_url: &str,
+) -> Result<Option<OfflineConversation>> {
+    let Some(url) = offline_conversation_url(raw_url) else {
+        return Ok(None);
+    };
+    let root = raw_root.as_ref();
+    let connection = open_raw_ledger_read_only(root)?;
+    let row = connection
+        .query_row(
+            r#"
+            SELECT capture_id, captured_at_ms, body_hash, body_bytes
+            FROM captures
+            WHERE url = ?1
+              AND privacy_class = 'private'
+              AND lower(method) = 'get'
+              AND status = 200
+              AND lower(resource_type) IN ('fetch', 'xhr')
+              AND lower(mime_type) LIKE '%json%'
+              AND body_hash IS NOT NULL
+              AND body_error IS NULL
+            ORDER BY captured_at_ms DESC, rowid DESC
+            LIMIT 1
+            "#,
+            [url.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((capture_id, captured_at_ms, body_hash, body_bytes)) = row else {
+        return Ok(None);
+    };
+    let body_bytes: u64 = body_bytes
+        .try_into()
+        .context("negative archived conversation body byte count")?;
+    anyhow::ensure!(
+        body_bytes <= MAX_REPLAY_BODY_BYTES,
+        "archived conversation exceeds the 16 MiB read ceiling"
+    );
+    let captured_at_ms: u64 = captured_at_ms
+        .try_into()
+        .context("negative archived conversation timestamp")?;
+    anyhow::ensure!(
+        body_hash.len() == 64
+            && body_hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid archived conversation body hash"
+    );
+    let expected_path = private_object_relative_path(&body_hash);
+    let indexed = connection
+        .query_row(
+            "SELECT bytes, relative_path FROM objects WHERE storage_class = 'private' AND hash = ?1",
+            [&body_hash],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .context("archived conversation object is missing from the object index")?;
+    anyhow::ensure!(
+        indexed.0 == i64::try_from(body_bytes)? && Path::new(&indexed.1) == expected_path,
+        "archived conversation object index disagrees with capture"
+    );
+    let body = read_verified_object(root, "private", &body_hash)?;
+    anyhow::ensure!(
+        body.len() as u64 == body_bytes,
+        "archived conversation body length mismatch"
+    );
+    Ok(Some(OfflineConversation {
+        capture_id,
+        url: url.to_string(),
+        captured_at_ms,
+        body_hash,
+        body_bytes,
+        body,
+    }))
+}
+
+fn offline_conversation_url(raw_url: &str) -> Option<Url> {
+    let url = Url::parse(raw_url).ok()?;
+    if url.scheme() != "https"
+        || !matches!(url.host_str()?, "chatgpt.com" | "chat.openai.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let id = url.path().strip_prefix("/backend-api/conversation/")?;
+    if id.is_empty()
+        || id.len() > 128
+        || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return None;
+    }
+    Some(url)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReplayEntry {
     pub url: String,
@@ -2061,6 +2178,60 @@ mod tests {
         assert!(replayable_url("http://chatgpt.com/_next/static/replay.js").is_none());
         assert!(replayable_url("https://chatgpt.com/_next/static/replay.js?v=1").is_none());
         assert!(replayable_url("https://cdn.oaistatic.com/assets/replay.js?v=1").is_none());
+    }
+
+    #[test]
+    fn explicit_offline_conversation_reads_latest_verified_json_without_validator() {
+        let (directory, connection) = open_fixture();
+        let url = "https://chatgpt.com:43117/backend-api/conversation/synthetic";
+        let first_body = br#"{"id":"synthetic","version":1}"#;
+        let second_body = br#"{"id":"synthetic","version":2}"#;
+        for (index, body) in [first_body.as_slice(), second_body.as_slice()].iter().enumerate() {
+            let hash = format!("{:x}", Sha256::digest(body));
+            let relative = private_object_relative_path(&hash);
+            let path = directory.path().join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, body).unwrap();
+            connection.execute(
+                "INSERT INTO objects (storage_class, hash, bytes, relative_path, created_at_ms) VALUES ('private', ?1, ?2, ?3, ?4)",
+                params![hash, body.len() as i64, relative.to_string_lossy().to_string(), index as i64],
+            ).unwrap();
+            connection.execute(
+                r#"INSERT INTO captures (
+                    capture_id, captured_at_ms, method, url, status, mime_type,
+                    resource_type, privacy_class, body_hash, body_bytes,
+                    cache_control, etag, last_modified, body_error
+                ) VALUES (?1, ?2, 'GET', ?3, 200, 'application/json', 'Fetch',
+                    'private', ?4, ?5, 'no-store', NULL, NULL, NULL)"#,
+                params![format!("offline-{index}"), index as i64 + 1, url, hash, body.len() as i64],
+            ).unwrap();
+        }
+
+        let hit = offline_conversation(directory.path(), url).unwrap().unwrap();
+        assert_eq!(hit.body, second_body);
+        assert_eq!(hit.capture_id, "offline-1");
+        assert_eq!(hit.captured_at_ms, 2);
+        assert_eq!(hit.body_bytes, second_body.len() as u64);
+        assert_eq!(hit.body_hash, format!("{:x}", Sha256::digest(second_body)));
+
+        // An explicit archive read is NOT a network replay. Missing validators
+        // and no-store prevent automatic substitution, but not manual export.
+        assert!(private_lookup(directory.path(), url).unwrap().is_none());
+        for invalid in [
+            "https://evil.example/backend-api/conversation/synthetic",
+            "http://chatgpt.com/backend-api/conversation/synthetic",
+            "https://chatgpt.com/backend-api/conversation/synthetic?token=secret",
+            "https://chatgpt.com/backend-api/conversation/../auth",
+            "https://chatgpt.com/backend-api/conversation/",
+            "https://chatgpt.com/backend-api/conversations",
+        ] {
+            assert!(offline_conversation_url(invalid).is_none(), "{invalid}");
+        }
+
+        // Never return corrupt or unindexed private bytes.
+        let corrupt_path = directory.path().join(private_object_relative_path(&hit.body_hash));
+        fs::write(corrupt_path, b"corrupted snapshot").unwrap();
+        assert!(offline_conversation(directory.path(), url).is_err());
     }
 
     #[test]

@@ -280,6 +280,33 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&cache::private_coverage(&root)?)?
                 );
             }
+            Some("offline-conversation") => {
+                anyhow::ensure!(
+                    arguments.len() == 3,
+                    "usage: mirrarium cache offline-conversation <CAPTURED_CONVERSATION_API_URL>"
+                );
+                let url = &arguments[2];
+                let capture = cache::offline_conversation(&root, url)?
+                    .context("no complete, locally archived conversation JSON response for that exact URL")?;
+                // Explicit invocation only: emits PRIVATE content to stdout.
+                // Never store it in logs, print during a background probe, or
+                // use it as an implicit response to the live ChatGPT website.
+                let body: serde_json::Value = serde_json::from_slice(&capture.body)
+                    .context("archived conversation is not valid JSON")?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "source_url": capture.url,
+                        "capture_id": capture.capture_id,
+                        "captured_at_ms": capture.captured_at_ms,
+                        "body_sha256": capture.body_hash,
+                        "body_bytes": capture.body_bytes,
+                        "offline": true,
+                        "freshness_verified": false,
+                        "response": body,
+                    }))?
+                );
+            }
             Some("private-reads") => {
                 let limit = arguments
                     .get(2)
@@ -307,10 +334,10 @@ fn run() -> Result<()> {
                 );
             }
             Some(command) => anyhow::bail!(
-                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, or private-coverage"
+                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-conversation, or private-coverage"
             ),
             None => anyhow::bail!(
-                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', or 'mirrarium cache private-coverage'"
+                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', or 'mirrarium cache private-coverage' or 'mirrarium cache offline-conversation <CAPTURED_CONVERSATION_API_URL>'"
             ),
         },
         Some("corpus") => match arguments.get(1).map(String::as_str) {
@@ -2015,6 +2042,7 @@ USAGE:
   mirrarium cache candidates [LIMIT]
   mirrarium cache public-coverage
   mirrarium cache private-reads [LIMIT]
+  mirrarium cache offline-conversation <CAPTURED_CONVERSATION_API_URL>
   mirrarium cache private-coverage
   mirrarium corpus rebuild
   mirrarium corpus stats
