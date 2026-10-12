@@ -231,6 +231,55 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
       .digest("hex");
     expect(streamedSnapshot?.latest_body_hash).toBe(expectedStreamHash);
 
+    // The bundled toolbar popup is the ONLY user gesture that enables
+    // historical conversation substitution. It applies to this tab alone.
+    const popup = await context.newPage();
+    await popup.goto("chrome-extension://" + extensionId + "/popup.html");
+    const toggle = popup.getByRole("button", { name: "Enable historical reuse" });
+    await expect(toggle).toBeEnabled();
+    await toggle.click();
+    await expect(popup.getByText("Historical reuse: ON for this tab")).toBeVisible();
+
+    const beforeLocalReplay = await originCounts();
+    const local = await firstPage.evaluate(async () => {
+      const response = await fetch("/backend-api/conversation/test", {
+        cache: "no-store",
+        headers: { "ChatGPT-Account-Id": "fixture-account" },
+      });
+      return {
+        marker: response.headers.get("X-Mirrarium-Offline"),
+        result: await response.json(),
+      };
+    });
+    expect(local.marker).toBe("historical");
+    expect(local.result).toEqual(first);
+    expect(await originCounts()).toEqual(beforeLocalReplay);
+
+    // The identical conversation URL under a different signed-in account
+    // must go to the origin, never inherit the first account's private copy.
+    const foreign = await firstPage.evaluate(async () => {
+      const response = await fetch("/backend-api/conversation/test", {
+        cache: "no-store",
+        headers: { "ChatGPT-Account-Id": "second-account" },
+      });
+      return { marker: response.headers.get("X-Mirrarium-Offline") };
+    });
+    expect(foreign.marker).toBeNull();
+    expect((await originCounts()).total).toBe(beforeLocalReplay.total + 1);
+
+    await popup.getByRole("button", { name: "Disable historical reuse" }).click();
+    await expect(popup.getByText("Historical reuse: OFF")).toBeVisible();
+    const afterDisable = await firstPage.evaluate(async () => {
+      const response = await fetch("/backend-api/conversation/test", {
+        cache: "no-store",
+        headers: { "ChatGPT-Account-Id": "fixture-account" },
+      });
+      return { marker: response.headers.get("X-Mirrarium-Offline") };
+    });
+    expect(afterDisable.marker).toBeNull();
+    expect((await originCounts()).total).toBe(beforeLocalReplay.total + 2);
+    await popup.close();
+
     await context.close();
     context = null;
 
