@@ -70,6 +70,9 @@ pub enum HostRequest {
     PrivateReadLookup {
         lookup_id: String,
         url: String,
+        /// Absent on legacy or unscoped requests; always a cache miss.
+        #[serde(default)]
+        account_id: Option<String>,
     },
     /// Ask the raw ledger whether this capture ID already committed.
     /// Does not request, disclose, or retransmit any private body.

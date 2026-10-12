@@ -14,17 +14,40 @@ const MAX_REPLAY_BODY_BYTES: u64 = 16 * 1024 * 1024;
 pub struct CacheReader {
     root: PathBuf,
     connection: Connection,
+    archive_id: Option<String>,
 }
 
 impl CacheReader {
     pub fn open(raw_root: impl AsRef<Path>) -> Result<Self> {
         let root = raw_root.as_ref().to_path_buf();
         let connection = open_raw_ledger_read_only(&root)?;
-        Ok(Self { root, connection })
+        let archive_id = connection
+            .query_row(
+                "SELECT archive_id FROM archive_identity WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(Self { root, connection, archive_id })
     }
 
-    pub fn private_lookup(&self, raw_url: &str) -> Result<Option<PrivateReadEntry>> {
-        private_lookup_with_connection(&self.root, &self.connection, raw_url)
+    pub fn private_lookup(
+        &self,
+        raw_url: &str,
+        raw_account_id: Option<&str>,
+    ) -> Result<Option<PrivateReadEntry>> {
+        let scope = self.archive_id
+            .as_deref()
+            .zip(raw_account_id)
+            .and_then(|(archive_id, account_id)| {
+                mirrarium_store::account_scope_hash(archive_id, account_id)
+            });
+        private_lookup_with_connection(
+            &self.root,
+            &self.connection,
+            raw_url,
+            scope.as_deref(),
+        )
     }
 
     pub fn lookup(
@@ -1139,15 +1162,20 @@ fn private_read_profile(
 pub fn private_lookup(
     raw_root: impl AsRef<Path>,
     raw_url: &str,
+    raw_account_id: Option<&str>,
 ) -> Result<Option<PrivateReadEntry>> {
-    CacheReader::open(raw_root)?.private_lookup(raw_url)
+    CacheReader::open(raw_root)?.private_lookup(raw_url, raw_account_id)
 }
 
 fn private_lookup_with_connection(
     root: &Path,
     connection: &Connection,
     raw_url: &str,
+    account_scope_hash: Option<&str>,
 ) -> Result<Option<PrivateReadEntry>> {
+    let Some(account_scope_hash) = account_scope_hash else {
+        return Ok(None);
+    };
     let Some(url) = private_revalidation_url(raw_url) else {
         return Ok(None);
     };
@@ -1164,6 +1192,7 @@ fn private_lookup_with_connection(
                 last_modified
             FROM captures
             WHERE url = ?1
+              AND json_extract(provenance_json, '$.account_scope_hash') = ?2
               AND privacy_class = 'private'
               AND lower(method) = 'get'
               AND status = 200
@@ -1176,7 +1205,7 @@ fn private_lookup_with_connection(
             ORDER BY captured_at_ms DESC, rowid DESC
             LIMIT 1
             "#,
-            [url.as_str()],
+            [url.as_str(), account_scope_hash],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,

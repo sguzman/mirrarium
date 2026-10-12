@@ -917,7 +917,15 @@ function lookupCachedResponse(
   });
 }
 
-function lookupPrivateRead(url: string): Promise<PrivateReadHit | null> {
+function lookupPrivateRead(
+  url: string,
+  accountId: string | undefined,
+): Promise<PrivateReadHit | null> {
+  // Never request a private body when the active request lacks a stable
+  // account identity. This also makes old unscoped archives miss safely.
+  if (!accountId || !/^[a-zA-Z0-9_.:-]{1,256}$/.test(accountId)) {
+    return Promise.resolve(null);
+  }
   const port = getNativePort();
   if (!port) return Promise.resolve(null);
 
@@ -940,6 +948,7 @@ function lookupPrivateRead(url: string): Promise<PrivateReadHit | null> {
         type: "private_read_lookup",
         lookup_id: lookupId,
         url,
+        account_id: accountId,
       });
     } catch (error) {
       retireNativePort(port);
@@ -1088,7 +1097,10 @@ async function beginPrivateRevalidation(
     };
   },
 ): Promise<void> {
-  const hit = await lookupPrivateRead(event.request.url);
+  const hit = await lookupPrivateRead(
+    event.request.url,
+    header(event.request.headers, "ChatGPT-Account-Id"),
+  );
   if (!hit) {
     await continuePausedRequest(tabId, event.requestId);
     return;

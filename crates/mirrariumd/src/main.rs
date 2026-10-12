@@ -181,7 +181,7 @@ fn run_native_host() -> Result<()> {
                     &resource_type,
                 )?;
             }
-            Ok(HostRequest::PrivateReadLookup { lookup_id, url }) => {
+            Ok(HostRequest::PrivateReadLookup { lookup_id, url, account_id }) => {
                 if cache_reader.is_none() {
                     match open_cache_reader_if_present(&root) {
                         Ok(Some(reader)) => cache_reader = Some(reader),
@@ -211,6 +211,7 @@ fn run_native_host() -> Result<()> {
                         .expect("cache reader initialized above"),
                     lookup_id,
                     &url,
+                    account_id.as_deref(),
                 )?;
             }
             Ok(request) => {
@@ -308,8 +309,9 @@ fn write_private_read_lookup_responses(
     cache_reader: &cache::CacheReader,
     lookup_id: String,
     url: &str,
+    account_id: Option<&str>,
 ) -> Result<()> {
-    let entry = match cache_reader.private_lookup(url) {
+    let entry = match cache_reader.private_lookup(url, account_id) {
         Ok(entry) => entry,
         Err(error) => {
             return write_native_response(
