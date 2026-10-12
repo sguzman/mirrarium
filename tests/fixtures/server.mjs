@@ -28,6 +28,12 @@ let privateDocumentConditional304s = 0;
 let eventSourceReconnectHits = 0;
 const oversizedResponseBody = Buffer.alloc(16 * 1024 * 1024 + 1, 0x78);
 const oversizedCompressedResponseBody = gzipSync(oversizedResponseBody);
+const passiveStreamPayloadBytes = 17 * 1024 * 1024;
+const passiveStreamResponseBody = Buffer.from(
+  '{"id":"passive-stream-probe","content":"' +
+  "x".repeat(passiveStreamPayloadBytes) + '"}',
+  "utf8",
+);
 
 execFileSync("openssl", [
   "req",
@@ -541,6 +547,32 @@ const fixtureServer = https.createServer(
           response.socket?.destroy();
         }, 50);
       });
+      return;
+    }
+
+    if (request.url === "/backend-api/passive-stream-probe") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        "cache-control": "private, max-age=0",
+        "content-length": String(passiveStreamResponseBody.length),
+      });
+      let sent = 0;
+      const writeNext = () => {
+        if (response.destroyed) return;
+        if (sent >= passiveStreamResponseBody.length) {
+          response.end();
+          return;
+        }
+        const end = Math.min(sent + 64 * 1024, passiveStreamResponseBody.length);
+        const writable = response.write(passiveStreamResponseBody.subarray(sent, end));
+        sent = end;
+        if (writable) {
+          setTimeout(writeNext, 1);
+        } else {
+          response.once("drain", () => setTimeout(writeNext, 1));
+        }
+      };
+      writeNext();
       return;
     }
 
