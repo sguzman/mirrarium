@@ -204,8 +204,10 @@ After installing the extension and native host, run `mirrarium doctor chromium`
 (or `mirrarium doctor edge` for Edge). This **read-only JSON report** checks
 the stable extension installation and published build fingerprint, the
 browser-specific Native Messaging manifest and executable, and whether the
-encrypted local archive can be opened to count captures. No conversation
-bodies, URLs, authentication data, or browser profile contents are read.
+encrypted local archive can be opened to count captures. Only the specific
+Native Messaging manifest under the selected browser's configuration is read:
+no cookies, browsing history, conversations, authentication data, or other
+browser profile data are inspected.
 
 `installation_ready: true` only confirms static wiring. It does **not**
 confirm that Chromium is open, its extension is enabled, its debugger is
