@@ -198,6 +198,29 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 
 The derived corpus is explicitly schema-versioned (currently internal schema v7; the conversation export wire remains v1). Schema v5 introduced materialization of the exact v1 `record_sha256` for every exported conversation during rebuild, using the same pinned raw-ledger snapshot as derivation; rebuild and `corpus verify` recompute those records and reject any cached-hash disagreement. When the rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors. `corpus verify` is a read-only integrity pass over the encrypted derived database: it runs SQLite integrity and foreign-key checks; validates whole-response SSE counts, sequence shape, and JSON markers; cross-checks conversation snapshots, message observations, stream revisions/reconstructions, attachment observations, and captured downloads against the authoritative raw ledger; and also verifies WebSocket/EventSource stream counts, transport semantics, skipped/derived separation, reconnect edges, JSON consistency, raw capture/hash/URL/direction provenance, and the materialized export identity index.
 
+## Chromium deployment diagnostics
+
+After installing the extension and native host, run `mirrarium doctor chromium`
+(or `mirrarium doctor edge` for Edge). This **read-only JSON report** checks
+the stable extension installation and published build fingerprint, the
+browser-specific Native Messaging manifest and executable, and whether the
+encrypted local archive can be opened to count captures. No conversation
+bodies, URLs, authentication data, or browser profile contents are read.
+
+`installation_ready: true` only confirms static wiring. It does **not**
+confirm that Chromium is open, its extension is enabled, its debugger is
+attached, or live ChatGPT responses are being captured. The
+`last_observed_running_build_id` may be stale from an earlier browser session;
+`live_browser_verified` is always false for this offline diagnostic.
+`archive.private_captures > 0` demonstrates stored private traffic, not
+necessarily successful capture from a real logged-in account. An absent
+archive is reported without creating one. A broken or foreign extension
+manifest is reported as an error rather than silently accepted.
+
+For a separate storage-integrity check, run `mirrarium verify` after captures
+have been made. The full verification can be expensive for large archives;
+the deployment doctor deliberately uses lightweight, read-only archive stats.
+
 ## Linux extension install/update
 
 Build the extension, then copy it into Mirrarium's stable user-level install directory:
