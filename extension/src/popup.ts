@@ -1,3 +1,5 @@
+export {};
+
 type ModeState = { supported: boolean; enabled: boolean };
 
 function supported(url: string | undefined): boolean {
@@ -16,12 +18,12 @@ async function targetTab(): Promise<number | undefined> {
     all.find((tab) => supported(tab.url)))?.id;
 }
 
-const status = document.querySelector<HTMLElement>("#status")!;
+const statusElement = document.querySelector<HTMLElement>("#status")!;
 const button = document.querySelector<HTMLButtonElement>("#toggle")!;
 
 function show(state: ModeState): void {
   button.disabled = !state.supported;
-  status.textContent = state.supported
+  statusElement.textContent = state.supported
     ? state.enabled ? "Historical reuse: ON for this tab" : "Historical reuse: OFF"
     : "Open a ChatGPT tab to use this option.";
   button.textContent = state.enabled ? "Disable historical reuse" : "Enable historical reuse";
