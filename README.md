@@ -328,7 +328,7 @@ account headers, missing snapshots, unsupported URLs, and oversized (over
 16 MiB) playback candidates fall back to the normal website request. Sending
 messages and all other API paths are excluded.
 
-The popup and toolbar badge say when the mode is enabled. It is an explicit,
+The popup and toolbar badge say when the mode is enabled. The popup also shows per-tab local fulfillment counts and network fallback attempts for eligible conversation requests; these counters contain no private message content or IDs and reset when historical mode is re-enabled or the tab's debugger detaches. It is an explicit,
 historical, potentially stale read, not HTTP freshness validation. The toggle
 is ephemeral (per tab, reset on close, navigation away, extension restart, or
 debugger detach); it is never enabled automatically. It does not make the

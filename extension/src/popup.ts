@@ -1,6 +1,11 @@
 export {};
 
-type ModeState = { supported: boolean; enabled: boolean };
+type ModeState = {
+  supported: boolean;
+  enabled: boolean;
+  locallyServed: number;
+  networkFallbackAttempts: number;
+};
 
 function supported(url: string | undefined): boolean {
   if (!url) return false;
@@ -18,6 +23,7 @@ async function targetTab(): Promise<number | undefined> {
 }
 
 const statusElement = document.querySelector<HTMLElement>("#status")!;
+const activityElement = document.querySelector<HTMLElement>("#activity")!;
 const button = document.querySelector<HTMLButtonElement>("#toggle")!;
 
 function show(state: ModeState): void {
@@ -26,12 +32,15 @@ function show(state: ModeState): void {
     ? state.enabled ? "Historical reuse: ON for this tab" : "Historical reuse: OFF"
     : "Open a ChatGPT tab to use this option.";
   button.textContent = state.enabled ? "Disable historical reuse" : "Enable historical reuse";
+  activityElement.textContent = state.supported
+    ? `Locally served: ${state.locallyServed ?? 0} · Network fallback attempts: ${state.networkFallbackAttempts ?? 0}`
+    : "";
 }
 
 void (async () => {
   const tabId = await targetTab();
   if (tabId === undefined) {
-    show({ supported: false, enabled: false });
+    show({ supported: false, enabled: false, locallyServed: 0, networkFallbackAttempts: 0 });
     return;
   }
   const query = async (type: string): Promise<ModeState> =>
@@ -41,6 +50,6 @@ void (async () => {
     button.disabled = true;
     void query("mirrarium_local_mode_toggle")
       .then(show)
-      .catch(() => show({ supported: false, enabled: false }));
+      .catch(() => show({ supported: false, enabled: false, locallyServed: 0, networkFallbackAttempts: 0 }));
   });
-})().catch(() => show({ supported: false, enabled: false }));
+})().catch(() => show({ supported: false, enabled: false, locallyServed: 0, networkFallbackAttempts: 0 }));

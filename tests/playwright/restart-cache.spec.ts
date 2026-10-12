@@ -248,6 +248,8 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     await expect(toggle).toBeEnabled();
     await toggle.click();
     await expect(popup.getByText("Historical reuse: ON for this tab")).toBeVisible();
+    await expect(popup.getByText("Locally served: 0 · Network fallback attempts: 0"))
+      .toBeVisible();
 
     const beforeLocalReplay = await originCounts();
     const local = await firstPage.evaluate(async () => {
@@ -275,6 +277,12 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     });
     expect(foreign.marker).toBeNull();
     expect((await originCounts()).total).toBe(beforeLocalReplay.total + 1);
+
+    // Reopening the popup must report real local fulfillments and misses,
+    // not just the fact that historical mode is enabled.
+    await popup.reload();
+    await expect(popup.getByText("Locally served: 1 · Network fallback attempts: 1"))
+      .toBeVisible();
 
     await popup.getByRole("button", { name: "Disable historical reuse" }).click();
     await expect(popup.getByText("Historical reuse: OFF")).toBeVisible();

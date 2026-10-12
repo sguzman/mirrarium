@@ -137,6 +137,18 @@ type CdpResponse = {
 // restart or closing/leaving the tab disables it rather than persisting
 // authorization to substitute private data.
 const offlineEnabledTabs = new Set<number>();
+// Counters are deliberately volatile, per tab, and contain no private URLs,
+// identifiers, headers, or conversation text.
+type HistoricalReuseCounts = {
+  locallyServed: number;
+  networkFallbackAttempts: number;
+};
+const historicalReuseCounts = new Map<number, HistoricalReuseCounts>();
+
+function bumpHistoricalReuse(tabId: number, kind: keyof HistoricalReuseCounts): void {
+  const counts = historicalReuseCounts.get(tabId);
+  if (counts) counts[kind] += 1;
+}
 const attachedTabs = new Set<number>();
 // A tab can navigate away while debugger.attach/Network.enable/Fetch.enable
 // are still pending. Cancellation must work before attachedTabs is populated.
@@ -1304,6 +1316,9 @@ async function serveExplicitOfflineConversation(
   if (!offlineEnabledTabs.has(tabId) || !hit ||
       hit.bodyBytes > MAX_RESPONSE_BODY_BYTES ||
       hit.mimeType.toLowerCase() !== "application/json") {
+    if (offlineEnabledTabs.has(tabId)) {
+      bumpHistoricalReuse(tabId, "networkFallbackAttempts");
+    }
     await continuePausedRequest(tabId, event.requestId);
     return;
   }
@@ -1322,8 +1337,10 @@ async function serveExplicitOfflineConversation(
     if (event.networkId) {
       locallyFulfilledRequests.add(requestKey(tabId, event.networkId));
     }
+    bumpHistoricalReuse(tabId, "locallyServed");
   } catch {
     // Browser must keep normal network behavior when replay fails.
+    bumpHistoricalReuse(tabId, "networkFallbackAttempts");
     await continuePausedRequest(tabId, event.requestId);
   }
 }
@@ -2712,7 +2729,13 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, reply) => {
     const supported = isSupportedChatGptUrl(tab?.url);
     if (!supported) {
       offlineEnabledTabs.delete(tabId);
-      reply({ supported: false, enabled: false });
+      historicalReuseCounts.delete(tabId);
+      reply({
+        supported: false,
+        enabled: false,
+        locallyServed: 0,
+        networkFallbackAttempts: 0,
+      });
       return;
     }
     if (command.type === "mirrarium_local_mode_toggle") {
@@ -2720,11 +2743,21 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, reply) => {
         offlineEnabledTabs.delete(tabId);
       } else {
         offlineEnabledTabs.add(tabId);
+        historicalReuseCounts.set(tabId, {
+          locallyServed: 0,
+          networkFallbackAttempts: 0,
+        });
       }
     }
     const enabled = offlineEnabledTabs.has(tabId);
+    const counts = historicalReuseCounts.get(tabId);
     await setOfflineBadge(tabId, enabled);
-    reply({ supported: true, enabled });
+    reply({
+      supported: true,
+      enabled,
+      locallyServed: counts?.locallyServed ?? 0,
+      networkFallbackAttempts: counts?.networkFallbackAttempts ?? 0,
+    });
   })().catch(() => reply({ supported: false, enabled: false }));
   return true;
 });
@@ -2746,6 +2779,7 @@ chrome.debugger.onDetach.addListener((source) => {
     attachedTabs.delete(source.tabId);
     clearTabState(source.tabId);
     offlineEnabledTabs.delete(source.tabId);
+    historicalReuseCounts.delete(source.tabId);
     void setOfflineBadge(source.tabId, false);
   }
 });
@@ -3033,6 +3067,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
   if (changeInfo.url && !isSupportedChatGptUrl(changeInfo.url)) {
     offlineEnabledTabs.delete(tabId);
+    historicalReuseCounts.delete(tabId);
     void setOfflineBadge(tabId, false);
     void detach(tabId);
     return;
@@ -3055,6 +3090,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   offlineEnabledTabs.delete(tabId);
+  historicalReuseCounts.delete(tabId);
   const pending = pendingAttachTabs.get(tabId);
   if (pending) {
     pending.cancelled = true;
