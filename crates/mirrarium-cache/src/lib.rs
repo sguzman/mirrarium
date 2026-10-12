@@ -204,6 +204,100 @@ pub fn offline_accounts(raw_root: impl AsRef<Path>) -> Result<Vec<OfflineAccount
     Ok(results)
 }
 
+/// Metadata-only view of failed or incomplete conversation body captures.
+/// Each (exact API URL, account fingerprint) represents one archive identity.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OfflineCaptureGaps {
+    pub response_capture_ceiling_bytes: u64,
+    pub observed_conversation_scopes: u64,
+    pub with_completed_snapshots: u64,
+    pub without_completed_snapshots: u64,
+    pub oversized_observations: u64,
+    pub conversations_with_oversized_observations: u64,
+    pub oversized_without_completed_snapshot: u64,
+    pub other_incomplete_observations: u64,
+    pub max_completed_snapshot_bytes: u64,
+}
+
+pub fn offline_capture_gaps(raw_root: impl AsRef<Path>) -> Result<OfflineCaptureGaps> {
+    let connection = open_raw_ledger_read_only(raw_root.as_ref())?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT url,
+               json_extract(provenance_json, '$.account_scope_hash'),
+               body_hash, body_error, body_bytes
+        FROM captures
+        WHERE privacy_class = 'private'
+          AND lower(method) = 'get'
+          AND status = 200
+          AND lower(resource_type) IN ('fetch', 'xhr')
+          AND lower(mime_type) LIKE '%json%'
+          AND (
+              url LIKE 'https://chatgpt.com%/backend-api/conversation/%'
+              OR url LIKE 'https://chat.openai.com%/backend-api/conversation/%'
+          )
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    let mut identities = BTreeMap::<(String, Option<String>), (bool, bool)>::new();
+    let mut result = OfflineCaptureGaps {
+        response_capture_ceiling_bytes: MAX_REPLAY_BODY_BYTES,
+        observed_conversation_scopes: 0,
+        with_completed_snapshots: 0,
+        without_completed_snapshots: 0,
+        oversized_observations: 0,
+        conversations_with_oversized_observations: 0,
+        oversized_without_completed_snapshot: 0,
+        other_incomplete_observations: 0,
+        max_completed_snapshot_bytes: 0,
+    };
+    for row in rows {
+        let (url, scope, body_hash, body_error, body_bytes) = row?;
+        if offline_conversation_url(&url)
+            .is_none_or(|canonical| canonical.as_str() != url)
+        {
+            continue;
+        }
+        validate_offline_scope(scope.as_deref())?;
+        let (completed, oversized) = identities.entry((url, scope)).or_default();
+        if body_error.is_none() && body_hash.is_some() {
+            *completed = true;
+            let size: u64 = body_bytes.try_into()
+                .context("negative completed snapshot length")?;
+            result.max_completed_snapshot_bytes =
+                result.max_completed_snapshot_bytes.max(size);
+        } else if body_error.as_deref() == Some("suppressed:response_body_too_large") {
+            *oversized = true;
+            result.oversized_observations += 1;
+        } else {
+            result.other_incomplete_observations += 1;
+        }
+    }
+    result.observed_conversation_scopes = identities.len() as u64;
+    for (_, (completed, oversized)) in identities {
+        if completed {
+            result.with_completed_snapshots += 1;
+        } else {
+            result.without_completed_snapshots += 1;
+        }
+        if oversized {
+            result.conversations_with_oversized_observations += 1;
+            if !completed {
+                result.oversized_without_completed_snapshot += 1;
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Private archive *metadata*, not a verified response body. The explicit
 /// offline-conversation reader still checks the indexed object and its hash.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -2487,6 +2581,42 @@ mod tests {
         assert!(!json.contains("backend-api"));
         assert!(!json.contains("account-one"));
         assert!(!json.contains("chatgpt.com"));
+    }
+
+    #[test]
+    fn offline_capture_gaps_distinguishes_oversized_from_verified_candidates() {
+        let (dir, db) = open_fixture();
+        for (id, url, hash, error, size) in [
+            ("a-complete", "https://chatgpt.com/backend-api/conversation/a",
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), None, 1024),
+            ("a-oversized", "https://chatgpt.com/backend-api/conversation/a",
+                None, Some("suppressed:response_body_too_large"), 0),
+            ("b-oversized", "https://chatgpt.com/backend-api/conversation/b",
+                None, Some("suppressed:response_body_too_large"), 0),
+            ("c-other", "https://chatgpt.com/backend-api/conversation/c",
+                None, Some("network_failed"), 0),
+            ("foreign", "https://chatgpt.com.evil.test/backend-api/conversation/x",
+                None, Some("suppressed:response_body_too_large"), 0),
+        ] {
+            db.execute(
+                r#"INSERT INTO captures (
+                    capture_id, captured_at_ms, method, url, status, mime_type,
+                    resource_type, privacy_class, body_hash, body_bytes, body_error
+                ) VALUES (?1, 10, 'GET', ?2, 200, 'application/json', 'Fetch',
+                    'private', ?3, ?4, ?5)"#,
+                params![id, url, hash, size, error],
+            ).unwrap();
+        }
+        let gaps = offline_capture_gaps(dir.path()).unwrap();
+        assert_eq!(gaps.response_capture_ceiling_bytes, 16 * 1024 * 1024);
+        assert_eq!(gaps.observed_conversation_scopes, 3);
+        assert_eq!(gaps.with_completed_snapshots, 1);
+        assert_eq!(gaps.without_completed_snapshots, 2);
+        assert_eq!(gaps.oversized_observations, 2);
+        assert_eq!(gaps.conversations_with_oversized_observations, 2);
+        assert_eq!(gaps.oversized_without_completed_snapshot, 1);
+        assert_eq!(gaps.other_incomplete_observations, 1);
+        assert_eq!(gaps.max_completed_snapshot_bytes, 1024);
     }
 
     #[test]

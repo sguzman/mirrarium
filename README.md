@@ -86,6 +86,7 @@ mirrarium cache revalidation-stats
 mirrarium cache candidates [limit]
 mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
+mirrarium cache offline-gaps
 mirrarium cache offline-accounts
 mirrarium cache offline-index [limit] [--scope SHA256]
 mirrarium cache offline-conversation <chatgpt-conversation-url> [--scope SHA256]
@@ -314,6 +315,22 @@ is an explicit manual export; it can include material originally captured
 under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated
 offline mirror. **Do not export into public repos or synced/shared folders.**
+
+### Long-conversation capture gaps
+
+`mirrarium cache offline-gaps` audits captured ChatGPT conversation GET
+responses without reading message text. It counts conversation/account
+identities with and without complete response-body candidates, oversized
+response observations, oversized conversations lacking any completed
+snapshot, other incomplete observations, and the largest completed
+snapshot. The reported current response ceiling is **16 MiB**. All values
+are archive-local metadata; a completed body candidate is not guaranteed
+intact until verified by an explicit offline read. The audit does not
+modify browser capture or allocate larger response buffers.
+
+Use this report to determine whether very long conversations actually
+hit the capture ceiling before considering a streaming-body implementation
+or increasing Chromium's memory limits.
 
 ### Read-only account inventory
 

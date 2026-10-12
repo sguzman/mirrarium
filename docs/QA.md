@@ -177,3 +177,11 @@ archive-local fingerprint, deduplicate multiple captures of one conversation,
 retain a separate legacy unscoped group, and reject impersonated hostnames.
 Chromium checks the account inventory without decrypting messages or causing
 requests to the origin.
+
+## Long-conversation capture gap audit
+
+Rust fixtures measure complete snapshots, over-limit body failures, other
+incomplete observations, and missing usable snapshots using only raw-ledger
+metadata. Synthetic Chromium acceptance checks the current 16 MiB ceiling
+and ensures the diagnostic makes no network request or plaintext export.
+The audit does not assert that a raw body candidate passed CAS verification.
