@@ -14,7 +14,9 @@ export function* encodeUtf8Chunks(
   }
   const encoder = new TextEncoder();
   const buffer = new Uint8Array(maxChunkBytes);
-  const maxSourceWindowChars = 16 * 1024;
+  // A tiny output buffer should not re-copy a huge input substring at
+  // every iteration. The production 384 KiB buffer retains 16 KiB windows.
+  const maxSourceWindowChars = Math.min(16 * 1024, maxChunkBytes);
   let consumed = 0;
   let used = 0;
 
