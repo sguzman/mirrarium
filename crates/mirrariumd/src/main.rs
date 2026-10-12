@@ -1037,7 +1037,10 @@ mod tests {
             etag: Some("\"private-v1\"".to_owned()),
             last_modified: None,
             cache_control: Some("private, max-age=0, must-revalidate".to_owned()),
-            provenance: CaptureProvenance::default(),
+            provenance: CaptureProvenance {
+                transient_account_id: Some("fixture-account".to_owned()),
+                ..CaptureProvenance::default()
+            },
         };
         store.begin(metadata).unwrap();
         store
@@ -1053,6 +1056,7 @@ mod tests {
             &cache_reader,
             "private-lookup-1".to_owned(),
             "https://chatgpt.com/backend-api/conversation/private",
+            Some("fixture-account"),
         )
         .unwrap();
 
