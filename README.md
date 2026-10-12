@@ -216,8 +216,10 @@ attached, or live ChatGPT responses are being captured. The
 `live_browser_verified` is always false for this offline diagnostic.
 `archive.private_captures > 0` demonstrates stored private traffic, not
 necessarily successful capture from a real logged-in account. An absent
-archive is reported without creating one. A broken or foreign extension
-manifest is reported as an error rather than silently accepted.
+archive is reported without creating one. A present but unreadable ledger
+blocks installation readiness without being repaired or overwritten.
+A broken or foreign extension manifest is reported as an error rather than
+silently accepted.
 
 For a separate storage-integrity check, run `mirrarium verify` after captures
 have been made. The full verification can be expensive for large archives;

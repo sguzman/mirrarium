@@ -1726,7 +1726,7 @@ fn handle_doctor(arguments: &[String]) -> Result<()> {
         serde_json::to_string_pretty(&serde_json::json!({
             "schema_version": 1,
             "browser": browser,
-            "installation_ready": extension_valid && native_valid,
+            "installation_ready": extension_valid && native_valid && (!archive_present || archive_readable),
             "live_browser_verified": false,
             "extension": {
                 "install_path": extension_path,

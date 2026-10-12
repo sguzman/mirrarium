@@ -159,6 +159,16 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     await writeFile(manifestFile, originalManifest);
     expect((await doctor()).installation_ready).toBe(true);
 
+    // A pre-existing but unreadable ledger must block deployment readiness;
+    // doctor never creates, repairs, or truncates this file.
+    const poisonedLedger = join(dataDir, "ledger.sqlite3");
+    await writeFile(poisonedLedger, "not a valid SQLCipher ledger");
+    const damaged = await doctor();
+    expect(damaged.installation_ready).toBe(false);
+    expect(damaged.archive).toMatchObject({ present: true, readable: false });
+    await rm(poisonedLedger);
+    expect((await doctor()).installation_ready).toBe(true);
+
     context = await launch();
     const firstPage = await openReadyPage(context);
     await firstPage.goto(fixtureOrigin + "/");
