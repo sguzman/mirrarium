@@ -510,8 +510,13 @@ test("captures ChatGPT-shaped traffic into isolated durable storage", async () =
           ),
         ).toBe(false);
       } else {
-        expect(preCaptureForeignProbe.stderr).toContain(
-          "raw ledger does not exist",
+        // The native host can create the encrypted ledger file before its
+        // schema initialization transaction becomes visible to a concurrent
+        // read-only probe. Both missing-ledger and missing-table outcomes are
+        // inconclusive here; the post-initialization foreign-origin audit
+        // below remains the authoritative security assertion.
+        expect(preCaptureForeignProbe.stderr).toMatch(
+          /raw ledger does not exist|no such table: captures/,
         );
       }
       for (const transientPage of foreignTabs) await transientPage.close();
