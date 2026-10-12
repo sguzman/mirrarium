@@ -148,3 +148,10 @@ private CAS object in the copy only, and exports the library from that copy.
 The library must skip the unreadable conversation, preserve other verified
 snapshots, report a nonzero skipped count, and avoid any ChatGPT origin fetch.
 The original archive remains intact for the remaining revalidation tests.
+
+## Scoped private archive export
+
+The isolated Chromium restart fixture uses the archive-local account hash
+reported by offline-index to filter both index and library commands. Rust
+unit tests store two distinct account scopes at the exact same conversation
+URL and verify that scoped metadata and decrypted response bodies agree.

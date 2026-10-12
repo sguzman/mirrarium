@@ -258,6 +258,17 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
       latest_body_bytes: archived.body_bytes,
     });
     expect(indexed!.capture_count).toBeGreaterThan(0);
+    const fingerprint = (indexed as typeof indexed & { account_scope_hash: string })
+      .account_scope_hash;
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    const restricted = JSON.parse(await runCli([
+      "cache", "offline-index", "50", "--scope", fingerprint,
+    ])) as Array<{ api_url: string; account_scope_hash: string }>;
+    expect(restricted.some((entry) => entry.api_url === indexed?.api_url)).toBe(true);
+    expect(restricted.every((entry) => entry.account_scope_hash === fingerprint)).toBe(true);
+    expect(JSON.parse(await runCli([
+      "cache", "offline-index", "50", "--scope", "f".repeat(64),
+    ]))).toEqual([]);
     expect(await originCounts()).toEqual(offlineOriginBefore);
     // The read-only index must never contain private response message text.
     expect(JSON.stringify(listed)).not.toContain("private corpus material");
@@ -312,6 +323,18 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     expect(libraryReport.conversations).toBeGreaterThanOrEqual(1);
     expect(libraryReport.text_messages).toBeGreaterThan(0);
     expect((libraryReport as typeof libraryReport & { skipped_unreadable: number }).skipped_unreadable).toBe(0);
+    const scopedPath = join(root, "single-account-offline-library");
+    const scopedReport = JSON.parse(await runCli([
+      "cache", "offline-library", scopedPath, "20", "--scope", fingerprint,
+    ])) as { conversations: number; selected_account_scope: string };
+    expect(scopedReport.selected_account_scope).toBe(fingerprint);
+    expect(scopedReport.conversations).toBeGreaterThan(0);
+    const scopedHtml = await readFile(join(scopedPath, "index.html"), "utf8");
+    expect(scopedHtml).toContain("Private fixture");
+    await expect(runCli([
+      "cache", "offline-library", join(root, "missing-account-export"),
+      "20", "--scope", "f".repeat(64),
+    ])).rejects.toThrow("no archived conversation snapshots found");
     const libraryHtml = await readFile(join(libraryPath, "index.html"), "utf8");
     expect(libraryHtml).toContain("Mirrarium offline library");
     expect(libraryHtml).toContain("Private fixture");

@@ -86,10 +86,10 @@ mirrarium cache revalidation-stats
 mirrarium cache candidates [limit]
 mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
-mirrarium cache offline-index [limit]
+mirrarium cache offline-index [limit] [--scope SHA256]
 mirrarium cache offline-conversation <chatgpt-conversation-url>
 mirrarium cache offline-html <chatgpt-conversation-url> <new-output-file>
-mirrarium cache offline-library <new-output-directory> [limit]
+mirrarium cache offline-library <new-output-directory> [limit] [--scope SHA256]
 mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
@@ -256,7 +256,7 @@ milestone requires authenticated account separation and safe freshness rules.
 
 ### Read-only offline conversation index
 
-`mirrarium cache offline-index [limit]` lists up to 1000 distinct captured
+`mirrarium cache offline-index [limit] [--scope SHA256]` lists up to 1000 distinct captured
 conversation API identities (100 by default), newest first. Each entry
 contains the conversation ID, a normal `/c/<id>` link usable as the
 `offline-conversation` selector, the exact captured API URL, latest capture
@@ -313,6 +313,21 @@ is an explicit manual export; it can include material originally captured
 under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated
 offline mirror. **Do not export into public repos or synced/shared folders.**
+
+### Account-filtered offline library
+
+`mirrarium cache offline-index [limit] [--scope SHA256] [--scope SHA256]` reports the
+archive-local `account_scope_hash` of each latest capture when available.
+For an account-specific export, run `mirrarium cache offline-library
+<new-directory> [limit] --scope <account_scope_hash>`. Both the metadata
+query and each verified private-body lookup enforce the same fingerprint,
+even when a different account has a newer capture at the identical URL.
+Neither operation connects to ChatGPT or reads browser session state.
+
+Old captures have no scope and are excluded from filtered exports. Unfiltered
+historical exports remain available, but can mix accounts. An archive-local
+fingerprint does not prove current authentication or grant permission to
+automatically serve private data in the live site.
 
 ## Chromium deployment diagnostics
 

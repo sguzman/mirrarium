@@ -114,6 +114,26 @@ fn main() -> ExitCode {
     }
 }
 
+fn parse_offline_list_args<'a>(
+    extra: &'a [String],
+    default_limit: u64,
+    max_limit: u64,
+) -> Result<(u64, Option<&'a str>)> {
+    let (raw_limit, scope) = match extra {
+        [] => (None, None),
+        [limit] if limit != "--scope" => (Some(limit.as_str()), None),
+        [flag, hash] if flag == "--scope" => (None, Some(hash.as_str())),
+        [limit, flag, hash] if flag == "--scope" => (Some(limit.as_str()), Some(hash.as_str())),
+        _ => anyhow::bail!("expected [LIMIT] [--scope LOWERCASE_SHA256]"),
+    };
+    let limit = raw_limit.map(|value| value.parse::<u64>())
+        .transpose().context("offline list limit must be an integer")?
+        .unwrap_or(default_limit);
+    anyhow::ensure!((1..=max_limit).contains(&limit),
+        "offline list limit must be between 1 and {max_limit}");
+    Ok((limit, scope))
+}
+
 fn run() -> Result<()> {
     let arguments: Vec<String> = env::args().skip(1).collect();
 
@@ -283,31 +303,19 @@ fn run() -> Result<()> {
                 );
             }
             Some("offline-index") => {
-                anyhow::ensure!(
-                    arguments.len() <= 3,
-                    "usage: mirrarium cache offline-index [LIMIT]"
-                );
-                let limit = arguments.get(2).map(|arg| arg.parse::<u64>())
-                    .transpose().context("offline-index limit must be an integer")?
-                    .unwrap_or(100);
+                let (limit, scope) = parse_offline_list_args(&arguments[2..], 100, 1000)?;
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&cache::offline_index(&root, limit)?)?
+                    serde_json::to_string_pretty(&cache::offline_index_scoped(&root, limit, scope)?)?
                 );
             }
             Some("offline-library") => {
                 anyhow::ensure!(
-                    (3..=4).contains(&arguments.len()),
-                    "usage: mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT]"
+                    arguments.len() >= 3,
+                    "usage: mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT] [--scope SHA256]"
                 );
-                let limit = arguments.get(3).map(|value| value.parse::<u64>())
-                    .transpose().context("offline-library limit must be an integer")?
-                    .unwrap_or(25);
-                anyhow::ensure!(
-                    (1..=100).contains(&limit),
-                    "offline-library limit must be between 1 and 100"
-                );
-                let entries = cache::offline_index(&root, limit.saturating_mul(2))?;
+                let (limit, scope) = parse_offline_list_args(&arguments[3..], 25, 100)?;
+                let entries = cache::offline_index_scoped(&root, limit.saturating_mul(2), scope)?;
                 anyhow::ensure!(!entries.is_empty(), "no archived conversation snapshots found");
                 let destination = PathBuf::from(&arguments[2]);
                 offline_view::create_private_library_directory(&destination)?;
@@ -323,7 +331,7 @@ fn run() -> Result<()> {
                         // Corrupt or incomplete snapshots must not be
                         // rendered, but an unrelated verified capture can
                         // still be exported from the same archive.
-                        let capture = match cache::offline_conversation(&root, &item.api_url) {
+                        let capture = match cache::offline_conversation_scoped(&root, &item.api_url, scope) {
                             Ok(Some(capture)) => capture,
                             Ok(None) | Err(_) => {
                                 skipped += 1;
@@ -384,6 +392,7 @@ fn run() -> Result<()> {
                     "conversations": count,
                     "text_messages": messages,
                     "skipped_unreadable": skipped,
+                    "selected_account_scope": scope,
                     "offline": true,
                     "freshness_verified": false,
                     "plaintext_private_files": true,
@@ -2174,10 +2183,10 @@ USAGE:
   mirrarium cache candidates [LIMIT]
   mirrarium cache public-coverage
   mirrarium cache private-reads [LIMIT]
-  mirrarium cache offline-index [LIMIT]
+  mirrarium cache offline-index [LIMIT] [--scope SHA256]
   mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>
   mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>
-  mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT]
+  mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT] [--scope SHA256]
   mirrarium cache private-coverage
   mirrarium corpus rebuild
   mirrarium corpus stats
