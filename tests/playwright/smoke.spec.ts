@@ -34,6 +34,11 @@ async function execFileWithInputResult(
       stderr += chunk;
     });
     child.on("error", rejectPromise);
+    // Read-only probes may exit before stdin is closed. Ignore a broken pipe
+    // here and report the real process exit status from the close event.
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") rejectPromise(error);
+    });
     child.on("close", (code) => {
       resolvePromise({ code, stdout, stderr });
     });
@@ -63,6 +68,11 @@ async function execFileWithInput(
       stderr += chunk;
     });
     child.on("error", rejectPromise);
+    // Read-only probes may exit before stdin is closed. Ignore a broken pipe
+    // here and report the real process exit status from the close event.
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") rejectPromise(error);
+    });
     child.on("close", (code) => {
       if (code === 0) {
         resolvePromise({ stdout, stderr });
