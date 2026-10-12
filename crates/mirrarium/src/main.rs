@@ -9,6 +9,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+mod offline_view;
+
 use mirrarium_cache as cache;
 use mirrarium_corpus as corpus;
 use mirrarium_store::{
@@ -293,6 +295,29 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&cache::offline_index(&root, limit)?)?
                 );
             }
+            Some("offline-html") => {
+                anyhow::ensure!(
+                    arguments.len() == 4,
+                    "usage: mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>"
+                );
+                let capture = cache::offline_conversation(&root, &arguments[2])?
+                    .context("no complete, locally archived conversation JSON response for that exact URL")?;
+                let response: serde_json::Value = serde_json::from_slice(&capture.body)
+                    .context("archived conversation is not valid JSON")?;
+                let (html, message_count) = offline_view::render_offline_html(
+                    &response, &capture.url, capture.captured_at_ms
+                );
+                let output = PathBuf::from(&arguments[3]);
+                offline_view::write_private_html(&output, &html)?;
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "written": true,
+                    "path": output,
+                    "messages": message_count,
+                    "offline": true,
+                    "freshness_verified": false,
+                    "plaintext_private_file": true,
+                }))?);
+            }
             Some("offline-conversation") => {
                 anyhow::ensure!(
                     arguments.len() == 3,
@@ -347,10 +372,10 @@ fn run() -> Result<()> {
                 );
             }
             Some(command) => anyhow::bail!(
-                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-index, offline-conversation, or private-coverage"
+                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-index, offline-conversation, offline-html, or private-coverage"
             ),
             None => anyhow::bail!(
-                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', 'mirrarium cache offline-index [LIMIT]', 'mirrarium cache private-coverage', or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>'"
+                "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', 'mirrarium cache offline-index [LIMIT]', 'mirrarium cache private-coverage', or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>' or 'mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>'"
             ),
         },
         Some("corpus") => match arguments.get(1).map(String::as_str) {
@@ -2057,6 +2082,7 @@ USAGE:
   mirrarium cache private-reads [LIMIT]
   mirrarium cache offline-index [LIMIT]
   mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>
+  mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>
   mirrarium cache private-coverage
   mirrarium corpus rebuild
   mirrarium corpus stats

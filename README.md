@@ -88,6 +88,7 @@ mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
 mirrarium cache offline-index [limit]
 mirrarium cache offline-conversation <chatgpt-conversation-url>
+mirrarium cache offline-html <chatgpt-conversation-url> <new-output-file>
 mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
@@ -248,6 +249,27 @@ corruption. The index is private account metadata (IDs and URLs), so do not
 publish its output or persist it in shared job logs. Multiple ChatGPT accounts
 can still be represented in one raw archive: this is not account-isolated
 automatic replay and must not be treated as proof of who is signed in.
+
+### Script-free offline HTML viewer
+
+\`mirrarium cache offline-html https://chatgpt.com/c/<id> /path/to/new-page.html\`
+creates a self-contained HTML snapshot from the latest verified captured response,
+with no server, external resources, active scripts, or network access. For
+ChatGPT mapping responses, it follows only the captured \`current_node\` ancestor
+chain (not discarded branches); simple \`messages\` arrays are supported too.
+Message text is escaped, not interpreted as HTML or Markdown. Non-text parts,
+attachments, and tool-specific rich media are not displayed in this first viewer.
+The page explicitly labels itself historical, with freshness unverified.
+
+**Privacy and filesystem protection:** HTML contains the selected conversation's
+**plaintext**, and is written only to a *new* user-selected file. Existing
+files (including symlinks) are never overwritten; on Unix the new file gets
+owner-only \`0600\` permissions. The CLI prints only the destination and message
+count, not message bodies. Keep exported HTML outside public repositories,
+synced/public directories, and Jobflick log output. Delete the file when no
+longer needed; the encrypted Mirrarium archive is unchanged. This standalone
+viewer does not yet support interactive search or automatic reuse inside the
+ChatGPT website.
 
 ## Chromium deployment diagnostics
 

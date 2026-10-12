@@ -119,3 +119,13 @@ cover latest-first ordering, duplicate observations, cross-origin URL
 spoofing, rejected private GET shapes, and the distinction between listing
 metadata and verifying a stored body. The index never performs automatic
 private response substitution.
+
+## Offline HTML viewer acceptance
+
+The isolated browser-restart test writes an explicit owner-only HTML export
+after Chromium shutdown, checks that re-export cannot overwrite the file,
+confirms the fixture origin sees no additional request, and opens the result as
+a file URL in disposable Chromium. Rust unit tests cover proper escaping,
+selected-branch ordering, omitted discarded branches, simple message arrays,
+empty views, and exclusive private-file creation. The viewer has a strict
+script/network-denying CSP and renders text only. No real account is used.

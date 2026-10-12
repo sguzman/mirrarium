@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { chromium, expect, test } from "@playwright/test";
@@ -265,6 +266,32 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     await expect(runCli(["cache", "offline-index", "0"]))
       .rejects.toThrow("offline-index limit must be between 1 and 1000");
 
+    const exportedHtmlPath = join(root, "selected-conversation.html");
+    const exportedSummary = JSON.parse(await runCli([
+      "cache", "offline-html", fixtureOrigin + "/c/test", exportedHtmlPath,
+    ])) as {
+      written: boolean;
+      messages: number;
+      plaintext_private_file: boolean;
+      offline: boolean;
+      freshness_verified: boolean;
+    };
+    expect(exportedSummary).toMatchObject({
+      written: true,
+      messages: 1,
+      plaintext_private_file: true,
+      offline: true,
+      freshness_verified: false,
+    });
+    const offlineHtml = await readFile(exportedHtmlPath, "utf8");
+    expect(offlineHtml).toContain("private corpus material");
+    expect(offlineHtml).toContain("script-src 'none'");
+    expect(offlineHtml).not.toContain("<script>");
+    await expect(runCli([
+      "cache", "offline-html", fixtureOrigin + "/c/test", exportedHtmlPath,
+    ])).rejects.toThrow("creating new private offline page");
+    expect(await originCounts()).toEqual(offlineOriginBefore);
+
     const byChatLink = JSON.parse(
       await runCli(["cache", "offline-conversation", fixtureOrigin + "/c/test"])
     ) as typeof archived;
@@ -288,6 +315,14 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
 
     context = await launch();
     const reopenedPage = await openReadyPage(context);
+    const offlinePage = await context.newPage();
+    await offlinePage.goto(pathToFileURL(exportedHtmlPath).href);
+    await expect(offlinePage.locator("h1")).toHaveText("Private fixture");
+    await expect(offlinePage.locator("article")).toHaveCount(1);
+    await expect(offlinePage.locator("article .content")).toContainText(
+      "private corpus material"
+    );
+    await offlinePage.close();
     const session = await context.newCDPSession(reopenedPage);
     try {
       await session.send("Network.enable");
