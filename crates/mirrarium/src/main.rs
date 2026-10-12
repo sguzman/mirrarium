@@ -310,6 +310,13 @@ fn run() -> Result<()> {
                     serde_json::to_string_pretty(&cache::private_coverage(&root)?)?
                 );
             }
+            Some("offline-accounts") => {
+                anyhow::ensure!(
+                    arguments.len() == 2,
+                    "usage: mirrarium cache offline-accounts"
+                );
+                println!("{}", serde_json::to_string_pretty(&cache::offline_accounts(&root)?)?);
+            }
             Some("offline-index") => {
                 let (limit, scope) = parse_offline_list_args(&arguments[2..], 100, 1000)?;
                 println!(
@@ -487,7 +494,7 @@ fn run() -> Result<()> {
                 );
             }
             Some(command) => anyhow::bail!(
-                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-index, offline-conversation, offline-html, offline-library, or private-coverage"
+                "unknown cache command {command:?}; use opportunities, stats, replay-stats, revalidation-stats, candidates, public-coverage, private-reads, offline-accounts, offline-index, offline-conversation, offline-html, offline-library, or private-coverage"
             ),
             None => anyhow::bail!(
                 "missing cache command; use 'mirrarium cache opportunities', 'mirrarium cache stats', 'mirrarium cache replay-stats', 'mirrarium cache revalidation-stats', 'mirrarium cache candidates', 'mirrarium cache public-coverage', 'mirrarium cache private-reads', 'mirrarium cache offline-index [LIMIT]', 'mirrarium cache private-coverage', or 'mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>' or 'mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>' or 'mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT]'"
@@ -2195,6 +2202,7 @@ USAGE:
   mirrarium cache candidates [LIMIT]
   mirrarium cache public-coverage
   mirrarium cache private-reads [LIMIT]
+  mirrarium cache offline-accounts
   mirrarium cache offline-index [LIMIT] [--scope SHA256]
   mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL> [--scope SHA256]
   mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE> [--scope SHA256]
