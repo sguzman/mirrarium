@@ -86,6 +86,7 @@ mirrarium cache revalidation-stats
 mirrarium cache candidates [limit]
 mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
+mirrarium cache offline-conversation <exact-captured-conversation-api-url>
 mirrarium cache private-coverage
 mirrarium corpus rebuild
 mirrarium corpus stats
@@ -197,6 +198,34 @@ The Chromium test disables the browser's own HTTP cache and proves both data and
 `corpus stream-revisions` exposes per-event full-message stream evidence with explicit message and parent IDs. Canonicalization uses that evidence conservatively: exact message IDs may refine prefix-compatible snapshot text, and a streamed child may extend the canonical tail only when its explicit parent is the current tail and there is exactly one child candidate. Branches, conflicting revisions, older-than-snapshot streams, and otherwise ambiguous evidence are preserved but never guessed into the canonical transcript.
 
 The derived corpus is explicitly schema-versioned (currently internal schema v7; the conversation export wire remains v1). Schema v5 introduced materialization of the exact v1 `record_sha256` for every exported conversation during rebuild, using the same pinned raw-ledger snapshot as derivation; rebuild and `corpus verify` recompute those records and reject any cached-hash disagreement. When the rebuildable schema changes, readers fail with a direct instruction to run `mirrarium corpus rebuild` rather than leaking low-level SQLite column errors. `corpus verify` is a read-only integrity pass over the encrypted derived database: it runs SQLite integrity and foreign-key checks; validates whole-response SSE counts, sequence shape, and JSON markers; cross-checks conversation snapshots, message observations, stream revisions/reconstructions, attachment observations, and captured downloads against the authoritative raw ledger; and also verifies WebSocket/EventSource stream counts, transport semantics, skipped/derived separation, reconnect edges, JSON consistency, raw capture/hash/URL/direction provenance, and the materialized export identity index.
+
+## Explicit offline conversation snapshot read
+
+`mirrarium cache offline-conversation https://chatgpt.com/backend-api/conversation/<id>`
+reads the **latest complete captured JSON response** for that exact ChatGPT
+conversation API URL directly from the encrypted local archive, without opening
+Chromium, contacting ChatGPT, or requiring a published derived-corpus rebuild.
+Use the exact origin, optional port, and URL that were captured; it also
+supports `https://chat.openai.com/backend-api/conversation/<id>`.
+
+The returned JSON envelope includes the capture ID, capture time, verified body
+hash and byte count, `offline: true`, `freshness_verified: false`, and the
+original response JSON under `response`. The body is verified and decrypted
+through the existing private content-addressed store. It will refuse invalid
+hosts, auth endpoints, query-bearing URLs, missing archives, incomplete captures,
+or corrupt stored content; it never falls back silently to a corrupt or partial
+snapshot.
+
+**Privacy:** This is an explicitly invoked, *plaintext private-data export*
+to stdout. Do not use it in persistent Jobflick logs, publish its output,
+redirect it into a public repository, or treat it as an authenticated response
+for a different signed-in account. The native host and browser never invoke
+this CLI path automatically. It is not yet an offline ChatGPT web viewer and
+does not substitute stale private responses into the live site. HTTP
+`Cache-Control` controls automatic network substitution; this explicit
+historical archive reader can inspect raw captures even when validators are
+missing or a response was marked `no-store`. The next browser-facing
+milestone requires authenticated account separation and safe freshness rules.
 
 ## Chromium deployment diagnostics
 

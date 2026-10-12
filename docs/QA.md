@@ -97,3 +97,14 @@ persisted private captures after a complete browser shutdown. The diagnostic
 must never claim a live browser is verified; it does not inspect the user's
 real browser profile, create an empty ledger, or print private conversation
 content. Separate real-session acceptance remains outstanding.
+
+## Explicit archived conversation read
+
+The Chromium restart test reads the encrypted conversation snapshot through
+`cache offline-conversation` after the browser has closed, asserts the
+snapshot content, hash, and explicit unverified-freshness marker, and proves
+that the origin sees no additional request. It also rejects non-conversation
+API URLs. Rust unit coverage exercises latest-snapshot selection without ETags,
+strict URL scope, and rejection of corrupt CAS bodies. The offline CLI writes
+plaintext private response JSON **only on explicit invocation** and does not
+add a background browser replay mode.
