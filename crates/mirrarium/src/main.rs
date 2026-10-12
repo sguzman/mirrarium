@@ -121,6 +121,9 @@ fn run() -> Result<()> {
     if arguments.first().map(String::as_str) == Some("extension") {
         return handle_extension(&arguments[1..]);
     }
+    if arguments.first().map(String::as_str) == Some("doctor") {
+        return handle_doctor(&arguments[1..]);
+    }
 
     let root = default_data_root()?;
 
@@ -1653,6 +1656,146 @@ fn copy_extension_tree(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Inspect deployment wiring without connecting to a browser, touching its
+/// sessions, or creating an archive. This is a static readiness report: the
+/// running browser and any real ChatGPT capture require separate validation.
+fn handle_doctor(arguments: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        arguments.len() <= 1,
+        "usage: mirrarium doctor [edge|chromium|chrome|chrome-for-testing]"
+    );
+    let browser = arguments.first().map(String::as_str).unwrap_or("chromium");
+    let manifest_path = native_host_manifest_path(browser)?;
+    let extension_path = extension_install_path()?;
+    let data_root = default_data_root()?;
+    let ledger_path = data_root.join("ledger.sqlite3");
+
+    let extension_installed = fs::symlink_metadata(&extension_path).is_ok();
+    let extension_check = (|| -> Result<String> {
+        let metadata = fs::symlink_metadata(&extension_path)
+            .with_context(|| format!("inspecting extension {}", extension_path.display()))?;
+        anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "extension install root is not a real directory"
+        );
+        let manifest = validate_extension_directory(&extension_path)?;
+        validate_extension_install_generation(&extension_path, &manifest)?;
+        Ok(manifest
+            .get("version_name")
+            .and_then(serde_json::Value::as_str)
+            .context("installed extension has no build ID")?
+            .to_owned())
+    })();
+    let extension_build_id = extension_check.as_ref().ok().cloned();
+    let extension_valid = extension_check.is_ok();
+    let extension_error = extension_check.as_ref().err().map(|e| format!("{e:#}"));
+    // This is the last build observed by the service worker, not proof that a
+    // browser session is currently running or that CDP is attached.
+    let last_observed = read_extension_runtime_build_id();
+    let observed_build_id = last_observed.as_ref().ok().and_then(Clone::clone);
+    let runtime_error = last_observed.as_ref().err().map(|e| format!("{e:#}"));
+    let reload_required = extension_build_id
+        .as_deref()
+        .zip(observed_build_id.as_deref())
+        .is_some_and(|(installed, observed)| installed != observed);
+
+    let native_installed = fs::symlink_metadata(&manifest_path).is_ok();
+    let native_check = inspect_native_host_manifest(&manifest_path);
+    let native_valid = native_check.is_ok();
+    let native_binary_path = native_check.as_ref().ok().cloned();
+    let native_error = native_check.as_ref().err().map(|e| format!("{e:#}"));
+
+    let archive_present = fs::symlink_metadata(&ledger_path).is_ok();
+    let archive_check = (|| -> Result<(u64, u64)> {
+        let metadata = fs::symlink_metadata(&ledger_path)
+            .with_context(|| format!("inspecting archive {}", ledger_path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "archive ledger is not a regular file"
+        );
+        let store = CaptureStore::open_read_only(&data_root)?;
+        let stats = store.stats()?;
+        Ok((stats.captures, stats.private_captures))
+    })();
+    let archive_readable = archive_check.is_ok();
+    let archive_counts = archive_check.as_ref().ok().copied();
+    let archive_error = archive_check.as_ref().err().map(|e| format!("{e:#}"));
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "browser": browser,
+            "installation_ready": extension_valid && native_valid,
+            "live_browser_verified": false,
+            "extension": {
+                "install_path": extension_path,
+                "installed": extension_installed,
+                "valid": extension_valid,
+                "build_id": extension_build_id,
+                "last_observed_running_build_id": observed_build_id,
+                "reload_required": reload_required,
+                "error": extension_error,
+                "runtime_state_error": runtime_error,
+            },
+            "native_host": {
+                "manifest_path": manifest_path,
+                "installed": native_installed,
+                "valid": native_valid,
+                "host_binary": native_binary_path,
+                "error": native_error,
+            },
+            "archive": {
+                "data_root": data_root,
+                "present": archive_present,
+                "readable": archive_readable,
+                "captures": archive_counts.map(|counts| counts.0),
+                "private_captures": archive_counts.map(|counts| counts.1),
+                "error": archive_error,
+            }
+        }))?
+    );
+    Ok(())
+}
+
+fn inspect_native_host_manifest(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting native-host manifest {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "native-host manifest is not a regular file"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+    ).with_context(|| format!("parsing {}", path.display()))?;
+    anyhow::ensure!(
+        manifest.get("name").and_then(serde_json::Value::as_str) == Some(NATIVE_HOST_NAME),
+        "native-host manifest name does not match Mirrarium"
+    );
+    anyhow::ensure!(
+        manifest.get("type").and_then(serde_json::Value::as_str) == Some("stdio"),
+        "native-host manifest must use stdio"
+    );
+    let expected_origin = format!("chrome-extension://{EXTENSION_ID}/");
+    let origins = manifest
+        .get("allowed_origins")
+        .and_then(serde_json::Value::as_array)
+        .context("native-host manifest has no allowed_origins array")?;
+    anyhow::ensure!(
+        origins.len() == 1 && origins[0].as_str() == Some(expected_origin.as_str()),
+        "native-host manifest is not restricted to the Mirrarium extension ID"
+    );
+    let binary = manifest
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .context("native-host manifest has no binary path")?;
+    let binary_path = Path::new(binary);
+    anyhow::ensure!(binary_path.is_absolute(), "native-host binary path must be absolute");
+    anyhow::ensure!(binary_path.is_file(), "native-host binary is missing");
+    ensure_executable(binary_path)?;
+    Ok(binary.to_owned())
+}
+
 fn handle_native_host(arguments: &[String]) -> Result<()> {
     match arguments.first().map(String::as_str) {
         Some("install") => {
@@ -1927,6 +2070,7 @@ USAGE:
   mirrarium corpus eventsource-streams [LIMIT]
   mirrarium corpus eventsource-events <LIFECYCLE_ID> [LIMIT]
   mirrarium corpus stream-revisions <CONVERSATION_ID> [LIMIT]
+  mirrarium doctor [BROWSER]
   mirrarium extension install [SOURCE_DIR]
   mirrarium extension status
   mirrarium extension uninstall
