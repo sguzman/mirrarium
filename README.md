@@ -282,9 +282,12 @@ with ordinary local file links. The library opens without ChatGPT, localhost
 services, browser extensions, network access, or JavaScript.
 
 All pages are plaintext private snapshots (individual HTML files have Unix
-permissions \`0600\`). Existing output directories are refused. If the export
-fails due to a missing or corrupted archive object, Mirrarium attempts to
-remove only files created by that invocation, without recursive deletion. This
+permissions \`0600\`). Existing output directories are refused. Unreadable, oversized, or corrupt
+individual captures are skipped rather than rendered; the summary reports
+`skipped_unreadable`. Mirrarium examines up to twice the requested result
+count to compensate for unavailable snapshots. If no verified conversation
+can be exported, or if a filesystem write fails, Mirrarium attempts to remove
+only files created by that invocation, without recursive deletion. This
 is an explicit manual export; it can include material originally captured
 under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated

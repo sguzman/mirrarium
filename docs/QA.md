@@ -140,3 +140,11 @@ conversation in disposable Chromium. It checks that message text is absent
 from the index and that no extra origin request occurs. Rust unit tests cover
 index-title HTML escaping, relative-only local links, and owner-private
 directory creation.
+
+## Partial offline library recovery
+
+Playwright copies the disposable archive after browser shutdown, corrupts one
+private CAS object in the copy only, and exports the library from that copy.
+The library must skip the unreadable conversation, preserve other verified
+snapshots, report a nonzero skipped count, and avoid any ChatGPT origin fetch.
+The original archive remains intact for the remaining revalidation tests.

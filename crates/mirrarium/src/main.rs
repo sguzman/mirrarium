@@ -307,22 +307,36 @@ fn run() -> Result<()> {
                     (1..=100).contains(&limit),
                     "offline-library limit must be between 1 and 100"
                 );
-                let entries = cache::offline_index(&root, limit)?;
+                let entries = cache::offline_index(&root, limit.saturating_mul(2))?;
                 anyhow::ensure!(!entries.is_empty(), "no archived conversation snapshots found");
                 let destination = PathBuf::from(&arguments[2]);
                 offline_view::create_private_library_directory(&destination)?;
                 let mut generated = Vec::<PathBuf>::new();
-                let export = (|| -> Result<(usize, usize)> {
+                let export = (|| -> Result<(usize, usize, usize)> {
                     let mut listing = Vec::new();
                     let mut total_messages = 0usize;
-                    for (index, item) in entries.iter().enumerate() {
-                        let capture = cache::offline_conversation(&root, &item.api_url)?
-                            .with_context(|| format!(
-                                "archived snapshot unavailable for conversation {}",
-                                item.conversation_id
-                            ))?;
-                        let response: serde_json::Value = serde_json::from_slice(&capture.body)
-                            .context("archived conversation JSON is malformed")?;
+                    let mut skipped = 0usize;
+                    for item in &entries {
+                        if listing.len() >= limit as usize {
+                            break;
+                        }
+                        // Corrupt or incomplete snapshots must not be
+                        // rendered, but an unrelated verified capture can
+                        // still be exported from the same archive.
+                        let capture = match cache::offline_conversation(&root, &item.api_url) {
+                            Ok(Some(capture)) => capture,
+                            Ok(None) | Err(_) => {
+                                skipped += 1;
+                                continue;
+                            }
+                        };
+                        let response: serde_json::Value = match serde_json::from_slice(&capture.body) {
+                            Ok(response) => response,
+                            Err(_) => {
+                                skipped += 1;
+                                continue;
+                            }
+                        };
                         let title = response.get("title").and_then(serde_json::Value::as_str)
                             .filter(|title| !title.is_empty())
                             .unwrap_or("Archived conversation")
@@ -330,7 +344,7 @@ fn run() -> Result<()> {
                         let (html, message_count) = offline_view::render_offline_html(
                             &response, &capture.url, capture.captured_at_ms
                         );
-                        let filename = format!("conversation-{:04}.html", index + 1);
+                        let filename = format!("conversation-{:04}.html", listing.len() + 1);
                         let output = destination.join(&filename);
                         offline_view::write_private_html(&output, &html)?;
                         generated.push(output);
@@ -342,13 +356,17 @@ fn run() -> Result<()> {
                             message_count,
                         });
                     }
+                    anyhow::ensure!(
+                        !listing.is_empty(),
+                        "no readable and verified conversation snapshots found"
+                    );
                     let html = offline_view::render_library_index(&listing);
                     let output = destination.join("index.html");
                     offline_view::write_private_html(&output, &html)?;
                     generated.push(output);
-                    Ok((listing.len(), total_messages))
+                    Ok((listing.len(), total_messages, skipped))
                 })();
-                let (count, messages) = match export {
+                let (count, messages, skipped) = match export {
                     Ok(success) => success,
                     Err(error) => {
                         // Remove only paths this invocation created. Never
@@ -365,6 +383,7 @@ fn run() -> Result<()> {
                     "path": destination.join("index.html"),
                     "conversations": count,
                     "text_messages": messages,
+                    "skipped_unreadable": skipped,
                     "offline": true,
                     "freshness_verified": false,
                     "plaintext_private_files": true,

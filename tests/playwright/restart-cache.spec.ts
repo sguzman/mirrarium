@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -311,6 +311,7 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     });
     expect(libraryReport.conversations).toBeGreaterThanOrEqual(1);
     expect(libraryReport.text_messages).toBeGreaterThan(0);
+    expect((libraryReport as typeof libraryReport & { skipped_unreadable: number }).skipped_unreadable).toBe(0);
     const libraryHtml = await readFile(join(libraryPath, "index.html"), "utf8");
     expect(libraryHtml).toContain("Mirrarium offline library");
     expect(libraryHtml).toContain("Private fixture");
@@ -318,6 +319,30 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     await expect(runCli([
       "cache", "offline-library", libraryPath, "20",
     ])).rejects.toThrow("creating new private offline library");
+    expect(await originCounts()).toEqual(offlineOriginBefore);
+
+    // Deliberately corrupt only a copied archive. The normal source archive
+    // remains intact for subsequent revalidation and restart assertions.
+    const corruptArchive = join(root, "corrupted-archive-copy");
+    await cp(dataDir, corruptArchive, { recursive: true });
+    const hash = archived.body_sha256;
+    await writeFile(
+      join(corruptArchive, "private", "objects", hash.slice(0, 2), hash),
+      Buffer.from("corrupt copied private object"),
+    );
+    const partialDirectory = join(root, "partial-offline-library");
+    const partialSummary = JSON.parse((await execFileAsync(cli, [
+      "cache", "offline-library", partialDirectory, "20",
+    ], { env: { ...env, MIRRARIUM_DATA_DIR: corruptArchive } })).stdout) as {
+      conversations: number;
+      skipped_unreadable: number;
+      written: boolean;
+    };
+    expect(partialSummary.written).toBe(true);
+    expect(partialSummary.skipped_unreadable).toBeGreaterThanOrEqual(1);
+    expect(partialSummary.conversations).toBeGreaterThanOrEqual(1);
+    const partialIndex = await readFile(join(partialDirectory, "index.html"), "utf8");
+    expect(partialIndex).not.toContain("Private fixture");
     expect(await originCounts()).toEqual(offlineOriginBefore);
 
     const byChatLink = JSON.parse(
