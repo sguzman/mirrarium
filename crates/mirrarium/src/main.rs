@@ -134,6 +134,14 @@ fn parse_offline_list_args<'a>(
     Ok((limit, scope))
 }
 
+fn parse_offline_scope_arg(extra: &[String]) -> Result<Option<&str>> {
+    match extra {
+        [] => Ok(None),
+        [flag, hash] if flag == "--scope" => Ok(Some(hash.as_str())),
+        _ => anyhow::bail!("expected optional --scope LOWERCASE_SHA256"),
+    }
+}
+
 fn run() -> Result<()> {
     let arguments: Vec<String> = env::args().skip(1).collect();
 
@@ -400,10 +408,11 @@ fn run() -> Result<()> {
             }
             Some("offline-html") => {
                 anyhow::ensure!(
-                    arguments.len() == 4,
-                    "usage: mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>"
+                    arguments.len() >= 4,
+                    "usage: mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE> [--scope SHA256]"
                 );
-                let capture = cache::offline_conversation(&root, &arguments[2])?
+                let scope = parse_offline_scope_arg(&arguments[4..])?;
+                let capture = cache::offline_conversation_scoped(&root, &arguments[2], scope)?
                     .context("no complete, locally archived conversation JSON response for that exact URL")?;
                 let response: serde_json::Value = serde_json::from_slice(&capture.body)
                     .context("archived conversation is not valid JSON")?;
@@ -416,6 +425,7 @@ fn run() -> Result<()> {
                     "written": true,
                     "path": output,
                     "messages": message_count,
+                    "selected_account_scope": scope,
                     "offline": true,
                     "freshness_verified": false,
                     "plaintext_private_file": true,
@@ -423,11 +433,12 @@ fn run() -> Result<()> {
             }
             Some("offline-conversation") => {
                 anyhow::ensure!(
-                    arguments.len() == 3,
-                    "usage: mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>"
+                    arguments.len() >= 3,
+                    "usage: mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL> [--scope SHA256]"
                 );
+                let scope = parse_offline_scope_arg(&arguments[3..])?;
                 let url = &arguments[2];
-                let capture = cache::offline_conversation(&root, url)?
+                let capture = cache::offline_conversation_scoped(&root, url, scope)?
                     .context("no complete, locally archived conversation JSON response for that exact URL")?;
                 // Explicit invocation only: emits PRIVATE content to stdout.
                 // Never store it in logs, print during a background probe, or
@@ -442,6 +453,7 @@ fn run() -> Result<()> {
                         "captured_at_ms": capture.captured_at_ms,
                         "body_sha256": capture.body_hash,
                         "body_bytes": capture.body_bytes,
+                        "selected_account_scope": scope,
                         "offline": true,
                         "freshness_verified": false,
                         "response": body,
@@ -2184,8 +2196,8 @@ USAGE:
   mirrarium cache public-coverage
   mirrarium cache private-reads [LIMIT]
   mirrarium cache offline-index [LIMIT] [--scope SHA256]
-  mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL>
-  mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE>
+  mirrarium cache offline-conversation <CHATGPT_CONVERSATION_URL> [--scope SHA256]
+  mirrarium cache offline-html <CHATGPT_CONVERSATION_URL> <NEW_OUTPUT_FILE> [--scope SHA256]
   mirrarium cache offline-library <NEW_DIRECTORY> [LIMIT] [--scope SHA256]
   mirrarium cache private-coverage
   mirrarium corpus rebuild

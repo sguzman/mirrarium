@@ -162,3 +162,10 @@ The raw-store Rust test verifies that transient request account identifiers
 are transformed into archive-salted fingerprints before commit; the original
 header value is redacted, the transient field is never serialized, and the
 same account under a different archive identity receives a different hash.
+
+## Individual historical account scope acceptance
+
+The isolated Chromium fixture reads and exports a single captured conversation
+with a known account fingerprint; the same URL under a nonexistent account
+fingerprint fails rather than selecting the unfiltered latest response. The
+scoped HTML export does not create a plaintext file on a cache miss.

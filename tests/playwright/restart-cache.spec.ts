@@ -266,6 +266,20 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     ])) as Array<{ api_url: string; account_scope_hash: string }>;
     expect(restricted.some((entry) => entry.api_url === indexed?.api_url)).toBe(true);
     expect(restricted.every((entry) => entry.account_scope_hash === fingerprint)).toBe(true);
+    const oneScoped = JSON.parse(await runCli([
+      "cache", "offline-conversation", fixtureOrigin + "/c/test",
+      "--scope", fingerprint,
+    ])) as {
+      selected_account_scope: string;
+      response: typeof first;
+    };
+    expect(oneScoped.selected_account_scope).toBe(fingerprint);
+    expect(oneScoped.response).toEqual(first);
+    await expect(runCli([
+      "cache", "offline-conversation", fixtureOrigin + "/c/test",
+      "--scope", "f".repeat(64),
+    ])).rejects.toThrow("no complete, locally archived conversation JSON");
+
     expect(JSON.parse(await runCli([
       "cache", "offline-index", "50", "--scope", "f".repeat(64),
     ]))).toEqual([]);
@@ -298,6 +312,22 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     expect(offlineHtml).toContain("private corpus material");
     expect(offlineHtml).toContain("script-src 'none'");
     expect(offlineHtml).not.toContain("<script>");
+    const scopedOneHtmlPath = join(root, "scoped-selected-conversation.html");
+    const scopedOneHtml = JSON.parse(await runCli([
+      "cache", "offline-html", fixtureOrigin + "/c/test",
+      scopedOneHtmlPath, "--scope", fingerprint,
+    ])) as { written: boolean; selected_account_scope: string };
+    expect(scopedOneHtml).toMatchObject({
+      written: true,
+      selected_account_scope: fingerprint,
+    });
+    expect(await readFile(scopedOneHtmlPath, "utf8"))
+      .toContain("private corpus material");
+    await expect(runCli([
+      "cache", "offline-html", fixtureOrigin + "/c/test",
+      join(root, "other-account-only.html"), "--scope", "f".repeat(64),
+    ])).rejects.toThrow("no complete, locally archived conversation JSON");
+
     await expect(runCli([
       "cache", "offline-html", fixtureOrigin + "/c/test", exportedHtmlPath,
     ])).rejects.toThrow("creating new private offline page");

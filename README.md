@@ -87,8 +87,8 @@ mirrarium cache candidates [limit]
 mirrarium cache public-coverage
 mirrarium cache private-reads [limit]
 mirrarium cache offline-index [limit] [--scope SHA256]
-mirrarium cache offline-conversation <chatgpt-conversation-url>
-mirrarium cache offline-html <chatgpt-conversation-url> <new-output-file>
+mirrarium cache offline-conversation <chatgpt-conversation-url> [--scope SHA256]
+mirrarium cache offline-html <chatgpt-conversation-url> <new-output-file> [--scope SHA256]
 mirrarium cache offline-library <new-output-directory> [limit] [--scope SHA256]
 mirrarium cache private-coverage
 mirrarium corpus rebuild
@@ -328,6 +328,17 @@ Old captures have no scope and are excluded from filtered exports. Unfiltered
 historical exports remain available, but can mix accounts. An archive-local
 fingerprint does not prove current authentication or grant permission to
 automatically serve private data in the live site.
+
+### Scoped individual offline exports
+
+`mirrarium cache offline-conversation <url> --scope <SHA256>` and
+`mirrarium cache offline-html <url> <new-file> --scope <SHA256>` use exactly
+the same archive-local account filter as the batch offline library. A newer
+response under another account's identical conversation URL is not selected.
+If a fingerprint does not match a stored capture, the explicit export fails
+without substituting another account's bytes or creating the HTML file.
+Omitting `--scope` remains an explicitly unfiltered historical read and
+may select a response recorded under any account in that archive.
 
 ## Chromium deployment diagnostics
 
