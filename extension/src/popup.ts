@@ -13,9 +13,8 @@ function supported(url: string | undefined): boolean {
 
 async function targetTab(): Promise<number | undefined> {
   const active = await chrome.tabs.query({ active: true, currentWindow: true });
-  const all = await chrome.tabs.query({});
-  return (active.find((tab) => supported(tab.url)) ??
-    all.find((tab) => supported(tab.url)))?.id;
+  // Never enable replay for a different tab merely because it is open.
+  return active.find((tab) => supported(tab.url))?.id;
 }
 
 const statusElement = document.querySelector<HTMLElement>("#status")!;

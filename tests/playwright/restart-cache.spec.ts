@@ -235,6 +235,15 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     // historical conversation substitution. It applies to this tab alone.
     const popup = await context.newPage();
     await popup.goto("chrome-extension://" + extensionId + "/popup.html");
+    // A standalone popup document is active during this first read. It must
+    // not enable replay in an unrelated background ChatGPT tab.
+    await expect(popup.getByText("Open a ChatGPT tab to use this option."))
+      .toBeVisible();
+    await expect(popup.getByRole("button", { name: "Enable historical reuse" }))
+      .toBeDisabled();
+    // Normal toolbar invocation leaves the underlying ChatGPT tab active.
+    await firstPage.bringToFront();
+    await popup.reload();
     const toggle = popup.getByRole("button", { name: "Enable historical reuse" });
     await expect(toggle).toBeEnabled();
     await toggle.click();
