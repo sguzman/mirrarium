@@ -541,7 +541,8 @@ impl CaptureStore {
 
         let suppressed_reason = credential_endpoint_reason(&metadata.url).map(str::to_owned);
         metadata.url = sanitize_url_for_storage(&metadata.url);
-        sanitize_provenance(&mut metadata.provenance);
+        let archive_id = self.archive_id()?;
+        sanitize_provenance(&mut metadata.provenance, &archive_id);
 
         let temp_name = format!("{}.part", sha256_hex(metadata.capture_id.as_bytes()));
         let temp_path = self.root.join(".incoming").join(temp_name);
@@ -2222,7 +2223,27 @@ fn ensure_table_column(
     Ok(())
 }
 
-fn sanitize_provenance(provenance: &mut CaptureProvenance) {
+/// Stable only within this archive; never use unsalted cross-archive IDs.
+pub fn account_scope_hash(archive_id: &str, raw_account_id: &str) -> Option<String> {
+    let id = raw_account_id.trim();
+    if archive_id.len() != 64
+        || !archive_id.bytes().all(|c| c.is_ascii_hexdigit())
+        || id.is_empty()
+        || id.len() > 256
+        || !id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(sha256_hex(format!("mirrarium-account-scope-v1:{archive_id}:{id}").as_bytes()))
+}
+
+fn sanitize_provenance(provenance: &mut CaptureProvenance, archive_id: &str) {
+    provenance.account_scope_hash = provenance
+        .transient_account_id
+        .take()
+        .as_deref()
+        .and_then(|id| account_scope_hash(archive_id, id));
+
     if let Some(document_url) = provenance.document_url.as_mut() {
         *document_url = sanitize_url_for_storage(document_url);
     }
@@ -2269,6 +2290,7 @@ fn is_sensitive_header_name(normalized: &str) -> bool {
             | "x_xsrf_token"
             | "x_auth_token"
             | "x_api_key"
+            | "chatgpt_account_id"
     ) || normalized.ends_with("_token")
         || normalized.contains("credential")
 }

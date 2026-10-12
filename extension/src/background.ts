@@ -26,6 +26,7 @@ type RequestMetadata = {
   postDataEntryCount?: number;
   declaredContentLength?: number;
   headers: Record<string, string>;
+  accountId?: string;
   frameId?: string;
   loaderId?: string;
   documentUrl?: string;
@@ -1537,6 +1538,7 @@ function isSensitiveHeaderName(name: string): boolean {
       "x_xsrf_token",
       "x_auth_token",
       "x_api_key",
+      "chatgpt_account_id",
     ].includes(normalized) ||
     normalized.endsWith("_token") ||
     normalized.includes("credential")
@@ -2027,6 +2029,7 @@ function postCaptureStart(
         from_disk_cache: response?.fromDiskCache ?? false,
         from_service_worker: response?.fromServiceWorker ?? false,
         from_prefetch_cache: response?.fromPrefetchCache ?? false,
+        transient_account_id: request?.accountId,
         request_headers: request?.headers ?? {},
         response_headers: response?.headers ?? {},
       },
@@ -2240,6 +2243,7 @@ function captureEventSourceMessage(
         from_disk_cache: response?.fromDiskCache ?? false,
         from_service_worker: response?.fromServiceWorker ?? false,
         from_prefetch_cache: response?.fromPrefetchCache ?? false,
+        transient_account_id: request?.accountId,
         request_headers: request?.headers ?? {},
         response_headers: response?.headers ?? {},
       },
@@ -2592,6 +2596,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     }
 
     const requestHeaders = sanitizeHeaders(event.request.headers);
+    const accountId = header(event.request.headers, "ChatGPT-Account-Id");
     const pendingLastEventId = pendingEventSourceLastEventIds.get(key);
     pendingEventSourceLastEventIds.delete(key);
     if (event.type === "EventSource" && pendingLastEventId !== undefined) {
@@ -2609,6 +2614,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         header(event.request.headers, "content-length"),
       ),
       headers: requestHeaders,
+      accountId,
       frameId: event.frameId,
       loaderId: event.loaderId,
       documentUrl: event.documentURL,

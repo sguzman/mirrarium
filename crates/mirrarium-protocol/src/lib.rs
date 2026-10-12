@@ -20,6 +20,11 @@ pub struct CaptureProvenance {
     pub from_disk_cache: bool,
     pub from_service_worker: bool,
     pub from_prefetch_cache: bool,
+    /// Ephemeral request-account identity, never serialized into raw evidence.
+    #[serde(skip_serializing)]
+    pub transient_account_id: Option<String>,
+    /// Archive-salted hash; safe for private cache scope comparisons.
+    pub account_scope_hash: Option<String>,
     pub request_headers: BTreeMap<String, String>,
     pub response_headers: BTreeMap<String, String>,
 }
