@@ -275,7 +275,7 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
     expect(JSON.stringify(listed)).not.toContain('"messages"');
     expect(JSON.parse(await runCli(["cache", "offline-index", "1"]))).toHaveLength(1);
     await expect(runCli(["cache", "offline-index", "0"]))
-      .rejects.toThrow("offline-index limit must be between 1 and 1000");
+      .rejects.toThrow("offline list limit must be between 1 and 1000");
 
     const exportedHtmlPath = join(root, "selected-conversation.html");
     const exportedSummary = JSON.parse(await runCli([

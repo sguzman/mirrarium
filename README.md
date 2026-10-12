@@ -316,7 +316,7 @@ offline mirror. **Do not export into public repos or synced/shared folders.**
 
 ### Account-filtered offline library
 
-`mirrarium cache offline-index [limit] [--scope SHA256] [--scope SHA256]` reports the
+`mirrarium cache offline-index [limit] [--scope SHA256]` reports the
 archive-local `account_scope_hash` of each latest capture when available.
 For an account-specific export, run `mirrarium cache offline-library
 <new-directory> [limit] --scope <account_scope_hash>`. Both the metadata

@@ -4382,6 +4382,48 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn account_fingerprint_is_archive_local_and_raw_header_never_persists() {
+        let directory = tempdir().unwrap();
+        let mut store = CaptureStore::open(directory.path()).unwrap();
+        let archive_id = store.archive_id().unwrap();
+        let mut info = metadata(
+            "scoped-conversation",
+            "https://chatgpt.com/backend-api/conversation/test",
+            "Fetch",
+        );
+        info.provenance.transient_account_id = Some("fixture-account-secret".to_owned());
+        info.provenance.request_headers.insert(
+            "ChatGPT-Account-Id".to_owned(),
+            "fixture-account-secret".to_owned(),
+        );
+        store.begin(info).unwrap();
+        store.finish(
+            "scoped-conversation",
+            None,
+            Some("suppressed:test_body_not_needed"),
+        ).unwrap();
+        let stored = store.capture_by_id("scoped-conversation").unwrap().unwrap();
+        let fingerprint = account_scope_hash(&archive_id, "fixture-account-secret").unwrap();
+        assert_eq!(stored.provenance.account_scope_hash.as_deref(), Some(fingerprint.as_str()));
+        assert!(stored.provenance.transient_account_id.is_none());
+        assert_eq!(
+            stored.provenance.request_headers.get("ChatGPT-Account-Id").map(String::as_str),
+            Some("[REDACTED]"),
+        );
+        let json = serde_json::to_string(&stored.provenance).unwrap();
+        assert!(!json.contains("fixture-account-secret"));
+        assert!(json.contains(&fingerprint));
+        assert_ne!(
+            account_scope_hash(&"b".repeat(64), "fixture-account-secret").unwrap(),
+            fingerprint
+        );
+        assert!(account_scope_hash(&archive_id, "bad id with spaces").is_none());
+        assert!(account_scope_hash(&archive_id, "").is_none());
+        assert!(account_scope_hash("not-a-valid-archive-id", "fixture-account-secret").is_none());
+    }
+
     #[test]
     fn replay_telemetry_accepts_only_static_public_scope() {
         let directory = tempdir().unwrap();

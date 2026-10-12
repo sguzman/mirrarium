@@ -155,3 +155,10 @@ The isolated Chromium restart fixture uses the archive-local account hash
 reported by offline-index to filter both index and library commands. Rust
 unit tests store two distinct account scopes at the exact same conversation
 URL and verify that scoped metadata and decrypted response bodies agree.
+
+## Account fingerprint privacy acceptance
+
+The raw-store Rust test verifies that transient request account identifiers
+are transformed into archive-salted fingerprints before commit; the original
+header value is redacted, the transient field is never serialized, and the
+same account under a different archive identity receives a different hash.
