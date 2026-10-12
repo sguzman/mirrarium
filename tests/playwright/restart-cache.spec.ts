@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -216,6 +217,19 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
         "/backend-api/conversation/stream-probe"
       ))?.latest_body_bytes;
     }, { timeout: 30_000 }).toBe(streamedLength);
+    const streamedIndex = JSON.parse(await runCli(["cache", "offline-index", "100"])) as
+      Array<{ api_url: string; latest_body_hash: string; latest_body_bytes: number }>;
+    const streamedSnapshot = streamedIndex.find((item) => item.api_url.endsWith(
+      "/backend-api/conversation/stream-probe"
+    ));
+    expect(streamedSnapshot?.latest_body_bytes).toBe(streamedLength);
+    // Match the exact synthetic response, not merely a plausible byte count.
+    const expectedStreamHash = createHash("sha256")
+      .update('{"id":"passive-stream-probe","content":"')
+      .update("x".repeat(17 * 1024 * 1024))
+      .update('"}')
+      .digest("hex");
+    expect(streamedSnapshot?.latest_body_hash).toBe(expectedStreamHash);
 
     await context.close();
     context = null;
@@ -289,7 +303,7 @@ test("persists and reuses captured conversations across Chromium restarts", asyn
       without_completed_snapshots: number;
       max_completed_snapshot_bytes: number;
     };
-    expect(gaps.response_capture_ceiling_bytes).toBe(16 * 1024 * 1024);
+    expect(gaps.response_capture_ceiling_bytes).toBe(32 * 1024 * 1024);
     expect(gaps.observed_conversation_scopes).toBeGreaterThan(0);
     expect(gaps.with_completed_snapshots).toBeGreaterThan(0);
     expect(JSON.stringify(gaps)).not.toContain("private corpus material");
