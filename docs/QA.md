@@ -87,3 +87,13 @@ Any future live-site suite must be separately named, opt-in, and still use an is
 Codex is expected to iterate against the Playwright/Chromium harness and deterministic fixtures. It should be able to break, reset, and recreate that environment freely.
 
 If a test requires touching the personal Edge environment, the test design is wrong.
+
+## Deployment doctor acceptance
+
+The isolated Chromium browser-restart test exercises `mirrarium doctor chrome-for-testing`
+with a missing installation, installed extension/native host, a deliberately
+forged native-host `allowed_origins` entry, and an encrypted archive with
+persisted private captures after a complete browser shutdown. The diagnostic
+must never claim a live browser is verified; it does not inspect the user's
+real browser profile, create an empty ledger, or print private conversation
+content. Separate real-session acceptance remains outstanding.
