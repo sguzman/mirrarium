@@ -153,6 +153,10 @@ type PassiveConversationCapture = {
   nextSequence: number;
   pending: string[];
   pendingBytes: number;
+  // Bounded reusable scratch buffer coalesces frequent CDP dataReceived
+  // events into fewer Native Messaging messages (<128 unacknowledged).
+  chunkBuffer: Uint8Array;
+  chunkLength: number;
   error?: string;
 };
 const passiveConversations = new Map<string, PassiveConversationCapture>();
@@ -2326,6 +2330,18 @@ function isPassiveConversationCandidate(
   }
 }
 
+function flushPassiveConversationChunk(state: PassiveConversationCapture): void {
+  if (state.error || state.chunkLength === 0) return;
+  postNative({
+    type: "capture_chunk",
+    capture_id: state.captureId,
+    sequence: state.nextSequence,
+    data_base64: bytesToBase64(state.chunkBuffer.subarray(0, state.chunkLength)),
+  });
+  state.nextSequence += 1;
+  state.chunkLength = 0;
+}
+
 function emitPassiveConversationChunk(
   state: PassiveConversationCapture,
   base64: string,
@@ -2340,17 +2356,34 @@ function emitPassiveConversationChunk(
     state.error = "suppressed:response_body_too_large";
     return;
   }
-  const chunkSize = BASE64_CHUNK_CHARS - (BASE64_CHUNK_CHARS % 4);
-  for (let offset = 0; offset < base64.length; offset += chunkSize) {
-    postNative({
-      type: "capture_chunk",
-      capture_id: state.captureId,
-      sequence: state.nextSequence,
-      data_base64: base64.slice(offset, offset + chunkSize),
-    });
-    state.nextSequence += 1;
+  // Network.dataReceived can emit hundreds of tiny chunks. Sending each as
+  // its own Native Messaging call exceeds our bounded progress ACK window.
+  // Decode in fixed-size portions and assemble 384 KiB native messages.
+  const base64SliceLength = BASE64_CHUNK_CHARS - (BASE64_CHUNK_CHARS % 4);
+  try {
+    for (let offset = 0; offset < base64.length; offset += base64SliceLength) {
+      const binary = atob(base64.slice(offset, offset + base64SliceLength));
+      let at = 0;
+      while (at < binary.length) {
+        const take = Math.min(
+          binary.length - at,
+          RAW_CHUNK_BYTES - state.chunkLength,
+        );
+        for (let index = 0; index < take; index += 1) {
+          state.chunkBuffer[state.chunkLength + index] =
+            binary.charCodeAt(at + index);
+        }
+        at += take;
+        state.chunkLength += take;
+        if (state.chunkLength === RAW_CHUNK_BYTES) {
+          flushPassiveConversationChunk(state);
+        }
+      }
+    }
+    state.bytes += length;
+  } catch {
+    state.error = "suppressed:invalid_passive_stream_chunk";
   }
-  state.bytes += length;
 }
 
 function queuePassiveConversationData(
@@ -2391,6 +2424,8 @@ function beginPassiveConversationCapture(
     nextSequence: 0,
     pending: [],
     pendingBytes: 0,
+    chunkBuffer: new Uint8Array(RAW_CHUNK_BYTES),
+    chunkLength: 0,
   };
   passiveConversations.set(key, state);
   state.setup = chrome.debugger.sendCommand(
@@ -2429,6 +2464,9 @@ async function captureBody(
     await passive.setup;
     passiveConversations.delete(key);
     if (passive.started) {
+      if (!failure && !passive.error) {
+        flushPassiveConversationChunk(passive);
+      }
       requests.delete(key);
       responses.delete(key);
       eventSourceSequences.delete(key);
