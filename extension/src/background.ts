@@ -150,6 +150,9 @@ const detachingTabs = new Map<number, Promise<void>>();
 const fetchSetupTabs = new Set<number>();
 const requests = new Map<string, RequestMetadata>();
 const responses = new Map<string, ResponseMetadata>();
+// A historical response fulfilled locally is not a fresh network capture.
+// Never feed it back into the raw evidence ledger or validator decisions.
+const locallyFulfilledRequests = new Set<string>();
 type PassiveConversationCapture = {
   captureId: string;
   setup: Promise<void>;
@@ -343,6 +346,9 @@ function clearTabState(tabId: number): void {
 
   for (const key of responses.keys()) {
     if (key.startsWith(prefix)) responses.delete(key);
+  }
+  for (const key of locallyFulfilledRequests) {
+    if (key.startsWith(prefix)) locallyFulfilledRequests.delete(key);
   }
   for (const key of passiveConversations.keys()) {
     if (key.startsWith(prefix)) passiveConversations.delete(key);
@@ -1288,6 +1294,7 @@ async function serveExplicitOfflineConversation(
   tabId: number,
   event: {
     requestId: string;
+    networkId?: string;
     request: { method: string; url: string; headers?: Record<string, string> };
   },
 ): Promise<void> {
@@ -1312,6 +1319,9 @@ async function serveExplicitOfflineConversation(
       ],
       body: hit.bodyBase64,
     });
+    if (event.networkId) {
+      locallyFulfilledRequests.add(requestKey(tabId, event.networkId));
+    }
   } catch {
     // Browser must keep normal network behavior when replay fails.
     await continuePausedRequest(tabId, event.requestId);
@@ -1322,6 +1332,7 @@ async function handlePausedRequest(
   tabId: number,
   event: {
     requestId: string;
+    networkId?: string;
     resourceType?: string;
     responseStatusCode?: number;
     responseErrorReason?: string;
@@ -2542,6 +2553,16 @@ async function captureBody(
   if (!attachedTabs.has(tabId)) return;
 
   const key = requestKey(tabId, requestId);
+  if (locallyFulfilledRequests.delete(key)) {
+    // This was sourced from a historical local response, not ChatGPT.
+    // Leave all previous verified origin captures untouched.
+    requests.delete(key);
+    responses.delete(key);
+    passiveConversations.delete(key);
+    eventSourceSequences.delete(key);
+    pendingEventSourceLastEventIds.delete(key);
+    return;
+  }
   const passive = passiveConversations.get(key);
   if (passive) {
     await passive.setup;
@@ -2738,6 +2759,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     if (!attachedTabs.has(tabId) && !fetchSetupTabs.has(tabId)) return;
     const event = params as {
       requestId: string;
+      networkId?: string;
       resourceType?: string;
       responseStatusCode?: number;
       responseErrorReason?: string;
@@ -2961,7 +2983,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       response: CdpResponse;
     };
     const response = responseMetadataFromCdp(event.response, event.type);
-    responses.set(requestKey(tabId, event.requestId), response);
+    const key = requestKey(tabId, event.requestId);
+    if (header(event.response.headers, "X-Mirrarium-Offline") === "historical") {
+      locallyFulfilledRequests.add(key);
+      return;
+    }
+    responses.set(key, response);
     const request = requests.get(requestKey(tabId, event.requestId));
     if (isPassiveConversationCandidate(request, response)) {
       beginPassiveConversationCapture(tabId, event.requestId, request, response);
