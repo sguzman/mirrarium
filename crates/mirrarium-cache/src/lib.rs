@@ -149,6 +149,7 @@ pub struct OfflineConversationIndexEntry {
     pub latest_captured_at_ms: u64,
     pub latest_body_hash: String,
     pub latest_body_bytes: u64,
+    pub account_scope_hash: Option<String>,
     pub capture_count: u64,
 }
 
@@ -159,6 +160,15 @@ pub fn offline_index(
     raw_root: impl AsRef<Path>,
     limit: u64,
 ) -> Result<Vec<OfflineConversationIndexEntry>> {
+    offline_index_scoped(raw_root, limit, None)
+}
+
+pub fn offline_index_scoped(
+    raw_root: impl AsRef<Path>,
+    limit: u64,
+    account_scope: Option<&str>,
+) -> Result<Vec<OfflineConversationIndexEntry>> {
+    validate_offline_scope(account_scope)?;
     anyhow::ensure!(
         (1..=1000).contains(&limit),
         "offline-index limit must be between 1 and 1000"
@@ -168,9 +178,11 @@ pub fn offline_index(
         r#"
         SELECT
             capture_id, url, captured_at_ms, body_hash, body_bytes,
+            json_extract(provenance_json, '$.account_scope_hash'),
             COUNT(*) OVER (PARTITION BY url) AS capture_count
         FROM captures
         WHERE privacy_class = 'private'
+          AND (?1 IS NULL OR json_extract(provenance_json, '$.account_scope_hash') = ?1)
           AND lower(method) = 'get'
           AND status = 200
           AND lower(resource_type) IN ('fetch', 'xhr')
@@ -184,20 +196,21 @@ pub fn offline_index(
         ORDER BY captured_at_ms DESC, rowid DESC
         "#,
     )?;
-    let rows = statement.query_map([], |row| {
+    let rows = statement.query_map([account_scope], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
             row.get::<_, String>(3)?,
             row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, i64>(6)?,
         ))
     })?;
     let mut seen = BTreeSet::new();
     let mut result = Vec::new();
     for row in rows {
-        let (capture_id, raw_url, timestamp, body_hash, body_bytes, capture_count) = row?;
+        let (capture_id, raw_url, timestamp, body_hash, body_bytes, account_scope_hash, capture_count) = row?;
         let Some(api_url) = offline_conversation_url(&raw_url) else {
             continue;
         };
@@ -227,6 +240,7 @@ pub fn offline_index(
             latest_captured_at_ms: timestamp,
             latest_body_hash: body_hash,
             latest_body_bytes: body_bytes,
+            account_scope_hash,
             capture_count,
         });
         if result.len() >= limit as usize {
@@ -254,6 +268,15 @@ pub fn offline_conversation(
     raw_root: impl AsRef<Path>,
     raw_url: &str,
 ) -> Result<Option<OfflineConversation>> {
+    offline_conversation_scoped(raw_root, raw_url, None)
+}
+
+pub fn offline_conversation_scoped(
+    raw_root: impl AsRef<Path>,
+    raw_url: &str,
+    account_scope: Option<&str>,
+) -> Result<Option<OfflineConversation>> {
+    validate_offline_scope(account_scope)?;
     let Some(url) = offline_conversation_url(raw_url) else {
         return Ok(None);
     };
@@ -265,6 +288,7 @@ pub fn offline_conversation(
             SELECT capture_id, captured_at_ms, body_hash, body_bytes
             FROM captures
             WHERE url = ?1
+              AND (?2 IS NULL OR json_extract(provenance_json, '$.account_scope_hash') = ?2)
               AND privacy_class = 'private'
               AND lower(method) = 'get'
               AND status = 200
@@ -275,7 +299,7 @@ pub fn offline_conversation(
             ORDER BY captured_at_ms DESC, rowid DESC
             LIMIT 1
             "#,
-            [url.as_str()],
+            rusqlite::params![url.as_str(), account_scope],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -330,6 +354,16 @@ pub fn offline_conversation(
         body_bytes,
         body,
     }))
+}
+
+fn validate_offline_scope(account_scope: Option<&str>) -> Result<()> {
+    if let Some(hash) = account_scope {
+        anyhow::ensure!(
+            hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "offline account scope must be a lowercase 64-character SHA-256 fingerprint"
+        );
+    }
+    Ok(())
 }
 
 fn offline_conversation_url(raw_url: &str) -> Option<Url> {
@@ -2419,6 +2453,36 @@ mod tests {
         assert_eq!(hit.captured_at_ms, 2);
         assert_eq!(hit.body_bytes, second_body.len() as u64);
         assert_eq!(hit.body_hash, format!("{:x}", Sha256::digest(second_body)));
+
+        // Exact same URL under two distinct historical account scopes.
+        scope_capture(&connection, "offline-0", "account-one");
+        scope_capture(&connection, "offline-1", "account-two");
+        let first_scope = mirrarium_store::account_scope_hash(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "account-one",
+        ).unwrap();
+        let second_scope = mirrarium_store::account_scope_hash(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "account-two",
+        ).unwrap();
+        let first = offline_conversation_scoped(directory.path(), url, Some(&first_scope))
+            .unwrap().unwrap();
+        assert_eq!(first.body, first_body);
+        assert_eq!(first.capture_id, "offline-0");
+        let second = offline_conversation_scoped(directory.path(), url, Some(&second_scope))
+            .unwrap().unwrap();
+        assert_eq!(second.body, second_body);
+        assert!(offline_conversation_scoped(
+            directory.path(), url, Some(&"f".repeat(64))
+        ).unwrap().is_none());
+        let first_index = offline_index_scoped(directory.path(), 20, Some(&first_scope)).unwrap();
+        assert_eq!(first_index.len(), 1);
+        assert_eq!(first_index[0].latest_capture_id, "offline-0");
+        assert_eq!(first_index[0].account_scope_hash.as_deref(), Some(first_scope.as_str()));
+        let second_index = offline_index_scoped(directory.path(), 20, Some(&second_scope)).unwrap();
+        assert_eq!(second_index[0].latest_capture_id, "offline-1");
+        assert_eq!(second_index[0].account_scope_hash.as_deref(), Some(second_scope.as_str()));
+        assert!(offline_index_scoped(directory.path(), 20, Some("bad")).is_err());
 
         let ordinary_link = "https://chatgpt.com:43117/c/synthetic";
         let by_link = offline_conversation(directory.path(), ordinary_link)
