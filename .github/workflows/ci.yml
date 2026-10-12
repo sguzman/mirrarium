@@ -34,6 +34,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mirrarium-ci
+          cache-on-failure: false
+
       - name: Install JavaScript dependencies
         run: pnpm install --no-frozen-lockfile
 
