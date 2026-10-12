@@ -185,3 +185,12 @@ incomplete observations, and missing usable snapshots using only raw-ledger
 metadata. Synthetic Chromium acceptance checks the current 16 MiB ceiling
 and ensures the diagnostic makes no network request or plaintext export.
 The audit does not assert that a raw body candidate passed CAS verification.
+
+## Bounded-memory UTF-8 capture acceptance
+
+The extension's shared `encodeUtf8Chunks` generator supplies request and
+response Native Messaging chunks using a bounded scratch buffer. Playwright
+unit-level tests compare its output to `TextEncoder.encode` for two-megabyte
+ASCII strings, multibyte text, surrogate pairs at input-window boundaries,
+unpaired surrogates, minimal chunk capacities, and invalid capacities.
+The existing Chromium smoke suite continues testing complete captures.

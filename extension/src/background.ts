@@ -1,3 +1,5 @@
+import { encodeUtf8Chunks } from "./utf8Chunks.js";
+
 const NATIVE_HOST = "com.sguzman.mirrarium";
 const CDP_VERSION = "1.3";
 const BASE64_CHUNK_CHARS = 512 * 1024;
@@ -1769,15 +1771,13 @@ function sanitizeRequestBody(
 }
 
 function postRequestUtf8Body(captureId: string, body: string): void {
-  const bytes = new TextEncoder().encode(body);
   let sequence = 0;
-
-  for (let offset = 0; offset < bytes.length; offset += RAW_CHUNK_BYTES) {
+  for (const chunk of encodeUtf8Chunks(body, RAW_CHUNK_BYTES)) {
     postNative({
       type: "request_body_chunk",
       capture_id: captureId,
       sequence,
-      data_base64: bytesToBase64(bytes.subarray(offset, offset + RAW_CHUNK_BYTES)),
+      data_base64: bytesToBase64(chunk),
     });
     sequence += 1;
   }
@@ -1969,15 +1969,13 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 function postUtf8Body(captureId: string, body: string): void {
-  const bytes = new TextEncoder().encode(body);
   let sequence = 0;
-
-  for (let offset = 0; offset < bytes.length; offset += RAW_CHUNK_BYTES) {
+  for (const chunk of encodeUtf8Chunks(body, RAW_CHUNK_BYTES)) {
     postNative({
       type: "capture_chunk",
       capture_id: captureId,
       sequence,
-      data_base64: bytesToBase64(bytes.subarray(offset, offset + RAW_CHUNK_BYTES)),
+      data_base64: bytesToBase64(chunk),
     });
     sequence += 1;
   }

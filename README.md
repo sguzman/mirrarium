@@ -316,7 +316,23 @@ under more than one ChatGPT account, and it never changes live-site replay.
 The library remains a historical snapshot rather than an automatically updated
 offline mirror. **Do not export into public repos or synced/shared folders.**
 
-### Long-conversation capture gaps
+### Bounded-memory UTF-8 capture delivery
+
+When Chromium returns a plain-text response body through CDP, Mirrarium now
+encodes and forwards UTF-8 in bounded chunks, rather than allocating an
+additional response-sized `Uint8Array` with `TextEncoder.encode`. Request
+body delivery uses the same chunker. The implementation respects Unicode
+surrogate pairs at input boundaries; tests compare the reconstructed bytes
+against native `TextEncoder.encode` across multilingual text and multi-
+megabyte responses. Chunked delivery still uses the existing Native Messaging
+sequence, SHA-256 verification, and encrypted archive.
+
+**Remaining constraint:** `Network.getResponseBody` itself yields a whole
+response string, so peak memory is not globally constant and the 16 MiB
+response capture ceiling is unchanged. Capturing larger responses safely
+requires a separate streaming-CDP design, not simply increasing this limit.
+
+## Long-conversation capture gaps
 
 `mirrarium cache offline-gaps` audits captured ChatGPT conversation GET
 responses without reading message text. It counts conversation/account
