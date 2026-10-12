@@ -112,7 +112,7 @@ add a background browser replay mode.
 ## Offline index acceptance
 
 The Chromium browser-restart fixture now enumerates the captured
-conversation metadata after shutdown, checks a normal \`/c/<id>\` selector
+conversation metadata after shutdown, checks a normal `/c/<id>` selector
 against explicit readback, verifies it performs no origin requests, confirms
 that response-body text is absent, and checks the limit boundary. Rust tests
 cover latest-first ordering, duplicate observations, cross-origin URL
